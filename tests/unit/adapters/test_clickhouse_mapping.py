@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from clickhouse_connect.driver.asyncclient import AsyncClient
+from clickhouse_connect.driver.binding import bind_query
 
 from open_quant.adapters.clickhouse import ClickHouseMinuteBarRepository
 from open_quant.data.models import MinuteBarRevision
@@ -143,6 +144,38 @@ async def test_append_rejects_duplicate_rows_in_one_batch_without_contacting_cli
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("updates", "field"),
+    [
+        ({"open_price": "10.1234567"}, "open_price"),
+        ({"high_price": "10.2234567"}, "high_price"),
+        ({"low_price": "10.0234567"}, "low_price"),
+        ({"close_price": "10.1734567"}, "close_price"),
+        ({"turnover": "12567.89012"}, "turnover"),
+        ({"turnover": "100000000000000000000"}, "turnover"),
+        (
+            {
+                "open_price": "100000000000000",
+                "high_price": "100000000000001",
+                "low_price": "99999999999999",
+                "close_price": "100000000000000",
+            },
+            "open_price",
+        ),
+    ],
+)
+async def test_append_rejects_decimals_not_exactly_representable_by_schema(
+    updates: dict[str, object], field: str
+) -> None:
+    client = RecordingClient()
+
+    with pytest.raises(ValueError, match=field):
+        await repository(client).append((make_revision(**updates),))
+
+    client.insert.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_append_fails_closed_on_driver_error_or_short_write() -> None:
     client = RecordingClient()
     client.insert.side_effect = RuntimeError("driver detail")
@@ -208,9 +241,9 @@ async def test_query_binds_all_temporal_and_identity_filters_and_maps_exact_row(
             ),
         ),
     )
-    start = EVENT_TIME - timedelta(minutes=1)
-    end = EVENT_TIME + timedelta(minutes=1)
-    as_of = AVAILABLE_AT + timedelta(seconds=1)
+    start = EVENT_TIME
+    end = EVENT_TIME
+    as_of = AVAILABLE_AT
 
     result = await repository(client).query_as_of(
         ("000001.XSHE", "600000.XSHG"), start, end, as_of
@@ -219,20 +252,32 @@ async def test_query_binds_all_temporal_and_identity_filters_and_maps_exact_row(
     assert result == (revision,)
     call = client.query.await_args
     sql = call.kwargs["query"]
-    assert "available_at <= %(as_of)s" in sql
-    assert "source = %(source)s" in sql
-    assert "instrument IN %(instruments)s" in sql
-    assert "event_time >= %(start)s" in sql
-    assert "event_time <= %(end)s" in sql
+    assert "available_at <= {as_of:DateTime64(6, 'UTC')}" in sql
+    assert "source = {source:String}" in sql
+    assert "instrument IN {instruments:Array(String)}" in sql
+    assert "event_time >= {start:DateTime64(6, 'UTC')}" in sql
+    assert "event_time <= {end:DateTime64(6, 'UTC')}" in sql
     assert "argMax" in sql
-    assert "tuple(available_at, ingested_at" in sql
-    assert call.kwargs["parameters"] == {
+    assert "tuple(available_at, ingested_at, record_id)" in sql
+    parameters = call.kwargs["parameters"]
+    assert parameters == {
         "source": "rqdata",
-        "instruments": ("000001.XSHE", "600000.XSHG"),
-        "start": start,
-        "end": end,
-        "as_of": as_of,
+        "instruments": ["000001.XSHE", "600000.XSHG"],
+        "start_64": start,
+        "end_64": end,
+        "as_of_64": as_of,
     }
+    rendered_sql, bound_parameters = bind_query(sql, parameters)
+    assert rendered_sql == sql
+    assert bound_parameters["param_source"] == "rqdata"
+    assert bound_parameters["param_instruments"] == (
+        "['000001.XSHE', '600000.XSHG']"
+    )
+    assert bound_parameters["param_start"] == start.strftime("%Y-%m-%d %H:%M:%S.%f")
+    assert bound_parameters["param_end"] == end.strftime("%Y-%m-%d %H:%M:%S.%f")
+    assert bound_parameters["param_as_of"] == as_of.strftime(
+        "%Y-%m-%d %H:%M:%S.%f"
+    )
     assert call.kwargs["tz_mode"] == "aware"
 
 

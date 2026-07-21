@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
 
@@ -37,12 +38,14 @@ async def repository() -> AsyncIterator[ClickHouseMinuteBarRepository]:
         .read_text(encoding="utf-8")
         .replace("minute_bar_revisions", table)
     )
-    await client.command(migration)
     try:
+        await client.command(migration)
         yield repo
     finally:
-        await client.command(f"DROP TABLE IF EXISTS {table}")
-        await client.close()
+        try:
+            await client.command(f"DROP TABLE IF EXISTS {table}")
+        finally:
+            await client.close()
 
 
 def revision(
@@ -56,8 +59,8 @@ def revision(
     return MinuteBarRevision.from_values(
         source=source,
         instrument="000001.XSHE",
-        event_time=datetime(2026, 7, 20, 1, 31, tzinfo=UTC),
-        published_at=datetime(2026, 7, 20, 1, 31, 2, tzinfo=UTC),
+        event_time=datetime(2026, 7, 20, 1, 31, 0, 123456, tzinfo=UTC),
+        published_at=datetime(2026, 7, 20, 1, 31, 0, 234567, tzinfo=UTC),
         available_at=available_at,
         ingested_at=ingested_at,
         source_revision=source_revision,
@@ -77,15 +80,15 @@ async def test_as_of_returns_original_before_correction_and_correction_afterward
 ) -> None:
     original = revision(
         source=repository.source,
-        available_at=datetime(2026, 7, 20, 1, 31, 5, tzinfo=UTC),
-        ingested_at=datetime(2026, 7, 20, 2, 0, tzinfo=UTC),
+        available_at=datetime(2026, 7, 20, 1, 31, 0, 345678, tzinfo=UTC),
+        ingested_at=datetime(2026, 7, 20, 2, 0, 0, 456789, tzinfo=UTC),
         source_revision="initial",
         close_price="10.100001",
     )
     correction = revision(
         source=repository.source,
-        available_at=datetime(2026, 7, 20, 3, 0, tzinfo=UTC),
-        ingested_at=datetime(2026, 7, 20, 3, 1, tzinfo=UTC),
+        available_at=datetime(2026, 7, 20, 1, 31, 0, 345679, tzinfo=UTC),
+        ingested_at=datetime(2026, 7, 20, 2, 0, 0, 456790, tzinfo=UTC),
         source_revision="corrected",
         close_price="10.150001",
     )
@@ -95,14 +98,52 @@ async def test_as_of_returns_original_before_correction_and_correction_afterward
         (original.instrument,),
         original.event_time,
         original.event_time,
-        datetime(2026, 7, 20, 2, 30, tzinfo=UTC),
+        original.available_at,
     )
     after = await repository.query_as_of(
         (original.instrument,),
         original.event_time,
         original.event_time,
-        datetime(2026, 7, 20, 3, 30, tzinfo=UTC),
+        correction.available_at,
     )
 
     assert before == (original,)
     assert after == (correction,)
+    assert before[0].open_price == Decimal("10.000001")
+    assert before[0].high_price == Decimal("10.200001")
+    assert before[0].low_price == Decimal("9.900001")
+    assert before[0].close_price == Decimal("10.100001")
+    assert before[0].turnover == Decimal("10050.0001")
+
+
+@pytest.mark.asyncio
+async def test_equal_visibility_times_use_stable_record_identity_as_tie_breaker(
+    repository: ClickHouseMinuteBarRepository,
+) -> None:
+    available_at = datetime(2026, 7, 20, 1, 31, 0, 345678, tzinfo=UTC)
+    ingested_at = datetime(2026, 7, 20, 2, 0, 0, 456789, tzinfo=UTC)
+    first = revision(
+        source=repository.source,
+        available_at=available_at,
+        ingested_at=ingested_at,
+        source_revision="same-time-a",
+        close_price="10.100001",
+    )
+    second = revision(
+        source=repository.source,
+        available_at=available_at,
+        ingested_at=ingested_at,
+        source_revision="same-time-b",
+        close_price="10.150001",
+    )
+    assert await repository.append((second, first)) == 2
+
+    first_result = await repository.query_as_of(
+        (first.instrument,), first.event_time, first.event_time, available_at
+    )
+    second_result = await repository.query_as_of(
+        (first.instrument,), first.event_time, first.event_time, available_at
+    )
+
+    assert first_result in ((first,), (second,))
+    assert second_result == first_result

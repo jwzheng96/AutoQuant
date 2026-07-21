@@ -39,6 +39,7 @@ _INSERT_COLUMNS = (
     "content_hash",
 )
 _RESULT_COLUMNS = _INSERT_COLUMNS[1:]
+_PRICE_FIELDS = ("open_price", "high_price", "low_price", "close_price")
 
 
 class ClickHouseMinuteBarRepository:
@@ -95,6 +96,7 @@ class ClickHouseMinuteBarRepository:
                 raise TypeError("records must contain MinuteBarRevision values")
             if record.source != self._source:
                 raise ValueError("record source does not match repository source")
+            self._validate_record_decimals(record)
             record_id = self._record_id(record)
             if record_id in identities:
                 raise ValueError("duplicate minute-bar revision in append batch")
@@ -144,10 +146,10 @@ class ClickHouseMinuteBarRepository:
 
         parameters: dict[str, Any] = {
             "source": self._source,
-            "instruments": instruments,
-            "start": start_utc,
-            "end": end_utc,
-            "as_of": as_of_utc,
+            "instruments": list(instruments),
+            "start_64": start_utc,
+            "end_64": end_utc,
+            "as_of_64": as_of_utc,
         }
         try:
             result = await self._client.query(
@@ -178,6 +180,48 @@ class ClickHouseMinuteBarRepository:
     def _record_id(record: MinuteBarRevision) -> UUID:
         ingestion = record.ingested_at.isoformat(timespec="microseconds")
         return uuid5(_RECORD_NAMESPACE, f"{record.content_hash}:{ingestion}")
+
+    @classmethod
+    def _validate_record_decimals(cls, record: MinuteBarRevision) -> None:
+        for field in _PRICE_FIELDS:
+            cls._require_exact_decimal(
+                getattr(record, field),
+                name=field,
+                precision=20,
+                scale=6,
+            )
+        cls._require_exact_decimal(
+            record.turnover,
+            name="turnover",
+            precision=24,
+            scale=4,
+        )
+
+    @staticmethod
+    def _require_exact_decimal(
+        value: Decimal,
+        *,
+        name: str,
+        precision: int,
+        scale: int,
+    ) -> None:
+        components = value.as_tuple()
+        exponent = components.exponent
+        if not isinstance(exponent, int):
+            raise ValueError(f"{name} must be finite")
+        digits = list(components.digits)
+        while digits and digits[-1] == 0:
+            digits.pop()
+            exponent += 1
+        while digits and digits[0] == 0:
+            digits.pop(0)
+        if not digits:
+            return
+        scaled_digits = len(digits) + exponent + scale
+        if exponent < -scale or scaled_digits > precision:
+            raise ValueError(
+                f"{name} is not exactly representable as Decimal({precision}, {scale})"
+            )
 
     @staticmethod
     def _insert_row(record_id: UUID, record: MinuteBarRevision) -> tuple[Any, ...]:
@@ -242,11 +286,11 @@ FROM
             tuple(available_at, ingested_at, record_id)
         ) AS latest
     FROM {self._table}
-    WHERE source = %(source)s
-      AND instrument IN %(instruments)s
-      AND event_time >= %(start)s
-      AND event_time <= %(end)s
-      AND available_at <= %(as_of)s
+    WHERE source = {{source:String}}
+      AND instrument IN {{instruments:Array(String)}}
+      AND event_time >= {{start:DateTime64(6, 'UTC')}}
+      AND event_time <= {{end:DateTime64(6, 'UTC')}}
+      AND available_at <= {{as_of:DateTime64(6, 'UTC')}}
     GROUP BY source, instrument, event_time
 )
 ORDER BY instrument, event_time, source
