@@ -1,0 +1,16 @@
+.env
+.env.*
+!.env.example
+.superpowers/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+__pycache__/
+*.py[cod]
+.venv/
+dist/
+build/
+coverage.xml
+.coverage
+htmlcov/
+
