@@ -304,6 +304,11 @@ class CoverageBatch:
             raise TypeError("source_evidence must contain SourceEvidence values")
         if not source_evidence:
             raise ValueError("source_evidence cannot be empty")
+        if any(
+            item.method not in {"get_trading_periods", "is_suspended"}
+            for item in source_evidence
+        ):
+            raise ValueError("source_evidence method must be a coverage API method")
 
         periods = self.coverage.periods
         suspensions = self.coverage.suspensions

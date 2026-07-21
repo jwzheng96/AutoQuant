@@ -468,6 +468,34 @@ def test_coverage_batch_rejects_evidence_for_an_unrepresented_source() -> None:
         CoverageBatch(coverage=coverage, source_evidence=(*evidence, unrelated))
 
 
+def test_empty_coverage_rejects_get_price_evidence() -> None:
+    evidence = make_source_evidence(method="get_price")
+    with pytest.raises(ValueError, match="method"):
+        CoverageBatch(
+            coverage=MarketCoverageEvidence(periods=(), suspensions=()),
+            source_evidence=(evidence,),
+        )
+
+
+@pytest.mark.parametrize(
+    "methods",
+    [
+        ("get_trading_periods",),
+        ("is_suspended",),
+        ("get_trading_periods", "is_suspended"),
+    ],
+)
+def test_empty_coverage_accepts_coverage_api_evidence(methods: tuple[str, ...]) -> None:
+    evidence = tuple(
+        make_source_evidence(method.encode(), method=method) for method in methods
+    )
+    batch = CoverageBatch(
+        coverage=MarketCoverageEvidence(periods=(), suspensions=()),
+        source_evidence=evidence,
+    )
+    assert batch.source_evidence == evidence
+
+
 def manifest_values() -> dict[str, object]:
     return {
         "source": "rqdata",
