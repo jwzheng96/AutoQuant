@@ -6,16 +6,35 @@ import string
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
+from itertools import pairwise
 from typing import Any
 
 from open_quant.clock import to_utc
 
 
 def _decimal_text(value: Decimal) -> str:
-    normalized = value.normalize()
-    if normalized == 0:
+    components = value.as_tuple()
+    exponent = components.exponent
+    if not isinstance(exponent, int):
+        raise ValueError("decimal values must be finite")
+
+    digits = list(components.digits)
+    if not any(digits):
         return "0"
-    return format(normalized, "f")
+    while digits[-1] == 0:
+        digits.pop()
+        exponent += 1
+
+    coefficient = "".join(str(digit) for digit in digits)
+    if exponent >= 0:
+        text = coefficient + ("0" * exponent)
+    else:
+        decimal_position = len(coefficient) + exponent
+        if decimal_position > 0:
+            text = f"{coefficient[:decimal_position]}.{coefficient[decimal_position:]}"
+        else:
+            text = f"0.{('0' * -decimal_position)}{coefficient}"
+    return f"-{text}" if components.sign else text
 
 
 def _datetime_text(value: datetime) -> str:
@@ -30,6 +49,20 @@ def _canonical_hash(payload: dict[str, Any]) -> str:
         separators=(",", ":"),
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _require_nonblank(value: str, *, name: str) -> None:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{name} cannot be empty")
+
+
+def _require_lowercase_sha256(value: str, *, name: str = "response_hash") -> None:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ValueError(f"{name} must be a lowercase SHA-256 hash")
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,12 +182,23 @@ class TradingPeriod:
     response_hash: str
 
     def __post_init__(self) -> None:
+        _require_nonblank(self.source, name="source")
+        _require_nonblank(self.instrument, name="instrument")
+        minute_ends = tuple(
+            to_utc(value, name="minute_end") for value in self.minute_ends
+        )
         object.__setattr__(
             self,
             "minute_ends",
-            tuple(to_utc(value, name="minute_end") for value in self.minute_ends),
+            minute_ends,
         )
         object.__setattr__(self, "available_at", to_utc(self.available_at, name="available_at"))
+        if not minute_ends or any(
+            current >= following
+            for current, following in pairwise(minute_ends)
+        ):
+            raise ValueError("minute_ends must be nonempty, strictly ordered, and unique")
+        _require_lowercase_sha256(self.response_hash)
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,7 +211,10 @@ class SuspensionStatus:
     response_hash: str
 
     def __post_init__(self) -> None:
+        _require_nonblank(self.source, name="source")
+        _require_nonblank(self.instrument, name="instrument")
         object.__setattr__(self, "available_at", to_utc(self.available_at, name="available_at"))
+        _require_lowercase_sha256(self.response_hash)
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,8 +223,16 @@ class MarketCoverageEvidence:
     suspensions: tuple[SuspensionStatus, ...]
 
     def __post_init__(self) -> None:
-        self._reject_conflicts(self.periods)
-        self._reject_conflicts(self.suspensions)
+        periods = tuple(self.periods)
+        suspensions = tuple(self.suspensions)
+        object.__setattr__(self, "periods", periods)
+        object.__setattr__(self, "suspensions", suspensions)
+        if any(not isinstance(item, TradingPeriod) for item in periods):
+            raise TypeError("periods must contain TradingPeriod values")
+        if any(not isinstance(item, SuspensionStatus) for item in suspensions):
+            raise TypeError("suspensions must contain SuspensionStatus values")
+        self._reject_conflicts(periods)
+        self._reject_conflicts(suspensions)
 
     @staticmethod
     def _reject_conflicts(
@@ -200,7 +255,14 @@ class SourceEvidence:
     response_hash: str
 
     def __post_init__(self) -> None:
+        _require_nonblank(self.source, name="source")
+        _require_nonblank(self.method, name="method")
         object.__setattr__(self, "requested_at", to_utc(self.requested_at, name="requested_at"))
+        if not isinstance(self.response_body, bytes):
+            raise TypeError("response_body must be bytes")
+        _require_lowercase_sha256(self.response_hash)
+        if hashlib.sha256(self.response_body).hexdigest() != self.response_hash:
+            raise ValueError("response_hash does not match response_body")
 
 
 @dataclass(frozen=True, slots=True)
@@ -208,11 +270,29 @@ class MinuteBarBatch:
     records: tuple[MinuteBarRevision, ...]
     source_evidence: tuple[SourceEvidence, ...]
 
+    def __post_init__(self) -> None:
+        records = tuple(self.records)
+        source_evidence = tuple(self.source_evidence)
+        object.__setattr__(self, "records", records)
+        object.__setattr__(self, "source_evidence", source_evidence)
+        if any(not isinstance(item, MinuteBarRevision) for item in records):
+            raise TypeError("records must contain MinuteBarRevision values")
+        if any(not isinstance(item, SourceEvidence) for item in source_evidence):
+            raise TypeError("source_evidence must contain SourceEvidence values")
+
 
 @dataclass(frozen=True, slots=True)
 class CoverageBatch:
     coverage: MarketCoverageEvidence
     source_evidence: tuple[SourceEvidence, ...]
+
+    def __post_init__(self) -> None:
+        source_evidence = tuple(self.source_evidence)
+        object.__setattr__(self, "source_evidence", source_evidence)
+        if not isinstance(self.coverage, MarketCoverageEvidence):
+            raise TypeError("coverage must be MarketCoverageEvidence")
+        if any(not isinstance(item, SourceEvidence) for item in source_evidence):
+            raise TypeError("source_evidence must contain SourceEvidence values")
 
 
 @dataclass(frozen=True, slots=True)
@@ -229,6 +309,10 @@ class DatasetManifest:
     manifest_hash: str = field(init=False)
 
     def __post_init__(self) -> None:
+        instruments = tuple(self.instruments)
+        record_hashes = tuple(self.record_hashes)
+        object.__setattr__(self, "instruments", instruments)
+        object.__setattr__(self, "record_hashes", record_hashes)
         start_time = to_utc(self.start_time, name="start_time")
         end_time = to_utc(self.end_time, name="end_time")
         as_of = to_utc(self.as_of, name="as_of")
@@ -238,7 +322,7 @@ class DatasetManifest:
 
         if not self.source.strip():
             raise ValueError("source cannot be empty")
-        if not self.instruments or any(not instrument.strip() for instrument in self.instruments):
+        if not instruments or any(not instrument.strip() for instrument in instruments):
             raise ValueError("instruments cannot be empty")
         if start_time > end_time:
             raise ValueError("start_time cannot follow end_time")
@@ -246,16 +330,14 @@ class DatasetManifest:
             raise ValueError("as_of cannot precede end_time")
         if self.row_count < 0:
             raise ValueError("row_count cannot be negative")
-        if self.row_count != len(self.record_hashes):
+        if self.row_count != len(record_hashes):
             raise ValueError("row_count must match record_hashes")
         if any(
             len(record_hash) != 64 or any(char not in string.hexdigits for char in record_hash)
-            for record_hash in self.record_hashes
+            for record_hash in record_hashes
         ):
             raise ValueError("record_hashes must contain 64-character hexadecimal hashes")
-        if len({record_hash.lower() for record_hash in self.record_hashes}) != len(
-            self.record_hashes
-        ):
+        if len({record_hash.lower() for record_hash in record_hashes}) != len(record_hashes):
             raise ValueError("record_hashes must be unique")
         if self.production_complete and not self.quality_report_hash.strip():
             raise ValueError("quality_report_hash is required for a production-complete manifest")

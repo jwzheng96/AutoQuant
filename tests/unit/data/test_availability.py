@@ -66,3 +66,15 @@ def test_policies_reject_naive_datetimes() -> None:
         HistoricalMinutePolicy(
             version="rqdata-minute-v1", delay=timedelta(seconds=5)
         ).assign(bar_end=datetime(2026, 7, 20, 1, 31))
+
+
+@pytest.mark.parametrize("version", ["", " ", "\t"])
+def test_historical_policy_rejects_blank_version(version: str) -> None:
+    with pytest.raises(ValueError, match="version"):
+        HistoricalMinutePolicy(version=version, delay=timedelta(seconds=5))
+
+
+@pytest.mark.parametrize("delay", [timedelta(0), timedelta(microseconds=-1)])
+def test_historical_policy_requires_positive_delay(delay: timedelta) -> None:
+    with pytest.raises(ValueError, match="delay"):
+        HistoricalMinutePolicy(version="rqdata-minute-v1", delay=delay)

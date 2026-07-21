@@ -1,15 +1,19 @@
+import hashlib
 from dataclasses import FrozenInstanceError
 from datetime import UTC, date, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from zoneinfo import ZoneInfo
 
 import pytest
 
 from open_quant.clock import to_shanghai, to_utc
 from open_quant.data.models import (
+    CoverageBatch,
     DatasetManifest,
     MarketCoverageEvidence,
+    MinuteBarBatch,
     MinuteBarRevision,
+    SourceEvidence,
     SuspensionStatus,
     TradingPeriod,
 )
@@ -68,6 +72,25 @@ def test_content_hash_uses_canonical_decimal_values() -> None:
     first = make_revision(open_price="10", turnover="10050")
     second = make_revision(open_price="10.000", turnover="10050.00")
     assert first.content_hash == second.content_hash
+
+
+def test_content_hash_is_independent_of_decimal_context_precision() -> None:
+    exact_turnover = Decimal("123456789.1234567800")
+    with localcontext() as context:
+        context.prec = 6
+        low_precision = make_revision(turnover=exact_turnover)
+    with localcontext() as context:
+        context.prec = 50
+        high_precision = make_revision(turnover=exact_turnover)
+    assert low_precision.content_hash == high_precision.content_hash
+
+
+def test_distinct_exact_decimals_never_share_content_hash_at_low_precision() -> None:
+    with localcontext() as context:
+        context.prec = 6
+        first = make_revision(turnover=Decimal("123456789.123456780"))
+        second = make_revision(turnover=Decimal("123456789.123456781"))
+    assert first.content_hash != second.content_hash
 
 
 def test_content_hash_excludes_operational_ingestion_time() -> None:
@@ -149,7 +172,7 @@ def test_coverage_rejects_conflicting_periods_for_same_session() -> None:
         session_date=date(2026, 7, 20),
         minute_ends=(datetime(2026, 7, 20, 1, 31, tzinfo=UTC),),
         available_at=available_at,
-        response_hash="a",
+        response_hash="a" * 64,
     )
     conflicting = TradingPeriod(
         source=first.source,
@@ -157,7 +180,7 @@ def test_coverage_rejects_conflicting_periods_for_same_session() -> None:
         session_date=first.session_date,
         minute_ends=(datetime(2026, 7, 20, 1, 32, tzinfo=UTC),),
         available_at=available_at,
-        response_hash="b",
+        response_hash="b" * 64,
     )
     with pytest.raises(ValueError, match="conflicting coverage evidence"):
         MarketCoverageEvidence(periods=(first, conflicting), suspensions=())
@@ -169,9 +192,9 @@ def test_period_and_suspension_are_complementary_for_same_session() -> None:
         source="rqdata",
         instrument="000001.XSHE",
         session_date=date(2026, 7, 20),
-        minute_ends=(),
+        minute_ends=(datetime(2026, 7, 20, 1, 31, tzinfo=UTC),),
         available_at=available_at,
-        response_hash="a",
+        response_hash="a" * 64,
     )
     suspension = SuspensionStatus(
         source=period.source,
@@ -179,11 +202,161 @@ def test_period_and_suspension_are_complementary_for_same_session() -> None:
         session_date=period.session_date,
         suspended=True,
         available_at=available_at,
-        response_hash="b",
+        response_hash="b" * 64,
     )
     coverage = MarketCoverageEvidence(periods=(period,), suspensions=(suspension,))
     assert coverage.periods == (period,)
     assert coverage.suspensions == (suspension,)
+
+
+def make_period(**updates: object) -> TradingPeriod:
+    values: dict[str, object] = {
+        "source": "rqdata",
+        "instrument": "000001.XSHE",
+        "session_date": date(2026, 7, 20),
+        "minute_ends": (
+            datetime(2026, 7, 20, 1, 31, tzinfo=UTC),
+            datetime(2026, 7, 20, 1, 32, tzinfo=UTC),
+        ),
+        "available_at": datetime(2026, 7, 20, 10, tzinfo=UTC),
+        "response_hash": "a" * 64,
+    }
+    values.update(updates)
+    return TradingPeriod(**values)  # type: ignore[arg-type]
+
+
+def make_suspension(**updates: object) -> SuspensionStatus:
+    values: dict[str, object] = {
+        "source": "rqdata",
+        "instrument": "000001.XSHE",
+        "session_date": date(2026, 7, 20),
+        "suspended": False,
+        "available_at": datetime(2026, 7, 20, 10, tzinfo=UTC),
+        "response_hash": "b" * 64,
+    }
+    values.update(updates)
+    return SuspensionStatus(**values)  # type: ignore[arg-type]
+
+
+def make_source_evidence(body: bytes = b"response", **updates: object) -> SourceEvidence:
+    values: dict[str, object] = {
+        "source": "rqdata",
+        "method": "get_price",
+        "requested_at": datetime(2026, 7, 20, 10, tzinfo=UTC),
+        "response_body": body,
+        "response_hash": hashlib.sha256(body).hexdigest(),
+    }
+    values.update(updates)
+    return SourceEvidence(**values)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("field", ["source", "instrument"])
+def test_period_rejects_blank_identity(field: str) -> None:
+    with pytest.raises(ValueError, match=field):
+        make_period(**{field: " "})
+
+
+@pytest.mark.parametrize("field", ["source", "instrument"])
+def test_suspension_rejects_blank_identity(field: str) -> None:
+    with pytest.raises(ValueError, match=field):
+        make_suspension(**{field: " "})
+
+
+@pytest.mark.parametrize(
+    "minute_ends",
+    [
+        (),
+        (
+            datetime(2026, 7, 20, 1, 32, tzinfo=UTC),
+            datetime(2026, 7, 20, 1, 31, tzinfo=UTC),
+        ),
+        (
+            datetime(2026, 7, 20, 1, 31, tzinfo=UTC),
+            datetime(2026, 7, 20, 1, 31, tzinfo=UTC),
+        ),
+    ],
+)
+def test_period_requires_nonempty_strictly_ordered_unique_endpoints(
+    minute_ends: tuple[datetime, ...],
+) -> None:
+    with pytest.raises(ValueError, match="minute_ends"):
+        make_period(minute_ends=minute_ends)
+
+
+@pytest.mark.parametrize(
+    "response_hash",
+    ["a", "A" * 64, "g" * 64],
+)
+def test_coverage_evidence_requires_lowercase_sha256(response_hash: str) -> None:
+    with pytest.raises(ValueError, match="response_hash"):
+        make_period(response_hash=response_hash)
+    with pytest.raises(ValueError, match="response_hash"):
+        make_suspension(response_hash=response_hash)
+
+
+@pytest.mark.parametrize("field", ["source", "method"])
+def test_source_evidence_rejects_blank_identity(field: str) -> None:
+    with pytest.raises(ValueError, match=field):
+        make_source_evidence(**{field: " "})
+
+
+def test_source_evidence_rejects_naive_requested_at() -> None:
+    with pytest.raises(ValueError, match="timezone-aware"):
+        make_source_evidence(requested_at=datetime(2026, 7, 20, 10))
+
+
+@pytest.mark.parametrize("response_hash", ["a", "A" * 64, "g" * 64])
+def test_source_evidence_requires_lowercase_sha256(response_hash: str) -> None:
+    with pytest.raises(ValueError, match="response_hash"):
+        make_source_evidence(response_hash=response_hash)
+
+
+def test_source_evidence_rejects_tampered_body() -> None:
+    with pytest.raises(ValueError, match="response_hash"):
+        make_source_evidence(response_hash=hashlib.sha256(b"different").hexdigest())
+
+
+def test_batches_reject_values_of_the_wrong_evidence_type() -> None:
+    revision = make_revision()
+    evidence = make_source_evidence()
+    coverage = MarketCoverageEvidence(periods=(make_period(),), suspensions=(make_suspension(),))
+    with pytest.raises(TypeError, match="records"):
+        MinuteBarBatch(records=(object(),), source_evidence=(evidence,))  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="source_evidence"):
+        MinuteBarBatch(records=(revision,), source_evidence=(object(),))  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="coverage"):
+        CoverageBatch(coverage=object(), source_evidence=(evidence,))  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="source_evidence"):
+        CoverageBatch(coverage=coverage, source_evidence=(object(),))  # type: ignore[arg-type]
+
+
+def test_coverage_aggregate_detaches_from_input_lists() -> None:
+    period = make_period()
+    suspension = make_suspension()
+    periods = [period]
+    suspensions = [suspension]
+    coverage = MarketCoverageEvidence(periods=periods, suspensions=suspensions)  # type: ignore[arg-type]
+    periods.clear()
+    suspensions.clear()
+    assert coverage.periods == (period,)
+    assert coverage.suspensions == (suspension,)
+
+
+def test_batches_detach_from_input_lists() -> None:
+    revision = make_revision()
+    evidence = make_source_evidence()
+    records = [revision]
+    bar_evidence = [evidence]
+    bar_batch = MinuteBarBatch(records=records, source_evidence=bar_evidence)  # type: ignore[arg-type]
+    coverage = MarketCoverageEvidence(periods=(make_period(),), suspensions=(make_suspension(),))
+    coverage_evidence = [evidence]
+    coverage_batch = CoverageBatch(coverage=coverage, source_evidence=coverage_evidence)  # type: ignore[arg-type]
+    records.clear()
+    bar_evidence.clear()
+    coverage_evidence.clear()
+    assert bar_batch.records == (revision,)
+    assert bar_batch.source_evidence == (evidence,)
+    assert coverage_batch.source_evidence == (evidence,)
 
 
 def manifest_values() -> dict[str, object]:
@@ -212,6 +385,18 @@ def test_manifest_is_immutable_and_hash_is_deterministic() -> None:
     assert first.manifest_hash == second.manifest_hash
     with pytest.raises(FrozenInstanceError):
         first.row_count = 2  # type: ignore[misc]
+
+
+def test_manifest_detaches_sequences_before_hashing() -> None:
+    instruments = ["000001.XSHE"]
+    record_hashes = ["a" * 64]
+    manifest = make_manifest(instruments=instruments, record_hashes=record_hashes)
+    original_hash = manifest.manifest_hash
+    instruments.append("000002.XSHE")
+    record_hashes[0] = "b" * 64
+    assert manifest.instruments == ("000001.XSHE",)
+    assert manifest.record_hashes == ("a" * 64,)
+    assert manifest.manifest_hash == original_hash
 
 
 @pytest.mark.parametrize(

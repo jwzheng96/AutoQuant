@@ -18,6 +18,12 @@ class HistoricalMinutePolicy:
     version: str
     delay: timedelta
 
+    def __post_init__(self) -> None:
+        if not self.version.strip():
+            raise ValueError("version cannot be empty")
+        if self.delay <= timedelta(0):
+            raise ValueError("delay must be positive")
+
     def assign(self, *, bar_end: datetime) -> datetime:
         return to_utc(bar_end, name="bar_end") + self.delay
 
