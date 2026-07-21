@@ -37,6 +37,12 @@ class AppSettings(BaseSettings):
         return self
 
     def require_rqdata(self) -> RqdataCredentials:
-        if not self.rqdata_username or self.rqdata_password is None:
+        password = self.rqdata_password
+        if (
+            not self.rqdata_username
+            or not self.rqdata_username.strip()
+            or password is None
+            or not password.get_secret_value().strip()
+        ):
             raise MissingCapabilityError("RQData credentials are not configured")
-        return RqdataCredentials(username=self.rqdata_username, password=self.rqdata_password)
+        return RqdataCredentials(username=self.rqdata_username, password=password)
