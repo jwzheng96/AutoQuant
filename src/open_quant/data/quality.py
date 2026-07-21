@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
 from enum import StrEnum
 
-from open_quant.clock import to_utc
+from open_quant.clock import SHANGHAI, to_shanghai, to_utc
 from open_quant.data.models import (
     MarketCoverageEvidence,
     MinuteBarRevision,
@@ -129,17 +129,7 @@ class MinuteBarQualityGate:
         coverage: MarketCoverageEvidence,
         as_of: datetime | None = None,
     ) -> QualityReport:
-        normalized_start = to_utc(start, name="start")
-        normalized_end = to_utc(end, name="end")
-        normalized_as_of = (
-            None if as_of is None else to_utc(as_of, name="as_of")
-        )
-        records = tuple(records)
         requested_instruments = tuple(requested_instruments)
-        if any(not isinstance(record, MinuteBarRevision) for record in records):
-            raise TypeError("records must contain MinuteBarRevision values")
-        if not isinstance(coverage, MarketCoverageEvidence):
-            raise TypeError("coverage must be MarketCoverageEvidence")
         if (
             not requested_instruments
             or any(
@@ -148,6 +138,17 @@ class MinuteBarQualityGate:
             )
         ):
             raise ValueError("requested_instruments cannot be empty")
+        requested_instruments = tuple(sorted(set(requested_instruments)))
+        normalized_start = to_utc(start, name="start")
+        normalized_end = to_utc(end, name="end")
+        normalized_as_of = (
+            None if as_of is None else to_utc(as_of, name="as_of")
+        )
+        records = tuple(records)
+        if any(not isinstance(record, MinuteBarRevision) for record in records):
+            raise TypeError("records must contain MinuteBarRevision values")
+        if not isinstance(coverage, MarketCoverageEvidence):
+            raise TypeError("coverage must be MarketCoverageEvidence")
 
         issues: list[QualityIssue] = []
 
@@ -206,7 +207,10 @@ class MinuteBarQualityGate:
             end=normalized_end,
             as_of=normalized_as_of,
             issues=tuple(issues),
-            production_complete=coverage_complete,
+            production_complete=coverage_complete
+            and not any(
+                issue.severity is QualitySeverity.ERROR for issue in issues
+            ),
         )
 
     @staticmethod
@@ -314,7 +318,10 @@ class MinuteBarQualityGate:
             )
 
         coverage_complete = as_of is not None
-        requested_dates = tuple(_dates_between(start.date(), end.date()))
+        requested_dates = _dates_between(
+            to_shanghai(start).date(),
+            to_shanghai(end).date(),
+        )
         in_range_records = tuple(
             record for record in records if start <= record.event_time <= end
         )
@@ -323,10 +330,11 @@ class MinuteBarQualityGate:
         for instrument in requested_instruments:
             for session_date in requested_dates:
                 key = (instrument, session_date)
-                session_time = max(
-                    start,
-                    datetime.combine(session_date, time.min, tzinfo=UTC),
-                )
+                session_time = datetime.combine(
+                    session_date,
+                    time.min,
+                    tzinfo=SHANGHAI,
+                ).astimezone(UTC)
                 period_values = periods[key]
                 suspension_values = suspensions[key]
                 if not period_values or not suspension_values:
@@ -370,7 +378,7 @@ class MinuteBarQualityGate:
                     record
                     for record in in_range_records
                     if record.instrument == instrument
-                    and record.event_time.date() == session_date
+                    and to_shanghai(record.event_time).date() == session_date
                 )
                 if any(record.source != period.source for record in actual_records):
                     add_issue(
@@ -393,7 +401,7 @@ class MinuteBarQualityGate:
                     endpoint
                     for endpoint in period.minute_ends
                     if start <= endpoint <= end
-                    and endpoint.date() == session_date
+                    and to_shanghai(endpoint).date() == session_date
                 }
                 actual_endpoints = {
                     record.event_time for record in actual_records

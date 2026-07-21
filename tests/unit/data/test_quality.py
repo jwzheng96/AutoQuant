@@ -49,6 +49,7 @@ def coverage_for(
     suspended: bool,
     minute_ends: tuple[datetime, ...] | None = None,
     available_at: datetime | None = None,
+    session_date: date = date(2026, 7, 20),
 ) -> MarketCoverageEvidence:
     evidence_available_at = available_at or bar.available_at
     return MarketCoverageEvidence(
@@ -56,7 +57,7 @@ def coverage_for(
             TradingPeriod(
                 source=bar.source,
                 instrument=bar.instrument,
-                session_date=date(2026, 7, 20),
+                session_date=session_date,
                 minute_ends=minute_ends or (bar.event_time,),
                 available_at=evidence_available_at,
                 response_hash="a" * 64,
@@ -66,7 +67,7 @@ def coverage_for(
             SuspensionStatus(
                 source=bar.source,
                 instrument=bar.instrument,
-                session_date=date(2026, 7, 20),
+                session_date=session_date,
                 suspended=suspended,
                 available_at=evidence_available_at,
                 response_hash="b" * 64,
@@ -99,8 +100,9 @@ def issue_codes(report: QualityReport) -> set[str]:
 
 
 def test_duplicate_revision_fails_quality_gate(bar: MinuteBarRevision) -> None:
-    report = evaluate((bar, bar))
+    report = evaluate((bar, bar), as_of=bar.available_at)
     assert report.passed is False
+    assert report.production_complete is False
     assert issue_codes(report) == {"duplicate_revision"}
 
 
@@ -108,8 +110,9 @@ def test_conflicting_ohlc_for_same_source_revision_is_a_schema_error(
     bar: MinuteBarRevision,
 ) -> None:
     conflict = make_bar(close_price="10.06")
-    report = evaluate((bar, conflict))
+    report = evaluate((bar, conflict), as_of=bar.available_at)
     assert report.passed is False
+    assert report.production_complete is False
     assert issue_codes(report) == {"schema_conflict"}
 
 
@@ -205,8 +208,74 @@ def test_missing_expected_bar_and_off_session_bar_are_errors() -> None:
             suspended=False,
             minute_ends=(expected.event_time,),
         ),
+        as_of=off_session.available_at,
     )
     assert report.passed is False
+    assert report.production_complete is False
+    assert {"missing_bar", "off_session_bar"} <= issue_codes(report)
+
+
+def test_shanghai_session_can_start_on_the_previous_utc_date() -> None:
+    event_time = datetime(2026, 7, 19, 16, 31, tzinfo=UTC)
+    bar = make_bar(
+        event_time=event_time,
+        available_at=event_time + timedelta(seconds=5),
+    )
+    report = evaluate(
+        (bar,),
+        start=event_time,
+        end=event_time,
+        coverage=coverage_for(
+            bar,
+            suspended=False,
+            session_date=date(2026, 7, 20),
+        ),
+        as_of=bar.available_at,
+    )
+    assert report.passed is True
+    assert report.production_complete is True
+
+
+def test_suspended_shanghai_session_at_utc_boundary_accepts_empty_records() -> None:
+    event_time = datetime(2026, 7, 19, 16, 31, tzinfo=UTC)
+    evidence_bar = make_bar(
+        event_time=event_time,
+        available_at=event_time + timedelta(seconds=5),
+    )
+    report = evaluate(
+        (),
+        start=event_time,
+        end=event_time,
+        coverage=coverage_for(
+            evidence_bar,
+            suspended=True,
+            session_date=date(2026, 7, 20),
+        ),
+        as_of=evidence_bar.available_at,
+    )
+    assert report.passed is True
+    assert report.production_complete is True
+
+
+def test_previous_utc_date_endpoints_participate_in_shanghai_session_checks() -> None:
+    expected_time = datetime(2026, 7, 19, 16, 31, tzinfo=UTC)
+    actual_time = expected_time + timedelta(minutes=1)
+    off_session = make_bar(
+        event_time=actual_time,
+        available_at=actual_time + timedelta(seconds=5),
+    )
+    report = evaluate(
+        (off_session,),
+        start=expected_time,
+        end=actual_time,
+        coverage=coverage_for(
+            off_session,
+            suspended=False,
+            minute_ends=(expected_time,),
+            session_date=date(2026, 7, 20),
+        ),
+        as_of=off_session.available_at,
+    )
     assert {"missing_bar", "off_session_bar"} <= issue_codes(report)
 
 
@@ -396,6 +465,51 @@ def test_requested_instrument_order_does_not_change_report_hash(
         as_of=bar.available_at,
     )
     assert first.report_hash == second.report_hash
+
+
+def test_requested_instrument_order_does_not_change_invalid_interval_report(
+    bar: MinuteBarRevision,
+) -> None:
+    other_instrument = "600000.XSHG"
+    first = evaluate(
+        (bar,),
+        requested_instruments=(bar.instrument, other_instrument),
+        start=bar.event_time + timedelta(minutes=1),
+        end=bar.event_time,
+    )
+    second = evaluate(
+        (bar,),
+        requested_instruments=(other_instrument, bar.instrument),
+        start=bar.event_time + timedelta(minutes=1),
+        end=bar.event_time,
+    )
+    assert first.issues == second.issues
+    assert first.report_hash == second.report_hash
+
+
+def test_duplicate_requested_instruments_are_normalized_once(
+    bar: MinuteBarRevision,
+) -> None:
+    coverage = coverage_for(
+        bar,
+        suspended=False,
+        minute_ends=(bar.event_time, bar.event_time + timedelta(minutes=1)),
+    )
+    single = evaluate(
+        (bar,),
+        end=bar.event_time + timedelta(minutes=1),
+        coverage=coverage,
+        as_of=bar.available_at,
+    )
+    duplicate = evaluate(
+        (bar,),
+        requested_instruments=(bar.instrument, bar.instrument),
+        end=bar.event_time + timedelta(minutes=1),
+        coverage=coverage,
+        as_of=bar.available_at,
+    )
+    assert duplicate.issues == single.issues
+    assert duplicate.report_hash == single.report_hash
 
 
 @given(trailing_zeroes=st.integers(min_value=0, max_value=12))
