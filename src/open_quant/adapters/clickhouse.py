@@ -52,13 +52,17 @@ class ClickHouseMinuteBarRepository:
         source: str,
         table: str = _DEFAULT_TABLE,
     ) -> None:
+        self._validate_identity(source=source, table=table)
+        self._client = client
+        self._source = source
+        self._table = table
+
+    @staticmethod
+    def _validate_identity(*, source: str, table: str) -> None:
         if not isinstance(source, str) or not source.strip():
             raise ValueError("source cannot be empty")
         if not isinstance(table, str) or _TABLE_IDENTIFIER.fullmatch(table) is None:
             raise ValueError("table must be a safe ClickHouse identifier")
-        self._client = client
-        self._source = source
-        self._table = table
 
     @classmethod
     async def connect(
@@ -71,6 +75,7 @@ class ClickHouseMinuteBarRepository:
         """Create a repository without retaining or exposing the connection DSN."""
         if not isinstance(dsn, str) or not dsn.strip():
             raise ValueError("dsn cannot be empty")
+        cls._validate_identity(source=source, table=table)
         try:
             client = await clickhouse_connect.get_async_client(dsn=dsn, tz_mode="aware")
         except Exception:

@@ -400,6 +400,31 @@ async def test_connect_sanitizes_dsn_and_driver_details() -> None:
     assert "super-secret" not in repr(caught.value)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "connection_args",
+    [
+        {"source": " "},
+        {"source": "rqdata", "table": "minute_bars; DROP TABLE minute_bars"},
+    ],
+)
+async def test_connect_validates_identity_before_opening_client(
+    connection_args: dict[str, str],
+) -> None:
+    factory = AsyncMock()
+    with patch(
+        "open_quant.adapters.clickhouse.clickhouse_connect.get_async_client",
+        new=factory,
+    ):
+        with pytest.raises(ValueError):
+            await ClickHouseMinuteBarRepository.connect(
+                dsn="clickhouse://example.invalid/test",
+                **connection_args,
+            )
+
+    factory.assert_not_awaited()
+
+
 def test_repository_rejects_unsafe_table_identifier() -> None:
     client = RecordingClient()
     with pytest.raises(ValueError, match="table"):
