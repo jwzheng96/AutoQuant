@@ -260,7 +260,7 @@ class RqdataHttpSource:
             if request_failed:
                 raise VendorResponseError("RQData request failed")
 
-            transient = response.status_code == 429 or response.status_code >= 500
+            transient = response.status_code == 429 or 500 <= response.status_code < 600
             if transient and attempt + 1 < _MAX_ATTEMPTS:
                 await asyncio.sleep(_RETRY_BASE_SECONDS * (2**attempt))
                 continue

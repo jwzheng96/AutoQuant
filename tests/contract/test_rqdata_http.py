@@ -209,6 +209,86 @@ async def test_api_retries_only_transient_statuses() -> None:
 
 @pytest.mark.asyncio
 @respx.mock
+async def test_api_retries_599_as_the_upper_5xx_boundary() -> None:
+    mock_json_auth()
+    api = respx.post(API_URL).mock(
+        side_effect=[
+            httpx.Response(599),
+            httpx.Response(200, content=PRICE_CSV),
+        ]
+    )
+    source = make_source()
+    try:
+        batch = await source.fetch_minute_bars(("000001.XSHE",), START, END)
+    finally:
+        await source.close()
+
+    assert batch.records
+    assert len(api.calls) == 2
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_api_does_not_retry_600_outside_the_5xx_range() -> None:
+    mock_json_auth()
+    api = respx.post(API_URL).mock(return_value=httpx.Response(600))
+    source = make_source()
+    try:
+        with pytest.raises(VendorResponseError, match="status 600"):
+            await source.fetch_minute_bars(("000001.XSHE",), START, END)
+    finally:
+        await source.close()
+
+    assert len(api.calls) == 1
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_api_retries_connection_error_then_succeeds() -> None:
+    mock_json_auth()
+    request = httpx.Request("POST", API_URL)
+    api = respx.post(API_URL).mock(
+        side_effect=[
+            httpx.ConnectError("temporary connection failure", request=request),
+            httpx.Response(200, content=PRICE_CSV),
+        ]
+    )
+    source = make_source()
+    try:
+        batch = await source.fetch_minute_bars(("000001.XSHE",), START, END)
+    finally:
+        await source.close()
+
+    assert batch.records
+    assert len(api.calls) == 2
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_api_stops_after_connection_retry_budget_is_exhausted() -> None:
+    mock_json_auth()
+    request = httpx.Request("POST", API_URL)
+    api = respx.post(API_URL).mock(
+        side_effect=[
+            httpx.ConnectError("first connection failure", request=request),
+            httpx.ConnectError("second connection failure", request=request),
+            httpx.ConnectError("third connection failure", request=request),
+        ]
+    )
+    source = make_source()
+    try:
+        with pytest.raises(VendorResponseError) as captured:
+            await source.fetch_minute_bars(("000001.XSHE",), START, END)
+    finally:
+        await source.close()
+
+    assert str(captured.value) == "RQData connection failed after retries"
+    assert captured.value.__cause__ is None
+    assert len(api.calls) == 3
+
+
+@pytest.mark.asyncio
+@respx.mock
 async def test_api_does_not_retry_or_expose_non_connection_transport_errors() -> None:
     mock_json_auth()
     request = httpx.Request("POST", API_URL)
