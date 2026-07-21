@@ -58,6 +58,8 @@ class QualityReport:
     report_hash: str = field(init=False)
 
     def __post_init__(self) -> None:
+        if type(self.production_complete) is not bool:
+            raise TypeError("production_complete must be a bool")
         requested_instruments = tuple(self.requested_instruments)
         if (
             not requested_instruments
@@ -90,7 +92,11 @@ class QualityReport:
         passed = not any(
             issue.severity is QualitySeverity.ERROR for issue in issues
         )
+        production_complete = (
+            self.production_complete and passed and as_of is not None
+        )
         object.__setattr__(self, "passed", passed)
+        object.__setattr__(self, "production_complete", production_complete)
         payload = {
             "as_of": None if as_of is None else as_of.isoformat(timespec="microseconds"),
             "end": end.isoformat(timespec="microseconds"),
@@ -105,7 +111,7 @@ class QualityReport:
                 for issue in issues
             ],
             "passed": passed,
-            "production_complete": self.production_complete,
+            "production_complete": production_complete,
             "requested_instruments": list(requested_instruments),
             "start": start.isoformat(timespec="microseconds"),
         }

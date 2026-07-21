@@ -12,7 +12,12 @@ from open_quant.data.models import (
     SuspensionStatus,
     TradingPeriod,
 )
-from open_quant.data.quality import MinuteBarQualityGate, QualityReport
+from open_quant.data.quality import (
+    MinuteBarQualityGate,
+    QualityIssue,
+    QualityReport,
+    QualitySeverity,
+)
 
 BAR_END = datetime(2026, 7, 20, 1, 31, tzinfo=UTC)
 
@@ -97,6 +102,51 @@ def evaluate(
 
 def issue_codes(report: QualityReport) -> set[str]:
     return {issue.code for issue in report.issues}
+
+
+def direct_report(
+    *,
+    issues: tuple[QualityIssue, ...] = (),
+    as_of: datetime | None = BAR_END + timedelta(seconds=5),
+    production_complete: bool = True,
+) -> QualityReport:
+    return QualityReport(
+        requested_instruments=("000001.XSHE",),
+        start=BAR_END,
+        end=BAR_END,
+        as_of=as_of,
+        issues=issues,
+        production_complete=production_complete,
+    )
+
+
+def test_public_report_normalizes_error_complete_claim_before_hashing() -> None:
+    error = QualityIssue(
+        severity=QualitySeverity.ERROR,
+        code="test_error",
+        instrument="000001.XSHE",
+        event_time=BAR_END,
+        message="test error",
+    )
+    claimed_complete = direct_report(issues=(error,), production_complete=True)
+    explicit_incomplete = direct_report(issues=(error,), production_complete=False)
+    assert claimed_complete.production_complete is False
+    assert claimed_complete.report_hash == explicit_incomplete.report_hash
+
+
+def test_public_report_normalizes_missing_as_of_complete_claim_before_hashing() -> None:
+    claimed_complete = direct_report(as_of=None, production_complete=True)
+    explicit_incomplete = direct_report(as_of=None, production_complete=False)
+    assert claimed_complete.production_complete is False
+    assert claimed_complete.report_hash == explicit_incomplete.report_hash
+
+
+@pytest.mark.parametrize("value", [0, 1, None, "true"])
+def test_public_report_requires_a_real_bool_for_production_complete(
+    value: object,
+) -> None:
+    with pytest.raises(TypeError, match="production_complete"):
+        direct_report(production_complete=value)  # type: ignore[arg-type]
 
 
 def test_duplicate_revision_fails_quality_gate(bar: MinuteBarRevision) -> None:
