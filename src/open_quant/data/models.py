@@ -279,6 +279,15 @@ class MinuteBarBatch:
             raise TypeError("records must contain MinuteBarRevision values")
         if any(not isinstance(item, SourceEvidence) for item in source_evidence):
             raise TypeError("source_evidence must contain SourceEvidence values")
+        if not source_evidence:
+            raise ValueError("source_evidence cannot be empty")
+        if any(item.method != "get_price" for item in source_evidence):
+            raise ValueError("source_evidence for minute bars must use get_price")
+        if records:
+            record_sources = {record.source for record in records}
+            evidence_sources = {item.source for item in source_evidence}
+            if record_sources != evidence_sources:
+                raise ValueError("source_evidence sources must match minute-bar record sources")
 
 
 @dataclass(frozen=True, slots=True)
@@ -293,6 +302,38 @@ class CoverageBatch:
             raise TypeError("coverage must be MarketCoverageEvidence")
         if any(not isinstance(item, SourceEvidence) for item in source_evidence):
             raise TypeError("source_evidence must contain SourceEvidence values")
+        if not source_evidence:
+            raise ValueError("source_evidence cannot be empty")
+
+        periods = self.coverage.periods
+        suspensions = self.coverage.suspensions
+        coverage_sources = {item.source for item in periods} | {
+            item.source for item in suspensions
+        }
+        evidence_keys = {
+            (item.source, item.method, item.response_hash) for item in source_evidence
+        }
+        if coverage_sources:
+            evidence_sources = {item.source for item in source_evidence}
+            if not evidence_sources <= coverage_sources:
+                raise ValueError("source_evidence contains a source absent from coverage")
+            allowed_methods = {
+                (item.source, "get_trading_periods") for item in periods
+            } | {(item.source, "is_suspended") for item in suspensions}
+            if any(
+                (item.source, item.method) not in allowed_methods for item in source_evidence
+            ):
+                raise ValueError("source_evidence method does not match coverage evidence")
+        if any(
+            (item.source, "get_trading_periods", item.response_hash) not in evidence_keys
+            for item in periods
+        ):
+            raise ValueError("period response_hash is not backed by source_evidence")
+        if any(
+            (item.source, "is_suspended", item.response_hash) not in evidence_keys
+            for item in suspensions
+        ):
+            raise ValueError("suspension response_hash is not backed by source_evidence")
 
 
 @dataclass(frozen=True, slots=True)
@@ -309,6 +350,8 @@ class DatasetManifest:
     manifest_hash: str = field(init=False)
 
     def __post_init__(self) -> None:
+        if isinstance(self.instruments, (str, bytes)):
+            raise ValueError("instruments must be a sequence of instrument strings")
         instruments = tuple(self.instruments)
         record_hashes = tuple(self.record_hashes)
         object.__setattr__(self, "instruments", instruments)
@@ -322,7 +365,10 @@ class DatasetManifest:
 
         if not self.source.strip():
             raise ValueError("source cannot be empty")
-        if not instruments or any(not instrument.strip() for instrument in instruments):
+        if not instruments or any(
+            not isinstance(instrument, str) or not instrument.strip()
+            for instrument in instruments
+        ):
             raise ValueError("instruments cannot be empty")
         if start_time > end_time:
             raise ValueError("start_time cannot follow end_time")

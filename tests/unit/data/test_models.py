@@ -348,15 +348,124 @@ def test_batches_detach_from_input_lists() -> None:
     records = [revision]
     bar_evidence = [evidence]
     bar_batch = MinuteBarBatch(records=records, source_evidence=bar_evidence)  # type: ignore[arg-type]
-    coverage = MarketCoverageEvidence(periods=(make_period(),), suspensions=(make_suspension(),))
-    coverage_evidence = [evidence]
+    period_evidence = make_source_evidence(b"periods", method="get_trading_periods")
+    suspension_evidence = make_source_evidence(b"suspensions", method="is_suspended")
+    coverage = MarketCoverageEvidence(
+        periods=(make_period(response_hash=period_evidence.response_hash),),
+        suspensions=(make_suspension(response_hash=suspension_evidence.response_hash),),
+    )
+    coverage_evidence = [period_evidence, suspension_evidence]
     coverage_batch = CoverageBatch(coverage=coverage, source_evidence=coverage_evidence)  # type: ignore[arg-type]
     records.clear()
     bar_evidence.clear()
     coverage_evidence.clear()
     assert bar_batch.records == (revision,)
     assert bar_batch.source_evidence == (evidence,)
-    assert coverage_batch.source_evidence == (evidence,)
+    assert coverage_batch.source_evidence == (period_evidence, suspension_evidence)
+
+
+def test_batches_require_nonempty_source_evidence() -> None:
+    with pytest.raises(ValueError, match="source_evidence"):
+        MinuteBarBatch(records=(), source_evidence=())
+    with pytest.raises(ValueError, match="source_evidence"):
+        CoverageBatch(
+            coverage=MarketCoverageEvidence(periods=(), suspensions=()),
+            source_evidence=(),
+        )
+
+
+def test_empty_market_data_response_retains_get_price_evidence() -> None:
+    evidence = make_source_evidence(method="get_price")
+    batch = MinuteBarBatch(records=(), source_evidence=(evidence,))
+    assert batch.records == ()
+    assert batch.source_evidence == (evidence,)
+
+
+def test_minute_batch_rejects_wrong_evidence_source() -> None:
+    evidence = make_source_evidence(source="other", method="get_price")
+    with pytest.raises(ValueError, match="source"):
+        MinuteBarBatch(records=(make_revision(),), source_evidence=(evidence,))
+
+
+def test_minute_batch_rejects_wrong_evidence_method() -> None:
+    evidence = make_source_evidence(method="get_trading_periods")
+    with pytest.raises(ValueError, match="get_price"):
+        MinuteBarBatch(records=(make_revision(),), source_evidence=(evidence,))
+
+
+def test_minute_batch_rejects_evidence_for_an_unrepresented_source() -> None:
+    matching = make_source_evidence(b"matching")
+    unrelated = make_source_evidence(b"unrelated", source="other")
+    with pytest.raises(ValueError, match="source"):
+        MinuteBarBatch(
+            records=(make_revision(),),
+            source_evidence=(matching, unrelated),
+        )
+
+
+def valid_coverage_and_evidence() -> tuple[
+    MarketCoverageEvidence, tuple[SourceEvidence, SourceEvidence]
+]:
+    period_evidence = make_source_evidence(b"periods", method="get_trading_periods")
+    suspension_evidence = make_source_evidence(b"suspensions", method="is_suspended")
+    coverage = MarketCoverageEvidence(
+        periods=(make_period(response_hash=period_evidence.response_hash),),
+        suspensions=(make_suspension(response_hash=suspension_evidence.response_hash),),
+    )
+    return coverage, (period_evidence, suspension_evidence)
+
+
+def test_coverage_batch_accepts_matching_source_method_and_hash_evidence() -> None:
+    coverage, evidence = valid_coverage_and_evidence()
+    batch = CoverageBatch(coverage=coverage, source_evidence=evidence)
+    assert batch.source_evidence == evidence
+
+
+def test_coverage_batch_rejects_wrong_evidence_source() -> None:
+    evidence = make_source_evidence(b"periods", source="other", method="get_trading_periods")
+    coverage = MarketCoverageEvidence(
+        periods=(make_period(response_hash=evidence.response_hash),),
+        suspensions=(),
+    )
+    with pytest.raises(ValueError, match="source"):
+        CoverageBatch(coverage=coverage, source_evidence=(evidence,))
+
+
+@pytest.mark.parametrize(
+    ("coverage_kind", "wrong_method"),
+    [("period", "get_price"), ("suspension", "get_trading_periods")],
+)
+def test_coverage_batch_rejects_wrong_evidence_method(
+    coverage_kind: str, wrong_method: str
+) -> None:
+    evidence = make_source_evidence(method=wrong_method)
+    coverage = MarketCoverageEvidence(
+        periods=(make_period(response_hash=evidence.response_hash),)
+        if coverage_kind == "period"
+        else (),
+        suspensions=(make_suspension(response_hash=evidence.response_hash),)
+        if coverage_kind == "suspension"
+        else (),
+    )
+    with pytest.raises(ValueError, match="evidence"):
+        CoverageBatch(coverage=coverage, source_evidence=(evidence,))
+
+
+def test_coverage_batch_rejects_unreferenced_coverage_hash() -> None:
+    evidence = make_source_evidence(b"periods", method="get_trading_periods")
+    coverage = MarketCoverageEvidence(
+        periods=(make_period(response_hash="f" * 64),),
+        suspensions=(),
+    )
+    with pytest.raises(ValueError, match="response_hash"):
+        CoverageBatch(coverage=coverage, source_evidence=(evidence,))
+
+
+def test_coverage_batch_rejects_evidence_for_an_unrepresented_source() -> None:
+    coverage, evidence = valid_coverage_and_evidence()
+    unrelated = make_source_evidence(b"other", source="other", method="get_trading_periods")
+    with pytest.raises(ValueError, match="source"):
+        CoverageBatch(coverage=coverage, source_evidence=(*evidence, unrelated))
 
 
 def manifest_values() -> dict[str, object]:
@@ -404,7 +513,11 @@ def test_manifest_detaches_sequences_before_hashing() -> None:
     [
         ({"source": " "}, "source"),
         ({"instruments": ()}, "instruments"),
+        ({"instruments": "000001.XSHE"}, "instruments"),
+        ({"instruments": b"000001.XSHE"}, "instruments"),
         ({"instruments": ("",)}, "instruments"),
+        ({"instruments": (1,)}, "instruments"),
+        ({"instruments": (b"000001.XSHE",)}, "instruments"),
         (
             {"record_hashes": ("a" * 64, "a" * 64), "row_count": 2},
             "record_hashes",
