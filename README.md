@@ -45,9 +45,11 @@ control version, and verified execution recovery. The Web console exposes activa
 
 PostgreSQL schema v10 contains an explicitly local, zero-network simulated broker. It owns an
 independent append-only broker-fact chain, applies deterministic bid/ask marketability, rejects
-closed-market submissions, and verifies all broker projections by replay at startup. It is not
-yet connected to an account projection or order-coordination API, so paper submission remains
-unavailable from the console.
+closed-market submissions, and verifies all broker projections by replay at startup. Internal
+and broker histories can now be rebuilt into independent cash, position, T+1 sellability and
+open-order snapshots whose evidence hashes are persisted with reconciliation reports. The
+projector is not yet connected to an order-coordination API or scheduling loop, so paper
+submission remains unavailable from the console.
 
 All dependency, test, lint, type-check, migration, and Git mutation commands for this
 checkout must run on `rlocal`; see [the phase-1 runbook](docs/runbooks/phase1-data-foundation.md).

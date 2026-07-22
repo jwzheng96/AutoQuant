@@ -285,6 +285,48 @@ class PaperOrderTransition:
             raise ValueError("applied must match event presence")
 
 
+@dataclass(frozen=True, slots=True)
+class PaperOrderHistory:
+    order: ApprovedPaperOrder
+    state: PaperOrderState
+    updates: tuple[BrokerOrderUpdate, ...]
+
+    def __post_init__(self) -> None:
+        updates = tuple(self.updates)
+        object.__setattr__(self, "updates", updates)
+        if not updates:
+            if self.state is not PaperOrderState.APPROVED:
+                raise ValueError("history without broker facts must remain approved")
+            return
+        if self.state is PaperOrderState.APPROVED:
+            raise ValueError("history with broker facts cannot remain approved")
+        if updates[-1].state is not self.state:
+            raise ValueError("history state must match the latest broker update")
+        broker_order_id = updates[0].broker_order_id
+        previous_sequence = 0
+        previous_filled = 0
+        previous_time = self.order.approved_at
+        for update in updates:
+            if (
+                update.account_id != self.order.account_id
+                or update.client_order_id != self.order.client_order_id
+            ):
+                raise ValueError("history update does not match order identity")
+            if update.broker_order_id != broker_order_id:
+                raise ValueError("history broker_order_id cannot change")
+            if update.broker_sequence <= previous_sequence:
+                raise ValueError("history broker sequence must increase")
+            if update.cumulative_filled_quantity < previous_filled:
+                raise ValueError("history cumulative fill cannot decrease")
+            if update.cumulative_filled_quantity > self.order.quantity:
+                raise ValueError("history cumulative fill exceeds order quantity")
+            if update.occurred_at < previous_time:
+                raise ValueError("history update time cannot move backwards")
+            previous_sequence = update.broker_sequence
+            previous_filled = update.cumulative_filled_quantity
+            previous_time = update.occurred_at
+
+
 def order_payload(order: ApprovedPaperOrder) -> dict[str, object]:
     return {
         "account_id": order.account_id,

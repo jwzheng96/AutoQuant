@@ -16,6 +16,7 @@ from autoquant.errors import PersistenceUnavailableError
 from autoquant.execution.models import (
     ApprovedPaperOrder,
     BrokerOrderUpdate,
+    PaperOrderHistory,
     PaperOrderProjection,
     PaperOrderState,
     PaperOrderTransition,
@@ -362,6 +363,92 @@ class PostgresPaperExecutionRepository:
             )
         return replayed
 
+    async def order_history(
+        self, *, account_id: str, client_order_id: str
+    ) -> PaperOrderHistory:
+        current = await self.replay_order(
+            account_id=account_id,
+            client_order_id=client_order_id,
+        )
+        try:
+            async with self._engine.connect() as connection:
+                rows = (
+                    (
+                        await connection.execute(
+                            text(
+                                f"""
+                                SELECT update_hash, update_payload
+                                FROM {self._schema}.paper_order_events
+                                WHERE order_hash = :order_hash
+                                ORDER BY sequence
+                                """
+                            ),
+                            {"order_hash": current.order.order_hash},
+                        )
+                    )
+                    .mappings()
+                    .all()
+                )
+        except Exception:
+            raise PersistenceUnavailableError(
+                "Paper order history read failed"
+            ) from None
+        updates = tuple(_verified_update_from_row(row) for row in rows)
+        return PaperOrderHistory(
+            order=current.order,
+            state=current.state,
+            updates=updates,
+        )
+
+    async def account_histories(
+        self, *, account_id: str, max_orders: int = 10_000
+    ) -> tuple[PaperOrderHistory, ...]:
+        if max_orders < 1:
+            raise ValueError("max_orders must be positive")
+        try:
+            async with self._engine.connect() as connection:
+                identifiers = tuple(
+                    str(row["client_order_id"])
+                    for row in (
+                        (
+                            await connection.execute(
+                                text(
+                                    f"""
+                                    SELECT client_order_id
+                                    FROM {self._schema}.paper_orders
+                                    WHERE account_id = :account_id
+                                    ORDER BY created_at, order_hash
+                                    LIMIT :limit
+                                    """
+                                ),
+                                {
+                                    "account_id": account_id,
+                                    "limit": max_orders + 1,
+                                },
+                            )
+                        )
+                        .mappings()
+                        .all()
+                    )
+                )
+        except Exception:
+            raise PersistenceUnavailableError(
+                "Paper account history inventory failed"
+            ) from None
+        if len(identifiers) > max_orders:
+            raise PersistenceUnavailableError(
+                "Paper account history exceeds configured projection bound"
+            )
+        return tuple(
+            [
+                await self.order_history(
+                    account_id=account_id,
+                    client_order_id=client_order_id,
+                )
+                for client_order_id in identifiers
+            ]
+        )
+
     async def save_reconciliation(
         self,
         *,
@@ -674,6 +761,15 @@ def _update_from_payload(raw: object) -> BrokerOrderUpdate:
         ) from None
 
 
+def _verified_update_from_row(row: RowMapping) -> BrokerOrderUpdate:
+    update = _update_from_payload(row["update_payload"])
+    if update.update_hash != str(row["update_hash"]):
+        raise PersistenceUnavailableError(
+            "Stored broker update hash does not match event"
+        )
+    return update
+
+
 def _snapshot_from_row(row: RowMapping) -> ExecutionAccountSnapshot:
     try:
         payload = _object(row["payload"])
@@ -700,6 +796,10 @@ def _snapshot_from_row(row: RowMapping) -> ExecutionAccountSnapshot:
             equity=Decimal(str(payload["equity"])),
             positions=tuple(positions),
             open_client_order_ids=tuple(str(value) for value in orders_raw),
+            projection_version=str(
+                payload.get("projection_version", "unspecified-v1")
+            ),
+            evidence_hash=str(payload.get("evidence_hash", "0" * 64)),
         )
         if (
             snapshot.snapshot_hash != str(row["snapshot_hash"])

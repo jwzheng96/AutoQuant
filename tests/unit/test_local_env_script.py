@@ -30,6 +30,7 @@ def test_render_app_env_url_encodes_database_credentials_without_printing() -> N
     assert "clickhouse://autoquant:ch%2Fsecret@127.0.0.1:8123/autoquant" in content
     assert "AQ_TUSHARE_TOKEN=local-token" in content
     assert "AQ_PAPER_ACCOUNT_ID=paper-main" in content
+    assert "AQ_PAPER_INITIAL_CASH=1000000" in content
     web_password = next(
         line.split("=", 1)[1]
         for line in content.splitlines()

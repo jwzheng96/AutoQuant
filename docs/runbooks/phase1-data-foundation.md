@@ -94,6 +94,7 @@ AQ_WEB_PORT=8000
 AQ_WEB_USERNAME=operator
 AQ_WEB_PASSWORD=<at least 16 characters; enter locally>
 AQ_PAPER_ACCOUNT_ID=paper-main
+AQ_PAPER_INITIAL_CASH=1000000
 ```
 
 Start the console on `rlocal`:
@@ -136,8 +137,10 @@ Setting `AQ_LIVE_TRADING_ENABLED=true` is rejected by configuration validation i
 Schema v10 adds a local deterministic simulated broker with no network client or real-money
 capability. On startup the console replays its immutable broker facts independently from the
 internal paper-order event chain. `/api/v1/execution` reports both recovery results. The adapter
-is not an order endpoint: an account projector, coordinator and continuously reconciled quote
-source must still be connected before paper submission can be exposed.
+is not an order endpoint. The account projector can independently rebuild both histories using
+the configured initial cash, current marks, cumulative order fees and A-share T+1 lots, then
+persist a hash-committed reconciliation. A coordinator, continuously reconciled quote source
+and scheduler must still be connected before paper submission can be exposed.
 
 ## Research execution boundary
 

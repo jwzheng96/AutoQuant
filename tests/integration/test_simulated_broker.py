@@ -16,7 +16,12 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from autoquant.adapters.postgres import PostgresControlRepository
 from autoquant.backtest.models import OrderSide
 from autoquant.backtest.rules import AshareRuleBook, SecurityStatus
+from autoquant.execution.account_projection import PaperAccountProjector
 from autoquant.execution.models import ApprovedPaperOrder, PaperOrderState
+from autoquant.execution.reconciliation import (
+    AccountReconciler,
+    ReconciliationCode,
+)
 from autoquant.execution.simulated_broker import PersistentSimulatedBroker
 from autoquant.execution.store import PostgresPaperExecutionRepository
 from autoquant.risk.engine import PreTradeRiskEngine
@@ -227,3 +232,83 @@ async def test_simulated_broker_is_persistent_idempotent_and_independently_repla
                     "SET update_payload = '{}'::jsonb"
                 )
             )
+
+
+@pytest.mark.asyncio
+async def test_independent_account_projections_detect_and_close_callback_gap(
+    repositories: tuple[
+        PostgresRiskDecisionRepository,
+        PostgresPaperExecutionRepository,
+        PersistentSimulatedBroker,
+        AsyncEngine,
+        str,
+    ],
+) -> None:
+    risks, executions, broker, _, _ = repositories
+    order = await _persist_order(
+        risks,
+        executions,
+        order_id="simulated-reconciliation-order-0001",
+    )
+    updates = await broker.submit(order=order, quote=_quote(), now=NOW)
+    projector = PaperAccountProjector()
+    projection_input = {
+        "account_id": order.account_id,
+        "initial_cash": Decimal("100000"),
+        "marks": {INSTRUMENT: Decimal("10.01")},
+        "as_of": NOW,
+    }
+
+    internal_before = projector.project(
+        **projection_input,
+        histories=await executions.account_histories(account_id=order.account_id),
+    )
+    broker_snapshot = projector.project(
+        **projection_input,
+        histories=await broker.account_histories(account_id=order.account_id),
+    )
+    before = AccountReconciler().reconcile(
+        internal=internal_before,
+        broker=broker_snapshot,
+        now=NOW,
+    )
+
+    assert before.reconciled is False
+    assert before.issues == (
+        ReconciliationCode.CASH_MISMATCH,
+        ReconciliationCode.EQUITY_MISMATCH,
+        ReconciliationCode.POSITION_MISMATCH,
+        ReconciliationCode.OPEN_ORDER_MISMATCH,
+    )
+    assert internal_before.evidence_hash != broker_snapshot.evidence_hash
+    assert broker_snapshot.cash == Decimal("98993.99")
+    assert broker_snapshot.equity == Decimal("99994.99")
+    assert broker_snapshot.positions[0].total_quantity == 100
+    assert broker_snapshot.positions[0].sellable_quantity == 0
+
+    for update in updates:
+        await executions.apply_update(
+            account_id=order.account_id,
+            client_order_id=order.client_order_id,
+            update=update,
+        )
+    internal_after = projector.project(
+        **projection_input,
+        histories=await executions.account_histories(account_id=order.account_id),
+    )
+    after = AccountReconciler().reconcile(
+        internal=internal_after,
+        broker=broker_snapshot,
+        now=NOW,
+    )
+    stored = await executions.save_reconciliation(
+        internal=internal_after,
+        broker=broker_snapshot,
+        report=after,
+    )
+
+    assert internal_after == broker_snapshot
+    assert internal_after.evidence_hash == broker_snapshot.evidence_hash
+    assert after.reconciled is True
+    assert stored == after
+    assert (await executions.verify_recovery()).latest_reconciled is True

@@ -12,6 +12,7 @@ from autoquant.data.models import (
     _require_lowercase_sha256,
     _require_nonblank,
 )
+from autoquant.execution.models import ZERO_HASH
 
 
 def _finite(value: Decimal, *, name: str, minimum: Decimal | None = None) -> None:
@@ -58,10 +59,14 @@ class ExecutionAccountSnapshot:
     equity: Decimal
     positions: tuple[AccountPosition, ...] = ()
     open_client_order_ids: tuple[str, ...] = ()
+    projection_version: str = "unspecified-v1"
+    evidence_hash: str = ZERO_HASH
     snapshot_hash: str = field(init=False)
 
     def __post_init__(self) -> None:
         _require_nonblank(self.account_id, name="account_id")
+        _require_nonblank(self.projection_version, name="projection_version")
+        _require_lowercase_sha256(self.evidence_hash, name="evidence_hash")
         as_of = to_utc(self.as_of, name="account snapshot as_of")
         object.__setattr__(self, "as_of", as_of)
         positions = tuple(sorted(self.positions, key=lambda item: item.instrument))
@@ -244,7 +249,7 @@ class AccountReconciler:
 
 
 def snapshot_payload(snapshot: ExecutionAccountSnapshot) -> dict[str, object]:
-    return {
+    payload: dict[str, object] = {
         "account_id": snapshot.account_id,
         "as_of": snapshot.as_of.isoformat(timespec="microseconds"),
         "cash": _decimal_text(snapshot.cash),
@@ -260,3 +265,10 @@ def snapshot_payload(snapshot: ExecutionAccountSnapshot) -> dict[str, object]:
             for item in snapshot.positions
         ],
     }
+    if (
+        snapshot.projection_version != "unspecified-v1"
+        or snapshot.evidence_hash != ZERO_HASH
+    ):
+        payload["evidence_hash"] = snapshot.evidence_hash
+        payload["projection_version"] = snapshot.projection_version
+    return payload

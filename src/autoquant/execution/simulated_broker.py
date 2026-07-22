@@ -23,6 +23,7 @@ from autoquant.execution.models import (
     ZERO_HASH,
     ApprovedPaperOrder,
     BrokerOrderUpdate,
+    PaperOrderHistory,
     PaperOrderState,
     order_payload,
     update_payload,
@@ -345,6 +346,64 @@ class PersistentSimulatedBroker:
             fact_count=int(counts["fact_count"]),
             open_order_count=int(counts["open_order_count"]),
             recovery_verified=True,
+        )
+
+    async def order_history(self, *, order_hash: str) -> PaperOrderHistory:
+        current = await self.replay(order_hash=order_hash)
+        try:
+            async with self._engine.connect() as connection:
+                updates = await self._updates(connection, order_hash)
+        except Exception:
+            raise PersistenceUnavailableError(
+                "Simulated broker order history read failed"
+            ) from None
+        return PaperOrderHistory(
+            order=current.order,
+            state=current.state,
+            updates=updates,
+        )
+
+    async def account_histories(
+        self, *, account_id: str, max_orders: int = 10_000
+    ) -> tuple[PaperOrderHistory, ...]:
+        if max_orders < 1:
+            raise ValueError("max_orders must be positive")
+        try:
+            async with self._engine.connect() as connection:
+                order_hashes = tuple(
+                    str(row["order_hash"])
+                    for row in (
+                        (
+                            await connection.execute(
+                                text(
+                                    f"""
+                                    SELECT order_hash
+                                    FROM {self._schema}.simulated_broker_orders
+                                    WHERE account_id = :account_id
+                                    ORDER BY created_at, order_hash
+                                    LIMIT :limit
+                                    """
+                                ),
+                                {
+                                    "account_id": account_id,
+                                    "limit": max_orders + 1,
+                                },
+                            )
+                        )
+                        .mappings()
+                        .all()
+                    )
+                )
+        except Exception:
+            raise PersistenceUnavailableError(
+                "Simulated broker account history inventory failed"
+            ) from None
+        if len(order_hashes) > max_orders:
+            raise PersistenceUnavailableError(
+                "Simulated broker account history exceeds projection bound"
+            )
+        return tuple(
+            [await self.order_history(order_hash=order_hash) for order_hash in order_hashes]
         )
 
     async def _append_update(

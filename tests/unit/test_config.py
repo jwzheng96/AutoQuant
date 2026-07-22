@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 import pytest
 from pydantic import SecretStr
 
@@ -21,6 +23,7 @@ def test_defaults_are_non_live_and_fail_closed(monkeypatch: pytest.MonkeyPatch) 
     settings = AppSettings(_env_file=None)
     assert settings.environment is RuntimeEnvironment.BACKTEST
     assert settings.live_trading_enabled is False
+    assert settings.paper_initial_cash == Decimal("1000000")
     with pytest.raises(MissingCapabilityError, match="RQData credentials"):
         settings.require_rqdata()
     with pytest.raises(MissingCapabilityError, match="Tushare token"):
@@ -151,3 +154,9 @@ def test_live_flag_is_still_rejected_in_live_environment() -> None:
 def test_paper_account_id_must_be_safe(account_id: str) -> None:
     with pytest.raises(ValueError, match="paper_account_id"):
         AppSettings(_env_file=None, paper_account_id=account_id)
+
+
+@pytest.mark.parametrize("initial_cash", ["9999.99", "1000000000.01", "NaN"])
+def test_paper_initial_cash_is_bounded(initial_cash: str) -> None:
+    with pytest.raises(ValueError):
+        AppSettings(_env_file=None, paper_initial_cash=initial_cash)

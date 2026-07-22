@@ -18,6 +18,7 @@ from autoquant.execution.reconciliation import (
     AccountReconciler,
     ExecutionAccountSnapshot,
     ReconciliationCode,
+    snapshot_payload,
 )
 from autoquant.execution.state_machine import PaperOrderStateMachine
 from autoquant.risk.engine import PreTradeRiskEngine
@@ -208,6 +209,7 @@ def test_matching_account_snapshots_reconcile_deterministically() -> None:
 
     assert report.reconciled is True
     assert report.issues == ()
+    assert "evidence_hash" not in snapshot_payload(_snapshot())
 
 
 def test_reconciliation_reports_all_stable_mismatch_codes() -> None:

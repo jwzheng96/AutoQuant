@@ -1,3 +1,4 @@
+from decimal import Decimal
 from enum import StrEnum
 from urllib.parse import urlsplit
 
@@ -46,6 +47,9 @@ class AppSettings(BaseSettings):
     web_username: str = "operator"
     web_password: SecretStr | None = None
     paper_account_id: str = "paper-main"
+    paper_initial_cash: Decimal = Field(
+        default=Decimal("1000000"), ge=Decimal("10000"), le=Decimal("1000000000")
+    )
 
     @field_validator("tushare_api_url")
     @classmethod
