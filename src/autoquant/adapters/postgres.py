@@ -122,6 +122,18 @@ def source_evidence_parameters(evidence: SourceEvidence) -> dict[str, object]:
     }
 
 
+def source_evidence_content_matches(
+    stored: SourceEvidence, candidate: SourceEvidence
+) -> bool:
+    """Compare immutable evidence identity while allowing a repeated retrieval time."""
+    return (
+        stored.source == candidate.source
+        and stored.method == candidate.method
+        and stored.response_body == candidate.response_body
+        and stored.response_hash == candidate.response_hash
+    )
+
+
 def quality_report_payload(report: QualityReport) -> dict[str, JsonValue]:
     if not isinstance(report, QualityReport):
         raise TypeError("report must be QualityReport")
@@ -183,7 +195,7 @@ class PostgresControlTransaction:
             {"evidence_hash": evidence.response_hash},
         )
         stored = self._source_evidence_from_row(evidence.response_hash, row)
-        if stored != evidence:
+        if not source_evidence_content_matches(stored, evidence):
             raise ValueError("source evidence hash conflicts with stored content")
 
     async def save_quality_report(self, report: QualityReport) -> None:
