@@ -20,3 +20,19 @@ CREATE TABLE IF NOT EXISTS minute_bar_revisions
 ENGINE = MergeTree
 PARTITION BY toYYYYMM(event_time)
 ORDER BY (instrument, event_time, source, available_at, ingested_at, record_id);
+
+CREATE TABLE IF NOT EXISTS schema_versions
+(
+    component LowCardinality(String),
+    version UInt32,
+    applied_at DateTime64(6, 'UTC') DEFAULT now64(6)
+)
+ENGINE = MergeTree
+ORDER BY component;
+
+INSERT INTO schema_versions (component, version)
+SELECT 'clickhouse', 1
+WHERE NOT EXISTS
+(
+    SELECT 1 FROM schema_versions WHERE component = 'clickhouse' AND version = 1
+);

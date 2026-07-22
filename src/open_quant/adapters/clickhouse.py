@@ -90,6 +90,21 @@ class ClickHouseMinuteBarRepository:
     def source(self) -> str:
         return self._source
 
+    async def check_connection(self) -> None:
+        try:
+            await self._client.command("SELECT 1")
+            exists = await self._client.command(f"EXISTS TABLE {self._table}")
+            schema_version = await self._client.command(
+                "SELECT max(version) FROM schema_versions "
+                "WHERE component = 'clickhouse'"
+            )
+        except Exception:
+            raise PersistenceUnavailableError("ClickHouse connection check failed") from None
+        if exists not in (1, "1", True):
+            raise PersistenceUnavailableError("ClickHouse phase-1 schema is unavailable")
+        if schema_version != 1:
+            raise PersistenceUnavailableError("ClickHouse phase-1 schema version is unavailable")
+
     async def append(self, records: tuple[MinuteBarRevision, ...]) -> int:
         if not records:
             return 0

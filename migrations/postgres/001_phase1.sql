@@ -1,3 +1,14 @@
+CREATE TABLE IF NOT EXISTS schema_versions
+(
+    component text PRIMARY KEY,
+    version integer NOT NULL CHECK (version > 0),
+    applied_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);
+
+INSERT INTO schema_versions (component, version)
+VALUES ('postgres', 1)
+ON CONFLICT (component) DO NOTHING;
+
 CREATE TABLE IF NOT EXISTS ingestion_checkpoints
 (
     source text NOT NULL,

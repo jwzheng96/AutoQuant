@@ -534,6 +534,42 @@ class PostgresControlRepository:
         except Exception:
             raise PersistenceUnavailableError("PostgreSQL close failed") from None
 
+    async def check_connection(self) -> None:
+        required = (
+            "schema_versions",
+            "ingestion_checkpoints",
+            "source_evidence",
+            "quality_reports",
+            "dataset_manifests",
+            "audit_events",
+        )
+        try:
+            async with self._engine.connect() as connection:
+                await connection.exec_driver_sql(f'SET search_path TO "{self._schema}"')
+                result = await connection.execute(
+                    text(
+                        "SELECT table_name FROM information_schema.tables "
+                        "WHERE table_schema = :schema AND table_name = ANY(:tables)"
+                    ),
+                    {"schema": self._schema, "tables": list(required)},
+                )
+                found = {str(row[0]) for row in result}
+                version_result = await connection.execute(
+                    text(
+                        "SELECT version FROM schema_versions "
+                        "WHERE component = 'postgres'"
+                    )
+                )
+                version = version_result.scalar_one_or_none()
+        except Exception:
+            raise PersistenceUnavailableError("PostgreSQL connection check failed") from None
+        if found != set(required):
+            raise PersistenceUnavailableError("PostgreSQL phase-1 schema is unavailable")
+        if version != 1:
+            raise PersistenceUnavailableError(
+                "PostgreSQL phase-1 schema version is unavailable"
+            )
+
     async def save_source_evidence(self, evidence: SourceEvidence) -> None:
         async with self.transaction() as transaction:
             await transaction.save_source_evidence(evidence)
