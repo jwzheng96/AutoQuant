@@ -1,5 +1,9 @@
 # A 股分钟量化研究与执行系统设计
 
+> **Historical naming record:** This document uses the former Open Quant identifiers.
+> The current project name and supported interfaces are AutoQuant; see
+> `docs/superpowers/specs/2026-07-22-autoquant-rename-design.md`.
+
 - 日期：2026-07-21
 - 状态：已由用户逐节批准，等待书面规格复核
 - 市场：沪深主板、创业板、科创板；不含北交所

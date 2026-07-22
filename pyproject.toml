@@ -1,0 +1,54 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "autoquant"
+version = "0.1.0"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+  "clickhouse-connect>=0.8,<1",
+  "httpx>=0.28,<1",
+  "pandas>=2.2,<3",
+  "pydantic>=2.10,<3",
+  "pydantic-settings>=2.7,<3",
+  "sqlalchemy>=2.0,<3",
+  "asyncpg>=0.30,<1",
+  "structlog>=25,<26",
+  "tenacity>=9,<10",
+  "typer>=0.15,<1",
+]
+
+[dependency-groups]
+dev = [
+  "hypothesis>=6.120,<7",
+  "mypy>=1.14,<2",
+  "pytest>=8.3,<9",
+  "pytest-asyncio>=0.25,<2",
+  "pytest-cov>=6,<8",
+  "respx>=0.22,<1",
+  "ruff>=0.9,<1",
+]
+
+[project.scripts]
+autoquant = "autoquant.cli:app"
+
+[tool.pytest.ini_options]
+addopts = "--strict-markers --strict-config"
+testpaths = ["tests"]
+markers = [
+  "integration: requires configured PostgreSQL and ClickHouse",
+  "live: performs a read-only call to a real vendor API",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "RUF"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+packages = ["autoquant"]
