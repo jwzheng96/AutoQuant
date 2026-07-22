@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import (
 
 from open_quant.clock import to_utc
 from open_quant.data.models import DatasetManifest, SourceEvidence
-from open_quant.data.quality import QualityReport
+from open_quant.data.quality import QualityIssue, QualityReport, QualitySeverity
 from open_quant.errors import PersistenceUnavailableError
 
 JsonScalar: TypeAlias = str | int | float | bool | None
@@ -383,6 +383,59 @@ class PostgresControlTransaction:
             raise PersistenceUnavailableError("PostgreSQL manifest hash verification failed")
         return manifest
 
+    async def read_quality_report(self, report_hash: str) -> QualityReport:
+        normalized_hash = _require_hash(report_hash, name="report_hash")
+        row = await self._one(
+            "SELECT passed, production_complete, payload FROM quality_reports "
+            "WHERE report_hash = :report_hash",
+            {"report_hash": normalized_hash},
+        )
+        payload = _json_object(row["payload"])
+        try:
+            raw_issues = payload["issues"]
+            if not isinstance(raw_issues, list):
+                raise TypeError("issues must be a list")
+            issues = tuple(
+                QualityIssue(
+                    severity=QualitySeverity(str(item["severity"])),
+                    code=str(item["code"]),
+                    instrument=str(item["instrument"]),
+                    event_time=datetime.fromisoformat(str(item["event_time"])),
+                    message=str(item["message"]),
+                )
+                for item in raw_issues
+                if isinstance(item, dict)
+            )
+            requested = payload["requested_instruments"]
+            if not isinstance(requested, list) or len(issues) != len(raw_issues):
+                raise TypeError("malformed quality report sequences")
+            raw_as_of = payload["as_of"]
+            report = QualityReport(
+                requested_instruments=tuple(str(item) for item in requested),
+                start=datetime.fromisoformat(str(payload["start"])),
+                end=datetime.fromisoformat(str(payload["end"])),
+                as_of=(
+                    None
+                    if raw_as_of is None
+                    else datetime.fromisoformat(str(raw_as_of))
+                ),
+                issues=issues,
+                production_complete=bool(payload["production_complete"]),
+            )
+        except (KeyError, TypeError, ValueError):
+            raise PersistenceUnavailableError(
+                "PostgreSQL stored malformed quality report"
+            ) from None
+        if (
+            report.report_hash != normalized_hash
+            or report.passed != row["passed"]
+            or report.production_complete != row["production_complete"]
+        ):
+            raise PersistenceUnavailableError(
+                "PostgreSQL quality report hash verification failed"
+            )
+        return report
+
     async def _execute(self, sql: str, parameters: Mapping[str, object]) -> None:
         try:
             await self._connection.execute(text(sql), dict(parameters))
@@ -519,3 +572,7 @@ class PostgresControlRepository:
     async def read_manifest(self, manifest_hash: str) -> DatasetManifest:
         async with self.transaction() as transaction:
             return await transaction.read_manifest(manifest_hash)
+
+    async def read_quality_report(self, report_hash: str) -> QualityReport:
+        async with self.transaction() as transaction:
+            return await transaction.read_quality_report(report_hash)
