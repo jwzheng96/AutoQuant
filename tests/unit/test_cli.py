@@ -85,7 +85,7 @@ def test_ingestion_refuses_live_environment_flag_before_capability_checks() -> N
     )
 
     assert result.exit_code != 0
-    assert "phase-1 ingestion does not enable trading" in result.stdout
+    assert '"error":"configuration is invalid"' in result.stdout
     assert "password" not in result.stdout.lower()
 
 
@@ -203,7 +203,7 @@ def test_daily_ingestion_refuses_trading_enablement() -> None:
     )
 
     assert result.exit_code == 2
-    assert "ingestion does not enable trading" in result.stdout
+    assert '"error":"configuration is invalid"' in result.stdout
 
 
 def test_daily_ingestion_emits_completed_result_from_async_wiring() -> None:

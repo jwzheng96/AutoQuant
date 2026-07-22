@@ -26,6 +26,7 @@ Apply `migrations/postgres/001_phase1.sql`,
 `migrations/postgres/006_validation_benchmark.sql`, then
 `migrations/postgres/007_risk_decisions.sql`, then
 `migrations/postgres/008_paper_execution.sql`, then
+`migrations/postgres/009_execution_controls.sql`, then
 `migrations/clickhouse/001_phase1.sql` and
 `migrations/clickhouse/002_tushare_daily.sql` and
 `migrations/clickhouse/003_daily_coverage.sql` in order, only to explicitly authorized
@@ -91,6 +92,7 @@ AQ_WEB_HOST=127.0.0.1
 AQ_WEB_PORT=8000
 AQ_WEB_USERNAME=operator
 AQ_WEB_PASSWORD=<at least 16 characters; enter locally>
+AQ_PAPER_ACCOUNT_ID=paper-main
 ```
 
 Start the console on `rlocal`:
@@ -123,6 +125,12 @@ as separate gates.
 the bounded restart-replay result. Console startup verifies persisted order projections from
 their immutable event histories. Any mismatch aborts startup. This endpoint remains read-only;
 it does not imply that a simulated broker, quote feed or scheduling loop is configured.
+
+Schema v9 initializes the configured paper account kill switch in the active state. The trading
+page may activate it with an authenticated, CSRF-protected command; there is intentionally no
+Web reset endpoint. Reset code requires a matching optimistic version, a recent passing
+reconciliation already persisted in schema v8, and a successful execution-history replay.
+Setting `AQ_LIVE_TRADING_ENABLED=true` is rejected by configuration validation in this release.
 
 ## Research execution boundary
 

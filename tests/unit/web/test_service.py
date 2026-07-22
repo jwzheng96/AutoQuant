@@ -6,6 +6,7 @@ import pytest
 
 from autoquant.config import AppSettings
 from autoquant.errors import PersistenceUnavailableError
+from autoquant.execution.control import KillSwitchReason
 from autoquant.web.models import (
     BacktestRun,
     BacktestRunRequest,
@@ -52,6 +53,7 @@ def _service(
     validation_runner: MagicMock | None = None,
     risks: MagicMock | None = None,
     executions: MagicMock | None = None,
+    execution_controls: MagicMock | None = None,
 ) -> ConsoleService:
     market = MagicMock()
     market.client = MagicMock()
@@ -67,6 +69,7 @@ def _service(
         validation_runner=validation_runner,
         risk_repository=risks,
         execution_repository=executions,
+        execution_control_repository=execution_controls,
         now=lambda: NOW,
         poll_interval=0.01,
     )
@@ -157,6 +160,66 @@ async def test_execution_status_requires_gateway_even_after_verified_recovery() 
     assert status.recovery_verified is True
     assert status.gateway_available is False
     assert "paper_broker_adapter" in status.remaining_gates
+
+
+@pytest.mark.asyncio
+async def test_startup_recovery_failure_activates_kill_switch_and_aborts() -> None:
+    executions = MagicMock()
+    executions.verify_recovery = AsyncMock(
+        side_effect=PersistenceUnavailableError("corrupt projection")
+    )
+    controls = MagicMock()
+    controls.ensure_fail_closed = AsyncMock()
+    controls.activate = AsyncMock()
+    service = _service(
+        operator=MagicMock(),
+        control=MagicMock(),
+        runner=AsyncMock(),
+        executions=executions,
+        execution_controls=controls,
+    )
+
+    with pytest.raises(PersistenceUnavailableError, match="corrupt projection"):
+        await service.start()
+
+    controls.ensure_fail_closed.assert_awaited_once()
+    assert controls.activate.await_args.kwargs["reason"] is KillSwitchReason.RECOVERY_FAILED
+
+
+@pytest.mark.asyncio
+async def test_operator_can_activate_but_not_reset_kill_switch_through_service() -> None:
+    executions = MagicMock()
+    summary = MagicMock(
+        recovery_verified=True,
+        order_count=0,
+        event_count=0,
+        reconciliation_count=0,
+        open_order_count=0,
+        latest_reconciliation_at=None,
+        latest_reconciled=None,
+    )
+    executions.verify_recovery = AsyncMock(return_value=summary)
+    controls = MagicMock()
+    state = MagicMock(active=True, reason=KillSwitchReason.MANUAL, version=2)
+    controls.activate = AsyncMock(return_value=state)
+    controls.replay = AsyncMock(return_value=state)
+    service = _service(
+        operator=MagicMock(),
+        control=MagicMock(),
+        runner=AsyncMock(),
+        executions=executions,
+        execution_controls=controls,
+    )
+
+    status = await service.activate_kill_switch(
+        command_id="service-kill-switch-0001",
+        reason="manual",
+        requested_by="operator",
+    )
+
+    assert status.kill_switch_active is True
+    assert status.kill_switch_reason == "manual"
+    controls.activate.assert_awaited_once()
 
 
 @pytest.mark.asyncio

@@ -24,12 +24,14 @@ from autoquant.backtest.validation import WalkForwardValidator
 from autoquant.config import AppSettings, WebCredentials
 from autoquant.data.daily_ingestion import ValidatedDailyDatasetReader
 from autoquant.errors import AutoQuantError
+from autoquant.execution.control_store import PostgresExecutionControlRepository
 from autoquant.execution.store import PostgresPaperExecutionRepository
 from autoquant.operations import configured_dsn
 from autoquant.web.backtest_store import PostgresBacktestRepository
 from autoquant.web.models import (
     BacktestRunRequest,
     DailyIngestionJobRequest,
+    KillSwitchActivationRequest,
     WalkForwardJobRequest,
 )
 from autoquant.web.risk_store import PostgresRiskDecisionRepository
@@ -309,6 +311,26 @@ def create_app(
         result = await active_service(request).execution_status()
         return result.model_dump(mode="json")
 
+    @app.post("/api/v1/execution/kill-switch/activate")
+    async def activate_kill_switch(
+        request: Request,
+        payload: KillSwitchActivationRequest,
+        user: str = Depends(authenticated_user),
+        _: None = Depends(csrf_protected),
+    ) -> dict[str, object]:
+        try:
+            result = await active_service(request).activate_kill_switch(
+                command_id=payload.command_id,
+                reason=payload.reason,
+                requested_by=user,
+            )
+        except ValueError:
+            raise HTTPException(
+                status_code=409,
+                detail="kill switch command conflicts with existing state",
+            ) from None
+        return result.model_dump(mode="json")
+
     return app
 
 
@@ -320,6 +342,7 @@ async def _production_service(settings: AppSettings) -> ConsoleService:
     validations = PostgresValidationRepository.connect(dsn=postgres_dsn)
     risks = PostgresRiskDecisionRepository.connect(dsn=postgres_dsn)
     executions = PostgresPaperExecutionRepository.connect(dsn=postgres_dsn)
+    execution_controls = PostgresExecutionControlRepository.connect(dsn=postgres_dsn)
     control = PostgresControlRepository.connect(dsn=postgres_dsn)
     try:
         market = await ClickHouseDailyRepository.connect(dsn=clickhouse_dsn, source="tushare")
@@ -329,6 +352,7 @@ async def _production_service(settings: AppSettings) -> ConsoleService:
         await validations.close()
         await risks.close()
         await executions.close()
+        await execution_controls.close()
         await control.close()
         raise
     reader = ValidatedDailyDatasetReader(
@@ -354,6 +378,7 @@ async def _production_service(settings: AppSettings) -> ConsoleService:
         validation_runner=validation_runner,
         risk_repository=risks,
         execution_repository=executions,
+        execution_control_repository=execution_controls,
     )
 
 

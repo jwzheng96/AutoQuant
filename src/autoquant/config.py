@@ -45,6 +45,7 @@ class AppSettings(BaseSettings):
     web_port: int = Field(default=8000, ge=1, le=65535)
     web_username: str = "operator"
     web_password: SecretStr | None = None
+    paper_account_id: str = "paper-main"
 
     @field_validator("tushare_api_url")
     @classmethod
@@ -56,9 +57,24 @@ class AppSettings(BaseSettings):
 
     @model_validator(mode="after")
     def reject_unsafe_live_flag(self) -> "AppSettings":
-        if self.live_trading_enabled and self.environment is not RuntimeEnvironment.LIVE:
-            raise ValueError("live_trading_enabled requires the live environment")
+        if self.live_trading_enabled:
+            raise ValueError("live trading is hard-locked in this release")
         return self
+
+    @field_validator("paper_account_id")
+    @classmethod
+    def require_safe_paper_account_id(cls, value: str) -> str:
+        normalized = value.strip()
+        if (
+            not 1 <= len(normalized) <= 64
+            or not normalized[0].isalnum()
+            or any(
+                character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
+                for character in normalized
+            )
+        ):
+            raise ValueError("paper_account_id must be a 1-64 character safe identifier")
+        return normalized
 
     def require_rqdata(self) -> RqdataCredentials:
         password = self.rqdata_password

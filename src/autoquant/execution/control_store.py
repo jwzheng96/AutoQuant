@@ -1,0 +1,478 @@
+from __future__ import annotations
+
+import json
+import re
+from datetime import datetime, timedelta
+
+from sqlalchemy import text
+from sqlalchemy.engine import RowMapping
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
+
+from autoquant.clock import to_utc
+from autoquant.data.models import _canonical_hash
+from autoquant.errors import PersistenceUnavailableError
+from autoquant.execution.control import (
+    KillSwitchAction,
+    KillSwitchCommand,
+    KillSwitchControl,
+    KillSwitchEvent,
+    KillSwitchReason,
+    apply_kill_switch_command,
+    command_payload,
+    control_payload,
+)
+
+_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+_STATE_COLUMNS = """
+account_id, active, version, reason, changed_at, changed_by,
+last_event_hash, state_hash, state_payload
+"""
+
+
+class PostgresExecutionControlRepository:
+    """Durable fail-closed kill switch with an immutable command chain."""
+
+    def __init__(self, *, engine: AsyncEngine, schema: str = "public") -> None:
+        if _IDENTIFIER.fullmatch(schema) is None:
+            raise ValueError("schema must be a safe PostgreSQL identifier")
+        self._engine = engine
+        self._schema = schema
+
+    @classmethod
+    def connect(
+        cls, *, dsn: str, schema: str = "public"
+    ) -> PostgresExecutionControlRepository:
+        if not dsn.strip():
+            raise ValueError("dsn cannot be empty")
+        try:
+            engine = create_async_engine(dsn, pool_pre_ping=True)
+        except Exception:
+            raise PersistenceUnavailableError(
+                "PostgreSQL execution control connection failed"
+            ) from None
+        return cls(engine=engine, schema=schema)
+
+    async def close(self) -> None:
+        await self._engine.dispose()
+
+    async def ensure_fail_closed(
+        self, *, account_id: str, now: datetime
+    ) -> KillSwitchControl:
+        occurred_at = to_utc(now, name="kill switch initialization time")
+        command = KillSwitchCommand(
+            command_id=f"initialize-kill-switch:{account_id}",
+            account_id=account_id,
+            action=KillSwitchAction.INITIALIZE,
+            reason=KillSwitchReason.INITIALIZING,
+            actor="system",
+            occurred_at=occurred_at,
+        )
+        try:
+            async with self._engine.begin() as connection:
+                await _lock(connection, account_id)
+                row = await self._select_state(connection, account_id, for_update=True)
+                if row is not None:
+                    return _state_from_row(row)
+                state, event = apply_kill_switch_command(None, command)
+                await connection.execute(
+                    text(
+                        f"""
+                        INSERT INTO {self._schema}.execution_control_state
+                            (account_id, active, version, reason, changed_at,
+                             changed_by, last_event_hash, state_hash, state_payload)
+                        VALUES
+                            (:account_id, :active, :version, :reason, :changed_at,
+                             :changed_by, :last_event_hash, :state_hash,
+                             CAST(:state_payload AS jsonb))
+                        """
+                    ),
+                    _state_parameters(state),
+                )
+                await self._insert_event(connection, state, event)
+                return state
+        except (ValueError, PersistenceUnavailableError):
+            raise
+        except Exception:
+            raise PersistenceUnavailableError(
+                "Kill switch initialization failed"
+            ) from None
+
+    async def get(self, *, account_id: str) -> KillSwitchControl:
+        try:
+            async with self._engine.connect() as connection:
+                row = await self._select_state(connection, account_id, for_update=False)
+        except Exception:
+            raise PersistenceUnavailableError("Kill switch read failed") from None
+        if row is None:
+            raise LookupError("kill switch is not initialized")
+        return _state_from_row(row)
+
+    async def activate(
+        self,
+        *,
+        account_id: str,
+        command_id: str,
+        reason: KillSwitchReason,
+        actor: str,
+        now: datetime,
+        evidence_hash: str | None = None,
+    ) -> KillSwitchControl:
+        if reason in {KillSwitchReason.INITIALIZING, KillSwitchReason.RESET_APPROVED}:
+            raise ValueError("activation reason is invalid")
+        await self.ensure_fail_closed(account_id=account_id, now=now)
+        command = KillSwitchCommand(
+            command_id=command_id,
+            account_id=account_id,
+            action=KillSwitchAction.ACTIVATE,
+            reason=reason,
+            actor=actor,
+            occurred_at=now,
+            evidence_hash=evidence_hash,
+        )
+        return await self._mutate(command=command)
+
+    async def reset(
+        self,
+        *,
+        account_id: str,
+        command_id: str,
+        actor: str,
+        now: datetime,
+        expected_version: int,
+        reconciliation_report_hash: str,
+        recovery_verified: bool,
+        max_reconciliation_age: timedelta = timedelta(seconds=10),
+    ) -> KillSwitchControl:
+        if type(recovery_verified) is not bool or not recovery_verified:
+            raise ValueError("verified execution recovery is required for reset")
+        if expected_version < 1:
+            raise ValueError("expected_version must be positive")
+        if max_reconciliation_age <= timedelta(0):
+            raise ValueError("max_reconciliation_age must be positive")
+        command = KillSwitchCommand(
+            command_id=command_id,
+            account_id=account_id,
+            action=KillSwitchAction.RESET,
+            reason=KillSwitchReason.RESET_APPROVED,
+            actor=actor,
+            occurred_at=now,
+            evidence_hash=reconciliation_report_hash,
+        )
+        return await self._mutate(
+            command=command,
+            expected_version=expected_version,
+            max_reconciliation_age=max_reconciliation_age,
+        )
+
+    async def replay(self, *, account_id: str) -> KillSwitchControl:
+        current = await self.get(account_id=account_id)
+        try:
+            async with self._engine.connect() as connection:
+                rows = (
+                    (
+                        await connection.execute(
+                            text(
+                                f"""
+                                SELECT event_hash, sequence, command_hash,
+                                       previous_hash, transition_state_hash,
+                                       command_payload
+                                FROM {self._schema}.execution_control_events
+                                WHERE account_id = :account_id
+                                ORDER BY sequence
+                                """
+                            ),
+                            {"account_id": account_id},
+                        )
+                    )
+                    .mappings()
+                    .all()
+                )
+        except Exception:
+            raise PersistenceUnavailableError(
+                "Kill switch replay read failed"
+            ) from None
+        replayed: KillSwitchControl | None = None
+        for row in rows:
+            command = _command_from_payload(row["command_payload"])
+            replayed, event = apply_kill_switch_command(replayed, command)
+            if (
+                event.event_hash != str(row["event_hash"])
+                or event.sequence != int(row["sequence"])
+                or command.command_hash != str(row["command_hash"])
+                or event.previous_hash != str(row["previous_hash"])
+                or event.transition_state_hash
+                != str(row["transition_state_hash"])
+            ):
+                raise PersistenceUnavailableError(
+                    "Kill switch event failed integrity verification"
+                )
+        if replayed is None or replayed != current:
+            raise PersistenceUnavailableError(
+                "Kill switch state does not match event replay"
+            )
+        return replayed
+
+    async def _mutate(
+        self,
+        *,
+        command: KillSwitchCommand,
+        expected_version: int | None = None,
+        max_reconciliation_age: timedelta | None = None,
+    ) -> KillSwitchControl:
+        try:
+            async with self._engine.begin() as connection:
+                await _lock(connection, command.account_id)
+                row = await self._select_state(
+                    connection, command.account_id, for_update=True
+                )
+                if row is None:
+                    raise LookupError("kill switch is not initialized")
+                current = _state_from_row(row)
+                prior = (
+                    (
+                        await connection.execute(
+                            text(
+                                f"SELECT command_hash FROM {self._schema}.execution_control_events "
+                                "WHERE command_id = :command_id"
+                            ),
+                            {"command_id": command.command_id},
+                        )
+                    )
+                    .mappings()
+                    .one_or_none()
+                )
+                if prior is not None:
+                    if str(prior["command_hash"]) != command.command_hash:
+                        raise ValueError("command_id already belongs to another command")
+                    return current
+                if expected_version is not None and current.version != expected_version:
+                    raise ValueError("kill switch version changed before reset")
+                if command.action is KillSwitchAction.RESET:
+                    if not current.active:
+                        raise ValueError("kill switch is already inactive")
+                    if max_reconciliation_age is None:
+                        raise ValueError("reset reconciliation age is missing")
+                    await self._verify_reset_evidence(
+                        connection,
+                        command=command,
+                        max_age=max_reconciliation_age,
+                    )
+                state, event = apply_kill_switch_command(current, command)
+                await self._insert_event(connection, state, event)
+                result = await connection.execute(
+                    text(
+                        f"""
+                        UPDATE {self._schema}.execution_control_state
+                        SET active = :active,
+                            version = :version,
+                            reason = :reason,
+                            changed_at = :changed_at,
+                            changed_by = :changed_by,
+                            last_event_hash = :last_event_hash,
+                            state_hash = :state_hash,
+                            state_payload = CAST(:state_payload AS jsonb)
+                        WHERE account_id = :account_id
+                          AND state_hash = :previous_state_hash
+                        """
+                    ),
+                    {
+                        **_state_parameters(state),
+                        "previous_state_hash": current.state_hash,
+                    },
+                )
+                if result.rowcount != 1:
+                    raise PersistenceUnavailableError(
+                        "Kill switch optimistic update failed"
+                    )
+                return state
+        except (LookupError, ValueError, PersistenceUnavailableError):
+            raise
+        except Exception:
+            raise PersistenceUnavailableError("Kill switch update failed") from None
+
+    async def _verify_reset_evidence(
+        self,
+        connection: AsyncConnection,
+        *,
+        command: KillSwitchCommand,
+        max_age: timedelta,
+    ) -> None:
+        row = (
+            (
+                await connection.execute(
+                    text(
+                        f"""
+                        SELECT account_id, evaluated_at, reconciled
+                        FROM {self._schema}.execution_reconciliation_reports
+                        WHERE report_hash = :report_hash
+                        """
+                    ),
+                    {"report_hash": command.evidence_hash},
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if row is None or not bool(row["reconciled"]):
+            raise ValueError("reset requires a passing persisted reconciliation")
+        evaluated_at = to_utc(row["evaluated_at"], name="reconciliation time")
+        if str(row["account_id"]) != command.account_id:
+            raise ValueError("reset reconciliation belongs to another account")
+        if (
+            command.occurred_at < evaluated_at
+            or command.occurred_at - evaluated_at > max_age
+        ):
+            raise ValueError("reset reconciliation is stale or from the future")
+
+    async def _select_state(
+        self, connection: AsyncConnection, account_id: str, *, for_update: bool
+    ) -> RowMapping | None:
+        suffix = " FOR UPDATE" if for_update else ""
+        return (
+            (
+                await connection.execute(
+                    text(
+                        f"SELECT {_STATE_COLUMNS} "
+                        f"FROM {self._schema}.execution_control_state "
+                        f"WHERE account_id = :account_id{suffix}"
+                    ),
+                    {"account_id": account_id},
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+
+    async def _insert_event(
+        self,
+        connection: AsyncConnection,
+        state: KillSwitchControl,
+        event: KillSwitchEvent,
+    ) -> None:
+        command = event.command
+        await connection.execute(
+            text(
+                f"""
+                INSERT INTO {self._schema}.execution_control_events
+                    (event_hash, command_id, command_hash, account_id,
+                     sequence, action, reason, actor, occurred_at,
+                     evidence_hash, previous_hash, transition_state_hash,
+                     command_payload)
+                VALUES
+                    (:event_hash, :command_id, :command_hash, :account_id,
+                     :sequence, :action, :reason, :actor, :occurred_at,
+                     :evidence_hash, :previous_hash, :transition_state_hash,
+                     CAST(:command_payload AS jsonb))
+                """
+            ),
+            {
+                "event_hash": event.event_hash,
+                "command_id": command.command_id,
+                "command_hash": command.command_hash,
+                "account_id": state.account_id,
+                "sequence": event.sequence,
+                "action": command.action.value,
+                "reason": command.reason.value,
+                "actor": command.actor,
+                "occurred_at": command.occurred_at,
+                "evidence_hash": command.evidence_hash,
+                "previous_hash": event.previous_hash,
+                "transition_state_hash": event.transition_state_hash,
+                "command_payload": _json(command_payload(command)),
+            },
+        )
+
+
+async def _lock(connection: AsyncConnection, account_id: str) -> None:
+    await connection.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
+        {"lock_key": f"autoquant:execution-control:{account_id}"},
+    )
+
+
+def _state_from_row(row: RowMapping) -> KillSwitchControl:
+    try:
+        payload = _object(row["state_payload"])
+        state = KillSwitchControl(
+            account_id=str(payload["account_id"]),
+            active=bool(payload["active"]),
+            version=int(str(payload["version"])),
+            reason=KillSwitchReason(str(payload["reason"])),
+            changed_at=_datetime(payload["changed_at"]),
+            changed_by=str(payload["changed_by"]),
+            last_event_hash=str(payload["last_event_hash"]),
+        )
+        if (
+            state.account_id != str(row["account_id"])
+            or state.active is not bool(row["active"])
+            or state.version != int(row["version"])
+            or state.reason.value != str(row["reason"])
+            or state.changed_at != _datetime(row["changed_at"])
+            or state.changed_by != str(row["changed_by"])
+            or state.last_event_hash != str(row["last_event_hash"])
+            or state.state_hash != str(row["state_hash"])
+        ):
+            raise ValueError("kill switch columns do not match payload")
+        return state
+    except (KeyError, TypeError, ValueError):
+        raise PersistenceUnavailableError(
+            "Stored kill switch state failed integrity verification"
+        ) from None
+
+
+def _command_from_payload(raw: object) -> KillSwitchCommand:
+    try:
+        payload = _object(raw)
+        command = KillSwitchCommand(
+            command_id=str(payload["command_id"]),
+            account_id=str(payload["account_id"]),
+            action=KillSwitchAction(str(payload["action"])),
+            reason=KillSwitchReason(str(payload["reason"])),
+            actor=str(payload["actor"]),
+            occurred_at=_datetime(payload["occurred_at"]),
+            evidence_hash=(
+                None
+                if payload["evidence_hash"] is None
+                else str(payload["evidence_hash"])
+            ),
+        )
+        if _canonical_hash(payload) != command.command_hash:
+            raise ValueError("kill switch command hash mismatch")
+        return command
+    except (KeyError, TypeError, ValueError):
+        raise PersistenceUnavailableError(
+            "Stored kill switch command failed integrity verification"
+        ) from None
+
+
+def _state_parameters(state: KillSwitchControl) -> dict[str, object]:
+    return {
+        "account_id": state.account_id,
+        "active": state.active,
+        "version": state.version,
+        "reason": state.reason.value,
+        "changed_at": state.changed_at,
+        "changed_by": state.changed_by,
+        "last_event_hash": state.last_event_hash,
+        "state_hash": state.state_hash,
+        "state_payload": _json(control_payload(state)),
+    }
+
+
+def _object(raw: object) -> dict[str, object]:
+    value = json.loads(raw) if isinstance(raw, str) else raw
+    if not isinstance(value, dict):
+        raise TypeError("stored payload must be an object")
+    return value
+
+
+def _datetime(raw: object) -> datetime:
+    if isinstance(raw, datetime):
+        return to_utc(raw)
+    if isinstance(raw, str):
+        return to_utc(datetime.fromisoformat(raw))
+    raise TypeError("stored timestamp is invalid")
+
+
+def _json(value: object) -> str:
+    return json.dumps(value, separators=(",", ":"), sort_keys=True)

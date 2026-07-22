@@ -134,5 +134,20 @@ def test_web_host_rejects_non_loopback_binding(host: str) -> None:
 
 
 def test_live_flag_is_rejected_outside_live_environment() -> None:
-    with pytest.raises(ValueError, match="live environment"):
+    with pytest.raises(ValueError, match="hard-locked"):
         AppSettings(_env_file=None, live_trading_enabled=True)
+
+
+def test_live_flag_is_still_rejected_in_live_environment() -> None:
+    with pytest.raises(ValueError, match="hard-locked"):
+        AppSettings(
+            _env_file=None,
+            environment=RuntimeEnvironment.LIVE,
+            live_trading_enabled=True,
+        )
+
+
+@pytest.mark.parametrize("account_id", ["", " paper account ", "../paper", "x" * 65])
+def test_paper_account_id_must_be_safe(account_id: str) -> None:
+    with pytest.raises(ValueError, match="paper_account_id"):
+        AppSettings(_env_file=None, paper_account_id=account_id)

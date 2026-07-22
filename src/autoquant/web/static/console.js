@@ -208,8 +208,22 @@ async function loadTrading() {
     setText("execution-order-count", data.execution?.order_count ?? 0);
     setText("execution-event-count", data.execution?.event_count ?? 0);
     setText("execution-remaining-gates", data.execution?.remaining_gates?.join(", ") ?? "—");
+    setText("kill-switch-state", data.execution?.kill_switch_active ? "ACTIVE" : "RESET");
+    setText("kill-switch-reason", data.execution?.kill_switch_reason ?? "—");
   }
   catch (error) { showToast(`能力读取失败：${error.message}`); }
+}
+
+async function activateKillSwitch() {
+  try {
+    await requestJson("/api/v1/execution/kill-switch/activate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-AutoQuant-CSRF": csrf },
+      body: JSON.stringify({ command_id: `web-kill-switch-${crypto.randomUUID()}`, reason: "manual" }),
+    });
+    showToast("紧急停机已激活并写入不可变审计链");
+    await loadTrading();
+  } catch (error) { showToast(`紧急停机失败：${error.message}`); }
 }
 
 const researchManifests = new Map();
@@ -465,5 +479,6 @@ if (page === "/") {
 } else {
   statusPill(document.getElementById("global-status"), "研究模式");
   document.getElementById("page-title").textContent = "交易中心";
+  document.getElementById("activate-kill-switch").addEventListener("click", activateKillSwitch);
   loadTrading();
 }

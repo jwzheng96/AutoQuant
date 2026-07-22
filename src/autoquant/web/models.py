@@ -403,6 +403,9 @@ class PaperExecutionStatus(BaseModel):
     open_order_count: int = Field(ge=0)
     latest_reconciliation_at: datetime | None = None
     latest_reconciled: bool | None = None
+    kill_switch_active: bool
+    kill_switch_reason: str
+    kill_switch_version: int = Field(ge=0)
     remaining_gates: tuple[str, ...]
 
     @field_validator("latest_reconciliation_at")
@@ -415,3 +418,24 @@ class PaperExecutionStatus(BaseModel):
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("reconciliation time must be timezone-aware")
         return value.astimezone(UTC)
+
+
+class KillSwitchActivationRequest(BaseModel):
+    command_id: str
+    reason: str
+
+    @field_validator("command_id")
+    @classmethod
+    def validate_command_id(cls, value: str) -> str:
+        normalized = value.strip()
+        if _IDEMPOTENCY_KEY.fullmatch(normalized) is None:
+            raise ValueError("command_id must be 16-128 safe characters")
+        return normalized
+
+    @field_validator("reason")
+    @classmethod
+    def validate_activation_reason(cls, value: str) -> str:
+        normalized = value.strip().casefold()
+        if normalized not in {"manual", "drill"}:
+            raise ValueError("operator activation reason must be manual or drill")
+        return normalized

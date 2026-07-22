@@ -68,6 +68,8 @@ def render_app_env(
         "AQ_WEB_PORT": str(web_port),
         "AQ_WEB_USERNAME": source.get("AQ_WEB_USERNAME", "operator") or "operator",
         "AQ_WEB_PASSWORD": web_password,
+        "AQ_PAPER_ACCOUNT_ID": source.get("AQ_PAPER_ACCOUNT_ID", "paper-main")
+        or "paper-main",
     }
     return "".join(f"{key}={value}\n" for key, value in values.items())
 

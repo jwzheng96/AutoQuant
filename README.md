@@ -37,6 +37,12 @@ PostgreSQL schema v8 persists their materialized orders, immutable transition ev
 snapshots, and reconciliation reports. Application startup and the read-only execution status
 replay every bounded order history and fail closed if its projection or hash chain differs.
 
+PostgreSQL schema v9 adds a fail-closed per-account kill switch and immutable control-command
+chain. It initializes active, automatically activates on recovery/reconciliation failures, and
+can only be reset by code that supplies a current passing persisted reconciliation, the expected
+control version, and verified execution recovery. The Web console exposes activation only.
+`AQ_LIVE_TRADING_ENABLED=true` is rejected even in a live environment in this release.
+
 All dependency, test, lint, type-check, migration, and Git mutation commands for this
 checkout must run on `rlocal`; see [the phase-1 runbook](docs/runbooks/phase1-data-foundation.md).
 

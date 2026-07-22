@@ -35,6 +35,7 @@ class FakeConsoleService:
         self.backtest_run_id = uuid4()
         self.created_validations: list[WalkForwardJobRequest] = []
         self.validation_experiment_id = uuid4()
+        self.kill_switch_activations: list[tuple[str, str, str]] = []
 
     async def start(self) -> None:
         self.started = True
@@ -180,8 +181,17 @@ class FakeConsoleService:
             open_order_count=1,
             latest_reconciliation_at=datetime(2025, 1, 1, tzinfo=UTC),
             latest_reconciled=True,
+            kill_switch_active=True,
+            kill_switch_reason="initializing",
+            kill_switch_version=1,
             remaining_gates=("paper_broker_adapter", "kill_switch_drill"),
         )
+
+    async def activate_kill_switch(
+        self, *, command_id: str, reason: str, requested_by: str
+    ) -> PaperExecutionStatus:
+        self.kill_switch_activations.append((command_id, reason, requested_by))
+        return await self.execution_status()
 
 
 def _settings() -> AppSettings:
@@ -329,6 +339,35 @@ def test_execution_endpoint_reports_verified_recovery_without_order_actions() ->
     assert response.json()["recovery_verified"] is True
     assert response.json()["gateway_available"] is False
     assert "submit" not in response.text.casefold()
+
+
+def test_kill_switch_activation_is_authenticated_and_csrf_protected() -> None:
+    service = FakeConsoleService()
+    app = create_app(_settings(), service=service)
+    payload = {"command_id": "web-kill-switch-test-0001", "reason": "manual"}
+
+    with TestClient(app) as client:
+        denied = client.post(
+            "/api/v1/execution/kill-switch/activate",
+            json=payload,
+            auth=_auth(),
+        )
+        page = client.get("/trading", auth=_auth())
+        match = re.search(r'name="autoquant-csrf" content="([^"]+)"', page.text)
+        assert match is not None
+        accepted = client.post(
+            "/api/v1/execution/kill-switch/activate",
+            json=payload,
+            auth=_auth(),
+            headers={"X-AutoQuant-CSRF": match.group(1)},
+        )
+
+    assert denied.status_code == 403
+    assert accepted.status_code == 200
+    assert accepted.json()["kill_switch_active"] is True
+    assert service.kill_switch_activations == [
+        ("web-kill-switch-test-0001", "manual", "operator")
+    ]
 
 
 def test_backtest_creation_is_csrf_protected_and_strategy_is_server_selected() -> None:

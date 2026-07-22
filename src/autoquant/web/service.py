@@ -4,7 +4,7 @@ import asyncio
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, date, datetime
 from typing import Protocol
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from autoquant.adapters.clickhouse_daily import ClickHouseDailyRepository
 from autoquant.adapters.postgres import PostgresControlRepository
@@ -12,6 +12,8 @@ from autoquant.backtest.models import BacktestResult
 from autoquant.backtest.validation import WalkForwardConfig, WalkForwardResult
 from autoquant.config import AppSettings
 from autoquant.errors import AutoQuantError, PersistenceUnavailableError
+from autoquant.execution.control import KillSwitchReason
+from autoquant.execution.control_store import PostgresExecutionControlRepository
 from autoquant.execution.store import PostgresPaperExecutionRepository
 from autoquant.operations import run_daily_ingestion
 from autoquant.web.backtest_store import PostgresBacktestRepository
@@ -95,6 +97,10 @@ class ConsoleServicePort(Protocol):
 
     async def execution_status(self) -> PaperExecutionStatus: ...
 
+    async def activate_kill_switch(
+        self, *, command_id: str, reason: str, requested_by: str
+    ) -> PaperExecutionStatus: ...
+
     async def bars(
         self,
         *,
@@ -119,6 +125,7 @@ class ConsoleService:
         validation_runner: WalkForwardRunnerPort | None = None,
         risk_repository: PostgresRiskDecisionRepository | None = None,
         execution_repository: PostgresPaperExecutionRepository | None = None,
+        execution_control_repository: PostgresExecutionControlRepository | None = None,
         ingestion_runner: IngestionRunner = run_daily_ingestion,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
         poll_interval: float = 1.0,
@@ -137,6 +144,7 @@ class ConsoleService:
         self._validation_runner = validation_runner
         self._risk = risk_repository
         self._execution = execution_repository
+        self._execution_controls = execution_control_repository
         self._ingestion_runner = ingestion_runner
         self._now = now
         self._poll_interval = poll_interval
@@ -148,8 +156,28 @@ class ConsoleService:
         self._validation_worker: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
+        if self._execution_controls is not None:
+            await self._execution_controls.ensure_fail_closed(
+                account_id=self._settings.paper_account_id,
+                now=self._now(),
+            )
         if self._execution is not None:
-            await self._execution.verify_recovery()
+            try:
+                await self._execution.verify_recovery()
+            except Exception:
+                if self._execution_controls is not None:
+                    await self._execution_controls.activate(
+                        account_id=self._settings.paper_account_id,
+                        command_id=f"startup-recovery-{uuid4()}",
+                        reason=KillSwitchReason.RECOVERY_FAILED,
+                        actor="console-startup",
+                        now=self._now(),
+                    )
+                raise
+        if self._execution_controls is not None:
+            await self._execution_controls.replay(
+                account_id=self._settings.paper_account_id
+            )
         await self._operators.interrupt_running_jobs(now=self._now())
         if self._worker is None:
             self._worker = asyncio.create_task(self._work_loop(), name="operator-job-worker")
@@ -199,6 +227,8 @@ class ConsoleService:
             await self._risk.close()
         if self._execution is not None:
             await self._execution.close()
+        if self._execution_controls is not None:
+            await self._execution_controls.close()
         await self._operators.close()
         await self._control.close()
         await self._market.client.close()
@@ -401,6 +431,9 @@ class ConsoleService:
                 event_count=0,
                 reconciliation_count=0,
                 open_order_count=0,
+                kill_switch_active=True,
+                kill_switch_reason="control_store_unavailable",
+                kill_switch_version=0,
                 remaining_gates=(
                     "paper_execution_store",
                     "paper_broker_adapter",
@@ -410,6 +443,13 @@ class ConsoleService:
                 ),
             )
         summary = await self._execution.verify_recovery()
+        control = (
+            None
+            if self._execution_controls is None
+            else await self._execution_controls.replay(
+                account_id=self._settings.paper_account_id
+            )
+        )
         return PaperExecutionStatus(
             status="locked",
             persistence_available=True,
@@ -421,6 +461,11 @@ class ConsoleService:
             open_order_count=summary.open_order_count,
             latest_reconciliation_at=summary.latest_reconciliation_at,
             latest_reconciled=summary.latest_reconciled,
+            kill_switch_active=True if control is None else control.active,
+            kill_switch_reason=(
+                "control_store_unavailable" if control is None else control.reason.value
+            ),
+            kill_switch_version=0 if control is None else control.version,
             remaining_gates=(
                 "paper_broker_adapter",
                 "reconciliation_loop",
@@ -428,6 +473,28 @@ class ConsoleService:
                 "kill_switch_drill",
             ),
         )
+
+    async def activate_kill_switch(
+        self, *, command_id: str, reason: str, requested_by: str
+    ) -> PaperExecutionStatus:
+        if self._execution_controls is None:
+            raise PersistenceUnavailableError(
+                "Execution control service is unavailable"
+            )
+        reason_code = {
+            "manual": KillSwitchReason.MANUAL,
+            "drill": KillSwitchReason.DRILL,
+        }.get(reason)
+        if reason_code is None:
+            raise ValueError("operator activation reason must be manual or drill")
+        await self._execution_controls.activate(
+            account_id=self._settings.paper_account_id,
+            command_id=command_id,
+            reason=reason_code,
+            actor=requested_by,
+            now=self._now(),
+        )
+        return await self.execution_status()
 
     async def bars(
         self,
