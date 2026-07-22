@@ -145,7 +145,14 @@ def test_tushare_check_reports_sorted_capability_matrix_and_incomplete_exit() ->
 def test_tushare_check_succeeds_only_when_all_required_endpoints_are_available() -> None:
     statuses = {
         method: "available"
-        for method in ("daily", "adj_factor", "trade_cal", "stock_basic", "suspend_d")
+        for method in (
+            "daily",
+            "adj_factor",
+            "trade_cal",
+            "stock_basic",
+            "suspend_d",
+            "stk_limit",
+        )
     }
     with patch(
         "autoquant.cli._tushare_capabilities",

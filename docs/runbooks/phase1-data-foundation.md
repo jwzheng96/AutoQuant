@@ -45,7 +45,7 @@ export AQ_TUSHARE_TOKEN='<enter locally; do not paste into chat>'
 /Users/zjw/.local/bin/uv run autoquant tushare-check
 ```
 
-When all five endpoints report `available` and both databases have the required schemas,
+When all six endpoints report `available` and both databases have the required schemas,
 ingest a small explicit interval:
 
 ```bash
@@ -101,3 +101,15 @@ ssh -L 8000:127.0.0.1:8000 rlocal
 
 The console exposes health, data coverage, point-in-time daily queries, and bounded audited
 ingestion jobs. The trading view intentionally has no order action and no synthetic PnL.
+
+## Research execution boundary
+
+`autoquant.backtest` provides the deterministic cash-account ledger used by the next research
+phase. Its default fee model is a reference assumption, not a statement of the user's actual
+broker tariff. Before comparing performance, configure the real commission schedule and keep
+the rule, fee, execution-model, data-manifest and `as_of` versions with every result.
+
+Do not expose a Web backtest action until historical risk-warning state, listing-session age,
+trading calendar and suspension evidence are persisted as point-in-time revisions and included
+in the validated manifest. Daily OHLC also cannot reproduce limit-order queues; minute or tick
+replay and simulation evidence remain required before any execution gateway is considered.

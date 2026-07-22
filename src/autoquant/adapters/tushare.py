@@ -22,6 +22,7 @@ from autoquant.data.daily_models import (
     DailyBarRevision,
     DailyCoverageEvidence,
     DailyDatasetBatch,
+    DailyPriceLimit,
     DailySuspensionStatus,
     InstrumentLifecycle,
     TradingSession,
@@ -330,6 +331,7 @@ class TushareDailySource:
     CALENDAR_FIELDS = ("exchange", "cal_date", "is_open")
     BASIC_FIELDS = ("ts_code", "list_status", "list_date", "delist_date")
     SUSPEND_FIELDS = ("ts_code", "trade_date", "suspend_type", "suspend_timing")
+    LIMIT_FIELDS = ("ts_code", "trade_date", "pre_close", "up_limit", "down_limit")
 
     def __init__(
         self,
@@ -384,6 +386,7 @@ class TushareDailySource:
         bars: list[DailyBarRevision] = []
         factors: list[AdjustmentFactorRevision] = []
         suspensions: list[DailySuspensionStatus] = []
+        price_limits: list[DailyPriceLimit] = []
         for instrument, vendor_code in zip(instruments, vendor_codes, strict=True):
             for window_start, window_end in self.date_windows(start, end):
                 daily_result = await self._client.post(
@@ -441,6 +444,24 @@ class TushareDailySource:
                     sessions=sessions,
                 )
             )
+            limit_result = await self._client.post(
+                "stk_limit",
+                params={
+                    "ts_code": vendor_code,
+                    "start_date": self._date_text(start),
+                    "end_date": self._date_text(end),
+                },
+                fields=self.LIMIT_FIELDS,
+            )
+            evidence.append(limit_result.evidence)
+            price_limits.extend(
+                self._map_price_limits(
+                    limit_result,
+                    requested=instrument,
+                    start=start,
+                    end=end,
+                )
+            )
 
         return DailyDatasetBatch(
             bars=tuple(sorted(bars, key=lambda value: (value.instrument, value.session_date))),
@@ -455,6 +476,12 @@ class TushareDailySource:
                 suspensions=tuple(
                     sorted(
                         suspensions,
+                        key=lambda value: (value.instrument, value.session_date),
+                    )
+                ),
+                price_limits=tuple(
+                    sorted(
+                        price_limits,
                         key=lambda value: (value.instrument, value.session_date),
                     )
                 ),
@@ -488,6 +515,11 @@ class TushareDailySource:
                 "suspend_d",
                 {"ts_code": vendor_code, "trade_date": day},
                 self.SUSPEND_FIELDS,
+            ),
+            (
+                "stk_limit",
+                {"ts_code": vendor_code, "trade_date": day},
+                self.LIMIT_FIELDS,
             ),
         )
         statuses: dict[str, str] = {}
@@ -659,6 +691,35 @@ class TushareDailySource:
                     availability_policy=self._availability.version,
                     evidence_hash=result.evidence.response_hash,
                     factor=self._decimal(row, "adj_factor"),
+                )
+            )
+        return tuple(values)
+
+    @classmethod
+    def _map_price_limits(
+        cls,
+        result: TushareApiResult,
+        *,
+        requested: str,
+        start: date,
+        end: date,
+    ) -> tuple[DailyPriceLimit, ...]:
+        values: list[DailyPriceLimit] = []
+        for row in result.rows:
+            instrument = from_tushare_code(cls._text(row, "ts_code"))
+            session_date = cls._date(row, "trade_date")
+            if instrument != requested or not start <= session_date <= end:
+                raise VendorResponseError("Tushare stk_limit returned a row outside request")
+            values.append(
+                DailyPriceLimit(
+                    source=_SOURCE,
+                    instrument=instrument,
+                    session_date=session_date,
+                    pre_close=cls._decimal(row, "pre_close"),
+                    up_limit=cls._decimal(row, "up_limit"),
+                    down_limit=cls._decimal(row, "down_limit"),
+                    available_at=result.evidence.requested_at,
+                    response_hash=result.evidence.response_hash,
                 )
             )
         return tuple(values)

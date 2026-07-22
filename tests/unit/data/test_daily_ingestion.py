@@ -4,6 +4,7 @@ import hashlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime
+from decimal import Decimal
 
 import pytest
 
@@ -17,6 +18,7 @@ from autoquant.data.daily_models import (
     DailyBarRevision,
     DailyCoverageEvidence,
     DailyDatasetBatch,
+    DailyPriceLimit,
     DailySuspensionStatus,
     InstrumentLifecycle,
     TradingSession,
@@ -45,9 +47,16 @@ def evidence(method: str) -> SourceEvidence:
 
 
 def batch(*, complete: bool = True) -> DailyDatasetBatch:
-    daily, adj, trade, basic, suspend = (
+    daily, adj, trade, basic, suspend, limit = (
         evidence(method)
-        for method in ("daily", "adj_factor", "trade_cal", "stock_basic", "suspend_d")
+        for method in (
+            "daily",
+            "adj_factor",
+            "trade_cal",
+            "stock_basic",
+            "suspend_d",
+            "stk_limit",
+        )
     )
     bars = (
         DailyBarRevision.from_values(
@@ -103,8 +112,20 @@ def batch(*, complete: bool = True) -> DailyDatasetBatch:
                     "tushare", INSTRUMENT, DAY, False, AS_OF, suspend.response_hash
                 ),
             ),
+            price_limits=(
+                DailyPriceLimit(
+                    "tushare",
+                    INSTRUMENT,
+                    DAY,
+                    Decimal("9.95"),
+                    Decimal("10.95"),
+                    Decimal("8.96"),
+                    AS_OF,
+                    limit.response_hash,
+                ),
+            ),
         ),
-        source_evidence=(daily, adj, trade, basic, suspend),
+        source_evidence=(daily, adj, trade, basic, suspend, limit),
     )
 
 

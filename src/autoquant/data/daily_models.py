@@ -293,8 +293,51 @@ class DailySuspensionStatus:
         _require_lowercase_sha256(self.response_hash)
 
 
+@dataclass(frozen=True, slots=True)
+class DailyPriceLimit:
+    source: str
+    instrument: str
+    session_date: date
+    pre_close: Decimal
+    up_limit: Decimal
+    down_limit: Decimal
+    available_at: datetime
+    response_hash: str
+    content_hash: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        _require_nonblank(self.source, name="source")
+        _require_nonblank(self.instrument, name="instrument")
+        for name, value in (
+            ("pre_close", self.pre_close),
+            ("up_limit", self.up_limit),
+            ("down_limit", self.down_limit),
+        ):
+            _require_decimal(value, name=name, positive=True)
+        if self.down_limit >= self.up_limit:
+            raise ValueError("down_limit must be below up_limit")
+        available_at = to_utc(self.available_at, name="available_at")
+        object.__setattr__(self, "available_at", available_at)
+        _require_lowercase_sha256(self.response_hash)
+        payload = {
+            "available_at": _datetime_text(available_at),
+            "down_limit": _decimal_text(self.down_limit),
+            "instrument": self.instrument,
+            "pre_close": _decimal_text(self.pre_close),
+            "response_hash": self.response_hash,
+            "session_date": self.session_date.isoformat(),
+            "source": self.source,
+            "up_limit": _decimal_text(self.up_limit),
+        }
+        object.__setattr__(self, "content_hash", _canonical_hash(payload))
+
+
 CoverageItem = TypeVar(
-    "CoverageItem", TradingSession, InstrumentLifecycle, DailySuspensionStatus
+    "CoverageItem",
+    TradingSession,
+    InstrumentLifecycle,
+    DailySuspensionStatus,
+    DailyPriceLimit,
 )
 
 
@@ -314,26 +357,35 @@ class DailyCoverageEvidence:
     sessions: tuple[TradingSession, ...]
     lifecycles: tuple[InstrumentLifecycle, ...]
     suspensions: tuple[DailySuspensionStatus, ...]
+    price_limits: tuple[DailyPriceLimit, ...] = ()
 
     def __post_init__(self) -> None:
         sessions = tuple(self.sessions)
         lifecycles = tuple(self.lifecycles)
         suspensions = tuple(self.suspensions)
+        price_limits = tuple(self.price_limits)
         object.__setattr__(self, "sessions", sessions)
         object.__setattr__(self, "lifecycles", lifecycles)
         object.__setattr__(self, "suspensions", suspensions)
+        object.__setattr__(self, "price_limits", price_limits)
         if any(not isinstance(value, TradingSession) for value in sessions):
             raise TypeError("sessions must contain TradingSession values")
         if any(not isinstance(value, InstrumentLifecycle) for value in lifecycles):
             raise TypeError("lifecycles must contain InstrumentLifecycle values")
         if any(not isinstance(value, DailySuspensionStatus) for value in suspensions):
             raise TypeError("suspensions must contain DailySuspensionStatus values")
+        if any(not isinstance(value, DailyPriceLimit) for value in price_limits):
+            raise TypeError("price_limits must contain DailyPriceLimit values")
         _reject_conflicts(sessions, key=lambda value: (value.source, value.session_date))
         _reject_conflicts(
             lifecycles, key=lambda value: (value.source, value.instrument)
         )
         _reject_conflicts(
             suspensions,
+            key=lambda value: (value.source, value.instrument, value.session_date),
+        )
+        _reject_conflicts(
+            price_limits,
             key=lambda value: (value.source, value.instrument, value.session_date),
         )
 
@@ -379,7 +431,14 @@ class DailyDatasetBatch:
             seen.add(key)
 
     def _validate_evidence(self, evidence: tuple[SourceEvidence, ...]) -> None:
-        allowed = {"daily", "adj_factor", "trade_cal", "stock_basic", "suspend_d"}
+        allowed = {
+            "daily",
+            "adj_factor",
+            "trade_cal",
+            "stock_basic",
+            "suspend_d",
+            "stk_limit",
+        }
         if any(value.method not in allowed for value in evidence):
             raise ValueError("unsupported daily source evidence method")
         keys = {
@@ -399,6 +458,7 @@ class DailyDatasetBatch:
             (self.coverage.sessions, "trade_cal"),
             (self.coverage.lifecycles, "stock_basic"),
             (self.coverage.suspensions, "suspend_d"),
+            (self.coverage.price_limits, "stk_limit"),
         )
         for records, method in coverage_checks:
             if any(

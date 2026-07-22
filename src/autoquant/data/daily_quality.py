@@ -12,7 +12,7 @@ from autoquant.data.daily_models import (
 from autoquant.data.quality import QualityIssue, QualityReport, QualitySeverity
 
 _REQUIRED_METHODS = frozenset(
-    {"daily", "adj_factor", "trade_cal", "stock_basic", "suspend_d"}
+    {"daily", "adj_factor", "trade_cal", "stock_basic", "suspend_d", "stk_limit"}
 )
 
 
@@ -95,6 +95,10 @@ class DailyQualityGate:
             (value.instrument, value.session_date): value
             for value in batch.coverage.suspensions
         }
+        price_limits = {
+            (value.instrument, value.session_date): value
+            for value in batch.coverage.price_limits
+        }
 
         def check_record(
             record: DailyBarRevision | AdjustmentFactorRevision,
@@ -144,6 +148,14 @@ class DailyQualityGate:
                         suspension_coverage.session_date,
                         "coverage evidence is not visible at as_of",
                     )
+            for limit_coverage in batch.coverage.price_limits:
+                if limit_coverage.available_at > normalized_as_of:
+                    add(
+                        "coverage_not_visible",
+                        limit_coverage.instrument,
+                        limit_coverage.session_date,
+                        "price-limit evidence is not visible at as_of",
+                    )
 
         for instrument in instruments:
             lifecycle = lifecycles.get(instrument)
@@ -182,6 +194,13 @@ class DailyQualityGate:
                 has_bar = key in bars
                 has_factor = key in factors
                 if should_have_record:
+                    if key not in price_limits:
+                        add(
+                            "missing_price_limit",
+                            instrument,
+                            session_date,
+                            "open unsuspended session lacks price-limit coverage",
+                        )
                     if not has_bar:
                         add(
                             "missing_daily_bar",

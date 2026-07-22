@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import hashlib
 from datetime import UTC, date, datetime
+from decimal import Decimal
 
 from autoquant.data.daily_models import (
     AdjustmentFactorRevision,
     DailyBarRevision,
     DailyCoverageEvidence,
     DailyDatasetBatch,
+    DailyPriceLimit,
     DailySuspensionStatus,
     InstrumentLifecycle,
     TradingSession,
@@ -45,7 +47,14 @@ def make_batch(
     coverage_available_at: datetime = AS_OF,
     record_available_at: datetime = AVAILABLE,
 ) -> DailyDatasetBatch:
-    methods = ("daily", "adj_factor", "trade_cal", "stock_basic", "suspend_d")
+    methods = (
+        "daily",
+        "adj_factor",
+        "trade_cal",
+        "stock_basic",
+        "suspend_d",
+        "stk_limit",
+    )
     evidence_by_method = {
         method: evidence(method) for method in methods if method != omitted_method
     }
@@ -54,6 +63,7 @@ def make_batch(
     trade_evidence = evidence_by_method.get("trade_cal", evidence("trade_cal"))
     basic_evidence = evidence_by_method.get("stock_basic", evidence("stock_basic"))
     suspend_evidence = evidence_by_method.get("suspend_d", evidence("suspend_d"))
+    limit_evidence = evidence_by_method.get("stk_limit", evidence("stk_limit"))
 
     bars = (
         (
@@ -134,6 +144,18 @@ def make_batch(
             )
             if include_suspension
             else ()
+        ),
+        price_limits=(
+            DailyPriceLimit(
+                source="tushare",
+                instrument=INSTRUMENT,
+                session_date=SESSION,
+                pre_close=Decimal("9.95"),
+                up_limit=Decimal("10.95"),
+                down_limit=Decimal("8.96"),
+                available_at=coverage_available_at,
+                response_hash=limit_evidence.response_hash,
+            ),
         ),
     )
     return DailyDatasetBatch(

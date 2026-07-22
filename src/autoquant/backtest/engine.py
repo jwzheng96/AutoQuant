@@ -1,0 +1,103 @@
+from __future__ import annotations
+
+from datetime import datetime
+from decimal import Decimal
+from itertools import pairwise
+
+from autoquant.backtest.ledger import ExecutionModel, PortfolioLedger
+from autoquant.backtest.models import (
+    BacktestResult,
+    BacktestSession,
+    ExecutionReport,
+)
+from autoquant.backtest.rules import FeeSchedule
+from autoquant.clock import to_utc
+from autoquant.data.models import _require_lowercase_sha256, _require_nonblank
+
+
+class BacktestEngine:
+    def __init__(
+        self,
+        *,
+        fees: FeeSchedule | None = None,
+        execution: ExecutionModel | None = None,
+    ) -> None:
+        self._fees = fees or FeeSchedule()
+        self._execution = execution or ExecutionModel()
+
+    def run(
+        self,
+        *,
+        strategy_id: str,
+        manifest_hash: str,
+        as_of: datetime,
+        initial_cash: Decimal,
+        sessions: tuple[BacktestSession, ...],
+    ) -> BacktestResult:
+        _require_nonblank(strategy_id, name="strategy_id")
+        _require_lowercase_sha256(manifest_hash, name="manifest_hash")
+        cutoff = to_utc(as_of, name="as_of")
+        sessions = tuple(sessions)
+        if not sessions:
+            raise ValueError("sessions cannot be empty")
+        if any(
+            current.session_date >= following.session_date
+            for current, following in pairwise(sessions)
+        ):
+            raise ValueError("sessions must be strictly increasing and unique")
+        for session in sessions:
+            for market in session.markets:
+                if market.bar.available_at > cutoff:
+                    raise ValueError("market data is not visible at the requested as_of")
+
+        ledger = PortfolioLedger(
+            initial_cash=initial_cash,
+            fees=self._fees,
+            execution=self._execution,
+        )
+        reports: list[ExecutionReport] = []
+        snapshots = []
+        rule_versions: set[str] = set()
+        for session in sessions:
+            ledger.start_session(session.session_date)
+            market_by_instrument = {
+                market.bar.instrument: market for market in session.markets
+            }
+            for market in session.markets:
+                rule_versions.add(market.rules.rule_version)
+                rule_versions.add(market.rules.price_limit.rule_version)
+            for order in session.orders:
+                execution_market = market_by_instrument.get(order.instrument)
+                if execution_market is None:
+                    # Use the first market only to produce a stable, audited unknown-
+                    # instrument rejection without fabricating prices for that symbol.
+                    reports.append(ledger.execute(order, session.markets[0]))
+                else:
+                    reports.append(ledger.execute(order, execution_market))
+            snapshots.append(ledger.snapshot(session.markets))
+
+        equities = tuple(snapshot.equity for snapshot in snapshots)
+        peak = equities[0]
+        max_drawdown = Decimal("0")
+        for equity in equities:
+            peak = max(peak, equity)
+            drawdown = Decimal("0") if peak == 0 else (peak - equity) / peak
+            max_drawdown = max(max_drawdown, drawdown)
+        ending_equity = equities[-1]
+        return BacktestResult(
+            strategy_id=strategy_id,
+            manifest_hash=manifest_hash,
+            as_of=cutoff,
+            initial_cash=ledger.initial_cash,
+            ending_equity=ending_equity,
+            total_return=(ending_equity / ledger.initial_cash) - Decimal("1"),
+            max_drawdown=max_drawdown,
+            turnover=ledger.gross_turnover / ledger.initial_cash,
+            total_fees=ledger.total_fees,
+            reports=tuple(reports),
+            snapshots=tuple(snapshots),
+            rule_versions=tuple(sorted(rule_versions)),
+            fee_version=self._fees.version,
+            execution_version=self._execution.version,
+            ledger_hash=ledger.ledger_hash,
+        )

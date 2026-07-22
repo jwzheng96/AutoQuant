@@ -116,6 +116,17 @@ def base_responses(
             ]
         ],
         "suspend_d": [suspend if suspend is not None else []],
+        "stk_limit": [
+            [
+                {
+                    "ts_code": "000001.SZ",
+                    "trade_date": "20260720",
+                    "pre_close": "9.95",
+                    "up_limit": "10.95",
+                    "down_limit": "8.96",
+                }
+            ]
+        ],
     }
 
 
@@ -162,6 +173,7 @@ async def test_fetch_maps_daily_units_factor_coverage_and_next_open_visibility()
         "daily",
         "adj_factor",
         "suspend_d",
+        "stk_limit",
     ]
     assert [call[1]["list_status"] for call in client.calls[1:4]] == ["L", "D", "P"]
     bar = batch.bars[0]
@@ -174,12 +186,14 @@ async def test_fetch_maps_daily_units_factor_coverage_and_next_open_visibility()
     assert batch.coverage.sessions[0].session_date == date(2026, 7, 20)
     assert batch.coverage.lifecycles[0].list_date == date(1991, 4, 3)
     assert batch.coverage.suspensions[0].suspended is False
+    assert batch.coverage.price_limits[0].up_limit == Decimal("10.95")
     assert {value.method for value in batch.source_evidence} == {
         "daily",
         "adj_factor",
         "trade_cal",
         "stock_basic",
         "suspend_d",
+        "stk_limit",
     }
 
 
@@ -309,6 +323,7 @@ async def test_capability_probe_reports_each_endpoint_without_short_circuiting()
             "trade_cal": [[]],
             "stock_basic": [VendorResponseError("bad response")],
             "suspend_d": [[]],
+            "stk_limit": [[]],
         }
     )
 
@@ -320,6 +335,7 @@ async def test_capability_probe_reports_each_endpoint_without_short_circuiting()
         "adj_factor": "permission_denied",
         "daily": "available",
         "stock_basic": "error",
+        "stk_limit": "available",
         "suspend_d": "available",
         "trade_cal": "available",
     }
