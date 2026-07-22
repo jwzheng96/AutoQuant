@@ -17,6 +17,7 @@ from autoquant.web.models import (
     OperatorJob,
     OperatorJobState,
     OperatorOverview,
+    PaperExecutionStatus,
     ResearchManifest,
     RiskControlStatus,
     ValidationExperiment,
@@ -167,6 +168,21 @@ class FakeConsoleService:
             remaining_gates=("paper_account_state", "qmt_gateway"),
         )
 
+    async def execution_status(self) -> PaperExecutionStatus:
+        return PaperExecutionStatus(
+            status="locked",
+            persistence_available=True,
+            recovery_verified=True,
+            gateway_available=False,
+            order_count=2,
+            event_count=3,
+            reconciliation_count=1,
+            open_order_count=1,
+            latest_reconciliation_at=datetime(2025, 1, 1, tzinfo=UTC),
+            latest_reconciled=True,
+            remaining_gates=("paper_broker_adapter", "kill_switch_drill"),
+        )
+
 
 def _settings() -> AppSettings:
     return AppSettings(
@@ -287,6 +303,7 @@ def test_trading_endpoint_is_explicitly_unavailable() -> None:
     assert response.json()["orders"] == []
     assert response.json()["positions"] == []
     assert response.json()["risk"]["live_trading_locked"] is True
+    assert response.json()["execution"]["recovery_verified"] is True
 
 
 def test_risk_endpoint_is_authenticated_and_read_only() -> None:
@@ -300,6 +317,18 @@ def test_risk_endpoint_is_authenticated_and_read_only() -> None:
     assert accepted.status_code == 200
     assert accepted.json()["decision_count"] == 7
     assert accepted.json()["live_trading_locked"] is True
+
+
+def test_execution_endpoint_reports_verified_recovery_without_order_actions() -> None:
+    app = create_app(_settings(), service=FakeConsoleService())
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/execution", auth=_auth())
+
+    assert response.status_code == 200
+    assert response.json()["recovery_verified"] is True
+    assert response.json()["gateway_available"] is False
+    assert "submit" not in response.text.casefold()
 
 
 def test_backtest_creation_is_csrf_protected_and_strategy_is_server_selected() -> None:

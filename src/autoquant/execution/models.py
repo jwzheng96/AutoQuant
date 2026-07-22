@@ -165,8 +165,12 @@ class PaperOrderProjection:
     projection_hash: str = field(init=False)
 
     def __post_init__(self) -> None:
+        if not isinstance(self.state, PaperOrderState):
+            raise TypeError("state must be PaperOrderState")
         if self.state is not PaperOrderState.APPROVED and self.broker_order_id is None:
             raise ValueError("broker_order_id is required after approval")
+        if self.broker_order_id is not None:
+            _require_nonblank(self.broker_order_id, name="broker_order_id")
         if self.version < 0 or self.last_broker_sequence < 0:
             raise ValueError("projection counters cannot be negative")
         if self.version == 0:
@@ -174,6 +178,40 @@ class PaperOrderProjection:
                 raise ValueError("version zero must be approved")
             if self.last_broker_sequence != 0:
                 raise ValueError("new projection cannot have broker sequence")
+        if (
+            not isinstance(self.cumulative_filled_quantity, int)
+            or isinstance(self.cumulative_filled_quantity, bool)
+            or not 0 <= self.cumulative_filled_quantity <= self.order.quantity
+        ):
+            raise ValueError("projection cumulative fill is outside order quantity")
+        if self.cumulative_filled_quantity == 0:
+            if self.average_fill_price is not None:
+                raise ValueError("zero fills cannot have an average fill price")
+        else:
+            if self.average_fill_price is None:
+                raise ValueError("filled projection requires average fill price")
+            _finite(
+                self.average_fill_price,
+                name="average_fill_price",
+                minimum=Decimal("0"),
+            )
+            if self.average_fill_price == 0:
+                raise ValueError("average_fill_price must be positive")
+        if self.state in {PaperOrderState.APPROVED, PaperOrderState.SUBMITTED}:
+            if self.cumulative_filled_quantity != 0:
+                raise ValueError("unfilled projection state cannot contain fills")
+        elif self.state is PaperOrderState.PARTIALLY_FILLED:
+            if not 0 < self.cumulative_filled_quantity < self.order.quantity:
+                raise ValueError("partial projection must contain a partial fill")
+        elif self.state is PaperOrderState.FILLED:
+            if self.cumulative_filled_quantity != self.order.quantity:
+                raise ValueError("filled projection must equal order quantity")
+        elif self.state is PaperOrderState.REJECTED:
+            if self.cumulative_filled_quantity != 0:
+                raise ValueError("rejected projection cannot contain fills")
+        elif self.state is PaperOrderState.CANCELLED:
+            if self.cumulative_filled_quantity == self.order.quantity:
+                raise ValueError("cancelled projection cannot be fully filled")
         _require_lowercase_sha256(self.last_update_hash, name="last_update_hash")
         _require_lowercase_sha256(self.last_event_hash, name="last_event_hash")
         updated_at = to_utc(self.updated_at, name="updated_at")

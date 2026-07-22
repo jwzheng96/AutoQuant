@@ -25,6 +25,7 @@ Apply `migrations/postgres/001_phase1.sql`,
 `migrations/postgres/005_walk_forward_validation.sql`, then
 `migrations/postgres/006_validation_benchmark.sql`, then
 `migrations/postgres/007_risk_decisions.sql`, then
+`migrations/postgres/008_paper_execution.sql`, then
 `migrations/clickhouse/001_phase1.sql` and
 `migrations/clickhouse/002_tushare_daily.sql` and
 `migrations/clickhouse/003_daily_coverage.sql` in order, only to explicitly authorized
@@ -117,6 +118,11 @@ the count of hash-verified, immutable risk decisions. This is observability only
 decision marked `accepted` authorizes neither broker submission nor live trading; the paper
 account, quote adapter, reconciliation loop, failure drills, and QMT gateway must be completed
 as separate gates.
+
+`GET /api/v1/execution` reports schema-v8 paper-order, event and reconciliation counts plus
+the bounded restart-replay result. Console startup verifies persisted order projections from
+their immutable event histories. Any mismatch aborts startup. This endpoint remains read-only;
+it does not imply that a simulated broker, quote feed or scheduling loop is configured.
 
 ## Research execution boundary
 

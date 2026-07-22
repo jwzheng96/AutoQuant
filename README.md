@@ -33,6 +33,9 @@ The execution domain now also contains a deterministic paper-order lifecycle and
 reconciler. Duplicate broker facts are idempotent, conflicting/out-of-order facts fail closed,
 terminal states are irreversible, and unknown state requires a newer broker fact to recover.
 These are unconnected safety primitives, not a running paper broker or permission to trade.
+PostgreSQL schema v8 persists their materialized orders, immutable transition events, account
+snapshots, and reconciliation reports. Application startup and the read-only execution status
+replay every bounded order history and fail closed if its projection or hash chain differs.
 
 All dependency, test, lint, type-check, migration, and Git mutation commands for this
 checkout must run on `rlocal`; see [the phase-1 runbook](docs/runbooks/phase1-data-foundation.md).

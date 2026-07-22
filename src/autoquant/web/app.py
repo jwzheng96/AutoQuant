@@ -24,6 +24,7 @@ from autoquant.backtest.validation import WalkForwardValidator
 from autoquant.config import AppSettings, WebCredentials
 from autoquant.data.daily_ingestion import ValidatedDailyDatasetReader
 from autoquant.errors import AutoQuantError
+from autoquant.execution.store import PostgresPaperExecutionRepository
 from autoquant.operations import configured_dsn
 from autoquant.web.backtest_store import PostgresBacktestRepository
 from autoquant.web.models import (
@@ -69,8 +70,8 @@ def create_app(
         if active_service is None:
             active_service = await _production_service(settings)
         app.state.console_service = active_service
-        await active_service.start()
         try:
+            await active_service.start()
             yield
         finally:
             await active_service.stop()
@@ -278,11 +279,13 @@ def create_app(
         _: str = Depends(authenticated_user),
     ) -> dict[str, object]:
         risk = await active_service(request).risk_status()
+        execution = await active_service(request).execution_status()
         return {
             "status": "unavailable",
             "orders": [],
             "positions": [],
             "risk": risk.model_dump(mode="json"),
+            "execution": execution.model_dump(mode="json"),
             "reason": (
                 "Pre-trade risk controls are implemented and live mode remains "
                 "hard-locked. Strategy evidence, paper-account reconciliation, "
@@ -298,6 +301,14 @@ def create_app(
         result = await active_service(request).risk_status()
         return result.model_dump(mode="json")
 
+    @app.get("/api/v1/execution")
+    async def execution_status(
+        request: Request,
+        _: str = Depends(authenticated_user),
+    ) -> dict[str, object]:
+        result = await active_service(request).execution_status()
+        return result.model_dump(mode="json")
+
     return app
 
 
@@ -308,6 +319,7 @@ async def _production_service(settings: AppSettings) -> ConsoleService:
     backtests = PostgresBacktestRepository.connect(dsn=postgres_dsn)
     validations = PostgresValidationRepository.connect(dsn=postgres_dsn)
     risks = PostgresRiskDecisionRepository.connect(dsn=postgres_dsn)
+    executions = PostgresPaperExecutionRepository.connect(dsn=postgres_dsn)
     control = PostgresControlRepository.connect(dsn=postgres_dsn)
     try:
         market = await ClickHouseDailyRepository.connect(dsn=clickhouse_dsn, source="tushare")
@@ -316,6 +328,7 @@ async def _production_service(settings: AppSettings) -> ConsoleService:
         await backtests.close()
         await validations.close()
         await risks.close()
+        await executions.close()
         await control.close()
         raise
     reader = ValidatedDailyDatasetReader(
@@ -340,6 +353,7 @@ async def _production_service(settings: AppSettings) -> ConsoleService:
         validation_repository=validations,
         validation_runner=validation_runner,
         risk_repository=risks,
+        execution_repository=executions,
     )
 
 

@@ -204,6 +204,10 @@ async function loadTrading() {
     setText("risk-engine-state", data.risk?.status === "locked" ? "盘前硬限制已就绪，实盘锁定" : "风控状态不可用");
     setText("risk-decision-count", data.risk?.decision_count ?? 0);
     setText("risk-remaining-gates", data.risk?.remaining_gates?.join(", ") ?? "—");
+    setText("execution-store-state", data.execution?.recovery_verified ? "持久化与重放校验已就绪，网关未接入" : "执行恢复状态不可用");
+    setText("execution-order-count", data.execution?.order_count ?? 0);
+    setText("execution-event-count", data.execution?.event_count ?? 0);
+    setText("execution-remaining-gates", data.execution?.remaining_gates?.join(", ") ?? "—");
   }
   catch (error) { showToast(`能力读取失败：${error.message}`); }
 }

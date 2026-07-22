@@ -12,6 +12,7 @@ from autoquant.web.models import (
     DailyIngestionJobRequest,
     OperatorJob,
     OperatorJobState,
+    PaperExecutionStatus,
     RiskControlStatus,
     ValidationExperiment,
     WalkForwardJobRequest,
@@ -50,6 +51,7 @@ def _service(
     validations: MagicMock | None = None,
     validation_runner: MagicMock | None = None,
     risks: MagicMock | None = None,
+    executions: MagicMock | None = None,
 ) -> ConsoleService:
     market = MagicMock()
     market.client = MagicMock()
@@ -64,6 +66,7 @@ def _service(
         validation_repository=validations,
         validation_runner=validation_runner,
         risk_repository=risks,
+        execution_repository=executions,
         now=lambda: NOW,
         poll_interval=0.01,
     )
@@ -127,6 +130,33 @@ async def test_risk_status_keeps_live_trading_locked_and_reports_audit_count() -
     assert status.paper_gateway_available is False
     assert status.decision_count == 12
     assert "qmt_gateway" in status.remaining_gates
+
+
+@pytest.mark.asyncio
+async def test_execution_status_requires_gateway_even_after_verified_recovery() -> None:
+    executions = MagicMock()
+    summary = MagicMock()
+    summary.recovery_verified = True
+    summary.order_count = 2
+    summary.event_count = 3
+    summary.reconciliation_count = 1
+    summary.open_order_count = 1
+    summary.latest_reconciliation_at = NOW
+    summary.latest_reconciled = True
+    executions.verify_recovery = AsyncMock(return_value=summary)
+    service = _service(
+        operator=MagicMock(),
+        control=MagicMock(),
+        runner=AsyncMock(),
+        executions=executions,
+    )
+
+    status = await service.execution_status()
+
+    assert isinstance(status, PaperExecutionStatus)
+    assert status.recovery_verified is True
+    assert status.gateway_available is False
+    assert "paper_broker_adapter" in status.remaining_gates
 
 
 @pytest.mark.asyncio

@@ -12,6 +12,7 @@ from autoquant.backtest.models import BacktestResult
 from autoquant.backtest.validation import WalkForwardConfig, WalkForwardResult
 from autoquant.config import AppSettings
 from autoquant.errors import AutoQuantError, PersistenceUnavailableError
+from autoquant.execution.store import PostgresPaperExecutionRepository
 from autoquant.operations import run_daily_ingestion
 from autoquant.web.backtest_store import PostgresBacktestRepository
 from autoquant.web.models import (
@@ -22,6 +23,7 @@ from autoquant.web.models import (
     DataCoverage,
     OperatorJob,
     OperatorOverview,
+    PaperExecutionStatus,
     ResearchManifest,
     RiskControlStatus,
     ValidationExperiment,
@@ -91,6 +93,8 @@ class ConsoleServicePort(Protocol):
 
     async def risk_status(self) -> RiskControlStatus: ...
 
+    async def execution_status(self) -> PaperExecutionStatus: ...
+
     async def bars(
         self,
         *,
@@ -114,6 +118,7 @@ class ConsoleService:
         validation_repository: PostgresValidationRepository | None = None,
         validation_runner: WalkForwardRunnerPort | None = None,
         risk_repository: PostgresRiskDecisionRepository | None = None,
+        execution_repository: PostgresPaperExecutionRepository | None = None,
         ingestion_runner: IngestionRunner = run_daily_ingestion,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
         poll_interval: float = 1.0,
@@ -131,6 +136,7 @@ class ConsoleService:
         self._validations = validation_repository
         self._validation_runner = validation_runner
         self._risk = risk_repository
+        self._execution = execution_repository
         self._ingestion_runner = ingestion_runner
         self._now = now
         self._poll_interval = poll_interval
@@ -142,6 +148,8 @@ class ConsoleService:
         self._validation_worker: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
+        if self._execution is not None:
+            await self._execution.verify_recovery()
         await self._operators.interrupt_running_jobs(now=self._now())
         if self._worker is None:
             self._worker = asyncio.create_task(self._work_loop(), name="operator-job-worker")
@@ -189,6 +197,8 @@ class ConsoleService:
             await self._validations.close()
         if self._risk is not None:
             await self._risk.close()
+        if self._execution is not None:
+            await self._execution.close()
         await self._operators.close()
         await self._control.close()
         await self._market.client.close()
@@ -377,6 +387,45 @@ class ConsoleService:
                 "reconciliation_loop",
                 "kill_switch_drill",
                 "qmt_gateway",
+            ),
+        )
+
+    async def execution_status(self) -> PaperExecutionStatus:
+        if self._execution is None:
+            return PaperExecutionStatus(
+                status="locked",
+                persistence_available=False,
+                recovery_verified=False,
+                gateway_available=False,
+                order_count=0,
+                event_count=0,
+                reconciliation_count=0,
+                open_order_count=0,
+                remaining_gates=(
+                    "paper_execution_store",
+                    "paper_broker_adapter",
+                    "reconciliation_loop",
+                    "restart_recovery_drill",
+                    "kill_switch_drill",
+                ),
+            )
+        summary = await self._execution.verify_recovery()
+        return PaperExecutionStatus(
+            status="locked",
+            persistence_available=True,
+            recovery_verified=summary.recovery_verified,
+            gateway_available=False,
+            order_count=summary.order_count,
+            event_count=summary.event_count,
+            reconciliation_count=summary.reconciliation_count,
+            open_order_count=summary.open_order_count,
+            latest_reconciliation_at=summary.latest_reconciliation_at,
+            latest_reconciled=summary.latest_reconciled,
+            remaining_gates=(
+                "paper_broker_adapter",
+                "reconciliation_loop",
+                "restart_recovery_drill",
+                "kill_switch_drill",
             ),
         )
 

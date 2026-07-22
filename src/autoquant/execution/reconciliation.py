@@ -6,7 +6,12 @@ from decimal import Decimal
 from enum import StrEnum
 
 from autoquant.clock import to_utc
-from autoquant.data.models import _canonical_hash, _decimal_text, _require_nonblank
+from autoquant.data.models import (
+    _canonical_hash,
+    _decimal_text,
+    _require_lowercase_sha256,
+    _require_nonblank,
+)
 
 
 def _finite(value: Decimal, *, name: str, minimum: Decimal | None = None) -> None:
@@ -88,6 +93,13 @@ class ReconciliationReport:
     report_hash: str = field(init=False)
 
     def __post_init__(self) -> None:
+        _require_nonblank(self.account_id, name="account_id")
+        _require_lowercase_sha256(
+            self.internal_snapshot_hash, name="internal_snapshot_hash"
+        )
+        _require_lowercase_sha256(
+            self.broker_snapshot_hash, name="broker_snapshot_hash"
+        )
         evaluated_at = to_utc(self.evaluated_at, name="reconciliation time")
         object.__setattr__(self, "evaluated_at", evaluated_at)
         issues = tuple(self.issues)

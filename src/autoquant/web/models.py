@@ -390,3 +390,28 @@ class RiskControlStatus(BaseModel):
     decision_count: int = Field(ge=0)
     recent_decisions: tuple[RiskDecisionView, ...]
     remaining_gates: tuple[str, ...]
+
+
+class PaperExecutionStatus(BaseModel):
+    status: str
+    persistence_available: bool
+    recovery_verified: bool
+    gateway_available: bool
+    order_count: int = Field(ge=0)
+    event_count: int = Field(ge=0)
+    reconciliation_count: int = Field(ge=0)
+    open_order_count: int = Field(ge=0)
+    latest_reconciliation_at: datetime | None = None
+    latest_reconciled: bool | None = None
+    remaining_gates: tuple[str, ...]
+
+    @field_validator("latest_reconciliation_at")
+    @classmethod
+    def require_aware_reconciliation_time(
+        cls, value: datetime | None
+    ) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("reconciliation time must be timezone-aware")
+        return value.astimezone(UTC)
