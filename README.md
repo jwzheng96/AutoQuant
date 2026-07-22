@@ -29,6 +29,11 @@ daily turnover/loss/drawdown breaches, and price-deviation errors. Live mode is 
 The console exposes read-only risk status and audit counts; it still has no order action or
 paper/QMT gateway.
 
+The execution domain now also contains a deterministic paper-order lifecycle and account
+reconciler. Duplicate broker facts are idempotent, conflicting/out-of-order facts fail closed,
+terminal states are irreversible, and unknown state requires a newer broker fact to recover.
+These are unconnected safety primitives, not a running paper broker or permission to trade.
+
 All dependency, test, lint, type-check, migration, and Git mutation commands for this
 checkout must run on `rlocal`; see [the phase-1 runbook](docs/runbooks/phase1-data-foundation.md).
 
