@@ -72,12 +72,18 @@ def config_check() -> None:
         rqdata = "configured"
     except MissingCapabilityError:
         rqdata = "missing"
+    try:
+        settings.require_tushare()
+        tushare = "configured"
+    except MissingCapabilityError:
+        tushare = "missing"
     payload = {
         "clickhouse": "configured" if _configured_secret(settings.clickhouse_dsn) else "missing",
         "environment": settings.environment.value,
         "live_trading_enabled": settings.live_trading_enabled,
         "postgres": "configured" if _configured_secret(settings.postgres_dsn) else "missing",
         "rqdata": rqdata,
+        "tushare": tushare,
     }
     _emit(payload)
     if "missing" in payload.values():

@@ -31,6 +31,7 @@ def test_config_check_reports_missing_capabilities_without_secret() -> None:
         "live_trading_enabled": False,
         "postgres": "missing",
         "rqdata": "missing",
+        "tushare": "missing",
     }
     assert "password" not in result.stdout.lower()
     assert "dsn" not in result.stdout.lower()
@@ -43,6 +44,7 @@ def test_config_check_reports_only_capability_presence() -> None:
         env={
             "AQ_RQDATA_USERNAME": "configured-user",
             "AQ_RQDATA_PASSWORD": "configured-password",
+            "AQ_TUSHARE_TOKEN": "configured-token",
             "AQ_POSTGRES_DSN": "postgresql+asyncpg://configured-secret",
             "AQ_CLICKHOUSE_DSN": "https://configured-secret",
         },
@@ -52,6 +54,7 @@ def test_config_check_reports_only_capability_presence() -> None:
     assert set(json.loads(result.stdout).values()) >= {"configured"}
     assert "configured-user" not in result.stdout
     assert "configured-password" not in result.stdout
+    assert "configured-token" not in result.stdout
     assert "configured-secret" not in result.stdout
 
 
