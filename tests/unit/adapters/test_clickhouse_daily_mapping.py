@@ -205,6 +205,17 @@ async def test_query_bars_binds_filters_and_verifies_content_hash() -> None:
         "as_of": AVAILABLE,
     }
 
+    byte_hash_row = list(ClickHouseDailyRepository.bar_result_row(revision))
+    byte_hash_row[8] = revision.evidence_hash.encode("ascii")
+    byte_hash_row[-1] = revision.content_hash.encode("ascii")
+    client.query.return_value = SimpleNamespace(
+        column_names=ClickHouseDailyRepository.BAR_RESULT_COLUMNS,
+        result_rows=[tuple(byte_hash_row)],
+    )
+    assert await repository(client).query_bars_as_of(
+        ("000001.XSHE",), date(2026, 7, 20), date(2026, 7, 20), AVAILABLE
+    ) == (revision,)
+
     bad_row = list(ClickHouseDailyRepository.bar_result_row(revision))
     bad_row[-1] = "b" * 64
     client.query.return_value = SimpleNamespace(

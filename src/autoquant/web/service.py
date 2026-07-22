@@ -1,0 +1,262 @@
+from __future__ import annotations
+
+import asyncio
+from collections.abc import Awaitable, Callable, Mapping
+from datetime import UTC, date, datetime
+from typing import Protocol
+from uuid import UUID
+
+from autoquant.adapters.clickhouse_daily import ClickHouseDailyRepository
+from autoquant.adapters.postgres import PostgresControlRepository
+from autoquant.config import AppSettings
+from autoquant.errors import AutoQuantError, PersistenceUnavailableError
+from autoquant.operations import run_daily_ingestion
+from autoquant.web.models import (
+    DailyIngestionJobRequest,
+    DataCoverage,
+    OperatorJob,
+    OperatorOverview,
+)
+from autoquant.web.store import PostgresOperatorRepository
+
+IngestionRunner = Callable[[AppSettings, tuple[str, ...], date, date], Awaitable[dict[str, object]]]
+
+
+class ConsoleServicePort(Protocol):
+    async def start(self) -> None: ...
+
+    async def stop(self) -> None: ...
+
+    async def overview(self) -> OperatorOverview: ...
+
+    async def list_jobs(self, *, limit: int = 50) -> tuple[OperatorJob, ...]: ...
+
+    async def create_daily_job(
+        self, request: DailyIngestionJobRequest, *, requested_by: str
+    ) -> OperatorJob: ...
+
+    async def bars(
+        self,
+        *,
+        instrument: str,
+        start: date,
+        end: date,
+        as_of: datetime,
+    ) -> tuple[dict[str, object], ...]: ...
+
+
+class ConsoleService:
+    def __init__(
+        self,
+        *,
+        settings: AppSettings,
+        operator_repository: PostgresOperatorRepository,
+        control_repository: PostgresControlRepository,
+        market_repository: ClickHouseDailyRepository,
+        ingestion_runner: IngestionRunner = run_daily_ingestion,
+        now: Callable[[], datetime] = lambda: datetime.now(UTC),
+        poll_interval: float = 1.0,
+    ) -> None:
+        self._settings = settings
+        self._operators = operator_repository
+        self._control = control_repository
+        self._market = market_repository
+        self._ingestion_runner = ingestion_runner
+        self._now = now
+        self._poll_interval = poll_interval
+        self._wake = asyncio.Event()
+        self._worker: asyncio.Task[None] | None = None
+
+    async def start(self) -> None:
+        await self._operators.interrupt_running_jobs(now=self._now())
+        if self._worker is None:
+            self._worker = asyncio.create_task(self._work_loop(), name="operator-job-worker")
+
+    async def stop(self) -> None:
+        worker = self._worker
+        self._worker = None
+        if worker is not None:
+            worker.cancel()
+            try:
+                await worker
+            except asyncio.CancelledError:
+                pass
+        await self._operators.close()
+        await self._control.close()
+        await self._market.client.close()
+
+    async def overview(self) -> OperatorOverview:
+        postgres_status = "ok"
+        clickhouse_status = "ok"
+        control = None
+        coverage = None
+        try:
+            control = await self._operators.control_summary()
+        except (AutoQuantError, ValueError):
+            postgres_status = "unavailable"
+        try:
+            await self._market.check_connection()
+            coverage = await self._coverage()
+        except (AutoQuantError, ValueError):
+            clickhouse_status = "unavailable"
+        statuses = (postgres_status, clickhouse_status)
+        token = self._settings.tushare_token
+        tushare_status = (
+            "configured"
+            if token is not None and bool(token.get_secret_value().strip())
+            else "missing"
+        )
+        return OperatorOverview(
+            status="ok" if all(status == "ok" for status in statuses) else "degraded",
+            postgres=postgres_status,
+            clickhouse=clickhouse_status,
+            tushare=tushare_status,
+            control=control,
+            coverage=coverage,
+            generated_at=self._now(),
+        )
+
+    async def list_jobs(self, *, limit: int = 50) -> tuple[OperatorJob, ...]:
+        return await self._operators.list_jobs(limit=limit)
+
+    async def create_daily_job(
+        self, request: DailyIngestionJobRequest, *, requested_by: str
+    ) -> OperatorJob:
+        self._settings.require_tushare()
+        now = self._now()
+        job = await self._operators.create_job(request, requested_by=requested_by, now=now)
+        try:
+            await self._audit(
+                "operator.daily_ingestion.requested",
+                job.job_id,
+                {
+                    "instruments": list(request.instruments),
+                    "start": request.start.isoformat(),
+                    "end": request.end.isoformat(),
+                    "requested_by": requested_by,
+                },
+            )
+        except AutoQuantError:
+            await self._operators.reject_queued_job(
+                job.job_id, error_code="audit_unavailable", now=self._now()
+            )
+            raise PersistenceUnavailableError("Operator audit is unavailable") from None
+        self._wake.set()
+        return job
+
+    async def bars(
+        self,
+        *,
+        instrument: str,
+        start: date,
+        end: date,
+        as_of: datetime,
+    ) -> tuple[dict[str, object], ...]:
+        if start > end or (end - start).days > 365:
+            raise ValueError("bar query interval must be between 1 and 366 days")
+        records = await self._market.query_bars_as_of((instrument,), start, end, as_of=as_of)
+        return tuple(
+            {
+                "instrument": record.instrument,
+                "session_date": record.session_date.isoformat(),
+                "open": str(record.open_price),
+                "high": str(record.high_price),
+                "low": str(record.low_price),
+                "close": str(record.close_price),
+                "pre_close": str(record.pre_close),
+                "volume": record.volume,
+                "turnover": str(record.turnover),
+                "available_at": record.available_at.isoformat(),
+                "content_hash": record.content_hash,
+            }
+            for record in records
+        )
+
+    async def _coverage(self) -> DataCoverage:
+        try:
+            bars = await self._market.client.query(
+                "SELECT count(), minOrNull(session_date), maxOrNull(session_date) "
+                "FROM daily_bar_revisions WHERE source = 'tushare'"
+            )
+            factors = await self._market.client.query(
+                "SELECT count() FROM adjustment_factor_revisions WHERE source = 'tushare'"
+            )
+            bar_row = bars.result_rows[0]
+            factor_row = factors.result_rows[0]
+            return DataCoverage(
+                daily_rows=int(bar_row[0]),
+                factor_rows=int(factor_row[0]),
+                first_session=bar_row[1],
+                last_session=bar_row[2],
+            )
+        except Exception:
+            raise PersistenceUnavailableError("ClickHouse coverage query failed") from None
+
+    async def _work_loop(self) -> None:
+        while True:
+            try:
+                job = await self._operators.claim_next_job(now=self._now())
+            except AutoQuantError:
+                await asyncio.sleep(self._poll_interval)
+                continue
+            if job is None:
+                self._wake.clear()
+                try:
+                    await asyncio.wait_for(self._wake.wait(), timeout=self._poll_interval)
+                except TimeoutError:
+                    pass
+                continue
+            await self._run_job(job)
+
+    async def _run_job(self, job: OperatorJob) -> None:
+        try:
+            await self._audit("operator.daily_ingestion.started", job.job_id, {})
+            result = await self._ingestion_runner(
+                self._settings,
+                job.request.instruments,
+                job.request.start,
+                job.request.end,
+            )
+            if result.get("status") != "completed":
+                raise PersistenceUnavailableError("Ingestion did not complete")
+            await self._operators.complete_job(job.job_id, result=result, now=self._now())
+        except AutoQuantError:
+            await self._operators.fail_job(
+                job.job_id, error_code="ingestion_failed", now=self._now()
+            )
+            await self._best_effort_failure_audit(job.job_id, "ingestion_failed")
+        except Exception:
+            await self._operators.fail_job(job.job_id, error_code="internal_error", now=self._now())
+            await self._best_effort_failure_audit(job.job_id, "internal_error")
+        else:
+            try:
+                await self._audit(
+                    "operator.daily_ingestion.completed",
+                    job.job_id,
+                    _safe_result(result),
+                )
+            except AutoQuantError:
+                pass
+
+    async def _best_effort_failure_audit(self, job_id: UUID, error_code: str) -> None:
+        try:
+            await self._audit("operator.daily_ingestion.failed", job_id, {"error_code": error_code})
+        except AutoQuantError:
+            pass
+
+    async def _audit(self, event_type: str, job_id: UUID, payload: Mapping[str, object]) -> None:
+        normalized = {"job_id": str(job_id), **dict(payload)}
+        await self._control.append_audit_event(event_type, self._now(), normalized)
+
+
+def _safe_result(result: Mapping[str, object]) -> dict[str, object]:
+    allowed = {
+        "fetched_bars",
+        "fetched_factors",
+        "manifest_hash",
+        "persisted_bars",
+        "persisted_factors",
+        "quality_hash",
+        "status",
+    }
+    return {key: value for key, value in result.items() if key in allowed}

@@ -22,7 +22,7 @@ class DailyIngestionRequest:
     instruments: tuple[str, ...]
     start: date
     end: date
-    as_of: datetime
+    as_of: datetime | None
     production_complete_requested: bool
 
     def __post_init__(self) -> None:
@@ -36,10 +36,11 @@ class DailyIngestionRequest:
             raise ValueError("instruments must be nonempty and unique")
         if self.start > self.end:
             raise ValueError("start cannot follow end")
-        as_of = to_utc(self.as_of, name="as_of")
-        object.__setattr__(self, "as_of", as_of)
-        if as_of < _event_time(self.end):
-            raise ValueError("as_of cannot precede the requested end")
+        if self.as_of is not None:
+            as_of = to_utc(self.as_of, name="as_of")
+            object.__setattr__(self, "as_of", as_of)
+            if as_of < _event_time(self.end):
+                raise ValueError("as_of cannot precede the requested end")
         if type(self.production_complete_requested) is not bool:
             raise TypeError("production_complete_requested must be a bool")
 
@@ -83,6 +84,13 @@ class DailyIngestionService:
         dataset = await self._source.fetch_daily_dataset(
             request.instruments, request.start, request.end
         )
+        effective_as_of = (
+            to_utc(self._now(), name="as_of")
+            if request.as_of is None
+            else request.as_of
+        )
+        if effective_as_of < _event_time(request.end):
+            raise ValueError("as_of cannot precede the requested end")
         persisted_bars = 0
         persisted_factors = 0
         try:
@@ -105,7 +113,7 @@ class DailyIngestionService:
             requested_instruments=request.instruments,
             start=request.start,
             end=request.end,
-            as_of=request.as_of,
+            as_of=effective_as_of,
         )
         if not report.passed or (
             request.production_complete_requested and not report.production_complete
@@ -146,7 +154,7 @@ class DailyIngestionService:
             instruments=request.instruments,
             start_time=_start_time(request.start),
             end_time=_event_time(request.end),
-            as_of=request.as_of,
+            as_of=effective_as_of,
             record_hashes=record_hashes,
             quality_report_hash=report.report_hash,
             production_complete=(

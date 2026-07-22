@@ -10,18 +10,16 @@ import typer
 from pydantic import SecretStr, ValidationError
 
 from autoquant.adapters.clickhouse import ClickHouseMinuteBarRepository
-from autoquant.adapters.clickhouse_daily import ClickHouseDailyRepository
 from autoquant.adapters.postgres import PostgresControlRepository
 from autoquant.adapters.rqdata import RqdataHttpSource
-from autoquant.adapters.tushare import TushareDailySource, TushareHttpClient
+from autoquant.adapters.tushare import TushareDailySource
 from autoquant.clock import to_utc
 from autoquant.config import AppSettings
 from autoquant.data.availability import HistoricalMinutePolicy
-from autoquant.data.daily_ingestion import DailyIngestionRequest, DailyIngestionService
-from autoquant.data.daily_quality import DailyQualityGate
 from autoquant.data.ingestion import IngestionRequest, IngestionService
 from autoquant.data.quality import MinuteBarQualityGate
 from autoquant.errors import AutoQuantError, MissingCapabilityError
+from autoquant.operations import run_daily_ingestion, tushare_source
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
 
@@ -91,6 +89,11 @@ def config_check() -> None:
         tushare = "configured"
     except MissingCapabilityError:
         tushare = "missing"
+    try:
+        settings.require_web()
+        web = "configured"
+    except MissingCapabilityError:
+        web = "missing"
     payload = {
         "clickhouse": "configured" if _configured_secret(settings.clickhouse_dsn) else "missing",
         "environment": settings.environment.value,
@@ -98,6 +101,7 @@ def config_check() -> None:
         "postgres": "configured" if _configured_secret(settings.postgres_dsn) else "missing",
         "rqdata": rqdata,
         "tushare": tushare,
+        "web": web,
     }
     _emit(payload)
     if "missing" in payload.values():
@@ -146,13 +150,7 @@ def rqdata_check(
 
 
 def _tushare_source(settings: AppSettings) -> TushareDailySource:
-    return TushareDailySource(
-        client=TushareHttpClient(
-            credentials=settings.require_tushare(),
-            api_url=settings.tushare_api_url,
-        ),
-        now=lambda: datetime.now(UTC),
-    )
+    return tushare_source(settings)
 
 
 async def _tushare_capabilities(
@@ -291,50 +289,7 @@ async def _ingest_daily(
     start: date,
     end: date,
 ) -> dict[str, object]:
-    source: TushareDailySource | None = None
-    clickhouse: ClickHouseDailyRepository | None = None
-    postgres: PostgresControlRepository | None = None
-    try:
-        source = _tushare_source(settings)
-        clickhouse = await ClickHouseDailyRepository.connect(
-            dsn=_require_dsn(settings.clickhouse_dsn, capability="ClickHouse"),
-            source="tushare",
-        )
-        postgres = PostgresControlRepository.connect(
-            dsn=_require_dsn(settings.postgres_dsn, capability="PostgreSQL")
-        )
-        service = DailyIngestionService(
-            source=source,
-            quality_gate=DailyQualityGate(),
-            market_repository=clickhouse,
-            control_repository=postgres,
-            now=lambda: datetime.now(UTC),
-        )
-        result = await service.run(
-            DailyIngestionRequest(
-                instruments=instruments,
-                start=start,
-                end=end,
-                as_of=datetime.now(UTC),
-                production_complete_requested=True,
-            )
-        )
-    finally:
-        if source is not None:
-            await source.close()
-        if postgres is not None:
-            await postgres.close()
-        if clickhouse is not None:
-            await clickhouse.client.close()
-    return {
-        "fetched_bars": result.fetched_bars,
-        "fetched_factors": result.fetched_factors,
-        "manifest_hash": result.manifest_hash,
-        "persisted_bars": result.persisted_bars,
-        "persisted_factors": result.persisted_factors,
-        "quality_hash": result.quality_hash,
-        "status": result.status,
-    }
+    return await run_daily_ingestion(settings, instruments, start, end)
 
 
 @app.command("ingest-minute")
@@ -379,3 +334,26 @@ def ingest_daily(
     _emit(payload)
     if payload["status"] != "completed" or payload["manifest_hash"] is None:
         raise typer.Exit(code=2)
+
+
+@app.command("serve-web")
+def serve_web() -> None:
+    """Serve the authenticated local operator console."""
+    settings = _settings()
+    if settings.live_trading_enabled:
+        _fail("operator console does not enable live trading")
+    try:
+        settings.require_web()
+        import uvicorn
+
+        from autoquant.web.app import create_app
+
+        web_app = create_app(settings)
+    except (AutoQuantError, ValueError):
+        _fail("operator console configuration failed")
+    uvicorn.run(
+        web_app,
+        host=settings.web_host,
+        port=settings.web_port,
+        server_header=False,
+    )

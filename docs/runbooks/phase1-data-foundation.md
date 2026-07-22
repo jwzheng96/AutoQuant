@@ -18,10 +18,25 @@ cd AutoQuant
 unused provider such as RQData is absent. Use `tushare-check` as the authoritative read-only
 matrix for the Tushare daily endpoints.
 
-Apply `migrations/postgres/001_phase1.sql`, then
+Apply `migrations/postgres/001_phase1.sql`,
+`migrations/postgres/002_operator_console.sql`, then
 `migrations/clickhouse/001_phase1.sql` and
 `migrations/clickhouse/002_tushare_daily.sql` in order, only to explicitly authorized
 phase-1 databases. Then run `autoquant db-check`.
+
+For the repository's loopback-only Docker setup, keep database bootstrap secrets in the
+ignored `infra/.env`, then run:
+
+```bash
+scripts/local-db.sh up
+scripts/local-db.sh migrate
+scripts/local-db.sh status
+```
+
+This Compose profile is for a single trusted development host. It binds database ports only
+to loopback, but it is not a production HA deployment. Before any real-money phase, move
+credentials to a secret manager, enable encrypted backups and restore drills, use TLS between
+hosts, monitor disk/replication health, and define retention and disaster-recovery objectives.
 
 Configure only a newly rotated Token on the trusted host:
 
@@ -59,3 +74,30 @@ before it can be declared operational. A real end-to-end ingestion must produce 
 quality report, immutable manifest, ClickHouse rows, separate daily/factor PostgreSQL
 checkpoints, and an audit event. Credential-dependent or database-dependent skips are
 incomplete evidence, not successes.
+
+## Local operator console
+
+Set the following only in the ignored root `.env`:
+
+```dotenv
+AQ_WEB_HOST=127.0.0.1
+AQ_WEB_PORT=8000
+AQ_WEB_USERNAME=operator
+AQ_WEB_PASSWORD=<at least 16 characters; enter locally>
+```
+
+Start the console on `rlocal`:
+
+```bash
+/Users/zjw/.local/bin/uv run autoquant serve-web
+```
+
+Open `http://127.0.0.1:8000` on that Mac. If the browser is on another trusted machine,
+use an SSH local port forward instead of changing the bind address:
+
+```bash
+ssh -L 8000:127.0.0.1:8000 rlocal
+```
+
+The console exposes health, data coverage, point-in-time daily queries, and bounded audited
+ingestion jobs. The trading view intentionally has no order action and no synthetic PnL.

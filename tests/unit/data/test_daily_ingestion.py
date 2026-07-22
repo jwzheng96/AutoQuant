@@ -267,6 +267,25 @@ async def test_complete_ingestion_finalizes_two_streams_atomically() -> None:
 
 
 @pytest.mark.asyncio
+async def test_online_ingestion_captures_cutoff_after_fetch() -> None:
+    service, request, calls, _, control = setup()
+    request = DailyIngestionRequest(
+        instruments=request.instruments,
+        start=request.start,
+        end=request.end,
+        as_of=None,
+        production_complete_requested=request.production_complete_requested,
+    )
+
+    result = await service.run(request)
+
+    assert result.status == "completed"
+    assert result.manifest_hash is not None
+    assert control.manifests[result.manifest_hash].as_of == AS_OF
+    assert calls[0] == "fetch"
+
+
+@pytest.mark.asyncio
 async def test_quality_rejection_keeps_raw_data_without_manifest_or_checkpoint() -> None:
     service, request, calls, _, control = setup(complete=False)
 

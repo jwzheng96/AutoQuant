@@ -258,6 +258,16 @@ async def test_query_binds_all_temporal_and_identity_filters_and_maps_exact_row(
     assert "event_time >= {start:DateTime64(6, 'UTC')}" in sql
     assert "event_time <= {end:DateTime64(6, 'UTC')}" in sql
     assert "argMax" in sql
+
+    byte_hash_row = list(client.query.return_value.result_rows[0])
+    byte_hash_row[-1] = revision.content_hash.encode("ascii")
+    client.query.return_value = SimpleNamespace(
+        column_names=columns,
+        result_rows=(tuple(byte_hash_row),),
+    )
+    assert await repository(client).query_as_of(
+        ("000001.XSHE",), start, end, as_of
+    ) == (revision,)
     assert "tuple(available_at, ingested_at, record_id)" in sql
     parameters = call.kwargs["parameters"]
     assert parameters == {

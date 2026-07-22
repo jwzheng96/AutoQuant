@@ -39,7 +39,9 @@ async def repository() -> AsyncIterator[ClickHouseMinuteBarRepository]:
         .replace("minute_bar_revisions", table)
     )
     try:
-        await client.command(migration)
+        for statement in migration.split(";"):
+            if statement.strip():
+                await client.command(statement)
         yield repo
     finally:
         try:

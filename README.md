@@ -4,8 +4,9 @@ AutoQuant is an A-share research data foundation.
 
 Phase 1 provides fail-closed Tushare daily ingestion and retained RQData minute support,
 point-in-time records, deterministic quality gates, append-only ClickHouse revisions,
-PostgreSQL manifests/checkpoints/audit events, and a JSON operator CLI. It does not place
-orders, run strategies, promise profitability, or enable live trading.
+PostgreSQL manifests/checkpoints/audit events, a JSON operator CLI, and an authenticated
+local Web operator console. It does not place orders, run strategies, promise profitability,
+or enable live trading.
 
 All dependency, test, lint, type-check, migration, and Git mutation commands for this
 checkout must run on `rlocal`; see [the phase-1 runbook](docs/runbooks/phase1-data-foundation.md).
@@ -17,6 +18,22 @@ cd AutoQuant
 /Users/zjw/.local/bin/uv run autoquant config-check
 /Users/zjw/.local/bin/uv run autoquant tushare-check
 ```
+
+For local infrastructure and the operator console:
+
+```bash
+cp infra/.env.example infra/.env
+# Fill two different strong database passwords locally, then chmod 600 infra/.env
+scripts/local-db.sh up
+scripts/local-db.sh migrate
+/Users/zjw/.local/bin/uv run autoquant db-check
+/Users/zjw/.local/bin/uv run autoquant serve-web
+```
+
+The console binds only to `127.0.0.1` and requires `AQ_WEB_USERNAME` plus a password of at
+least 16 characters in the untracked root `.env`. It can inspect trusted daily data and
+submit bounded, audited ingestion jobs. Its trading page remains explicitly locked until a
+ledger, risk engine, QMT gateway, and simulation evidence exist.
 
 Copy `.env.example` to an untracked `.env` and supply credentials/DSNs only on the trusted
 runtime host. The Tushare Token previously shared in chat must be rotated before use; set

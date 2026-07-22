@@ -1,0 +1,48 @@
+services:
+    postgres:
+      image: postgres:17
+      container_name: autoquant-postgres
+      restart: unless-stopped
+      environment:
+        POSTGRES_USER: ${POSTGRES_USER}
+        POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+        POSTGRES_DB: ${POSTGRES_DB}
+      ports:
+        - "127.0.0.1:5434:5432"
+      volumes:
+        - autoquant_postgres:/var/lib/postgresql/data
+      shm_size: 128mb
+      healthcheck:
+        test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+        interval: 5s
+        timeout: 5s
+        retries: 20
+      stop_grace_period: 30s
+
+    clickhouse:
+      image: clickhouse/clickhouse-server:25.8
+      container_name: autoquant-clickhouse
+      restart: unless-stopped
+      environment:
+        CLICKHOUSE_USER: ${CLICKHOUSE_USER}
+        CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+        CLICKHOUSE_DB: ${CLICKHOUSE_DB}
+        CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+      ports:
+        - "127.0.0.1:8123:8123"
+      volumes:
+        - autoquant_clickhouse:/var/lib/clickhouse
+      ulimits:
+        nofile:
+          soft: 262144
+          hard: 262144
+      healthcheck:
+        test: ["CMD-SHELL", "clickhouse-client --user $$CLICKHOUSE_USER --password $$CLICKHOUSE_PASSWORD --query 'SELECT 1'"]
+        interval: 5s
+        timeout: 5s
+        retries: 20
+      stop_grace_period: 30s
+
+volumes:
+  autoquant_postgres:
+  autoquant_clickhouse:

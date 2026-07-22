@@ -40,7 +40,9 @@ async def repository() -> AsyncIterator[ClickHouseDailyRepository]:
         .replace("adjustment_factor_revisions", factor_table)
     )
     try:
-        await repo.client.command(migration)
+        for statement in migration.split(";"):
+            if statement.strip():
+                await repo.client.command(statement)
         yield repo
     finally:
         try:

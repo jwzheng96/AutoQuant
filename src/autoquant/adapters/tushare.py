@@ -552,10 +552,12 @@ class TushareDailySource:
         cls, result: TushareApiResult, *, requested: frozenset[str]
     ) -> tuple[InstrumentLifecycle, ...]:
         values: list[InstrumentLifecycle] = []
+        requested_vendor_codes = frozenset(to_tushare_code(value) for value in requested)
         for row in result.rows:
-            instrument = from_tushare_code(cls._text(row, "ts_code"))
-            if instrument not in requested:
+            vendor_code = cls._text(row, "ts_code")
+            if vendor_code not in requested_vendor_codes:
                 continue
+            instrument = from_tushare_code(vendor_code)
             raw_delist = row.get("delist_date")
             delist_date = (
                 None if raw_delist in (None, "") else cls._parse_date(str(raw_delist))

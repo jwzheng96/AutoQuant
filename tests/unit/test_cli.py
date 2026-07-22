@@ -9,6 +9,14 @@ from typer.testing import CliRunner
 from autoquant.cli import app
 
 runner = CliRunner()
+MISSING_ENV = {
+    "AQ_RQDATA_USERNAME": "",
+    "AQ_RQDATA_PASSWORD": "",
+    "AQ_TUSHARE_TOKEN": "",
+    "AQ_POSTGRES_DSN": "",
+    "AQ_CLICKHOUSE_DSN": "",
+    "AQ_WEB_PASSWORD": "",
+}
 
 
 def test_phase1_migrations_record_explicit_schema_versions() -> None:
@@ -22,7 +30,7 @@ def test_phase1_migrations_record_explicit_schema_versions() -> None:
 
 
 def test_config_check_reports_missing_capabilities_without_secret() -> None:
-    result = runner.invoke(app, ["config-check"], env={})
+    result = runner.invoke(app, ["config-check"], env=MISSING_ENV)
 
     assert result.exit_code == 2
     payload = json.loads(result.stdout)
@@ -33,6 +41,7 @@ def test_config_check_reports_missing_capabilities_without_secret() -> None:
         "postgres": "missing",
         "rqdata": "missing",
         "tushare": "missing",
+        "web": "missing",
     }
     assert "password" not in result.stdout.lower()
     assert "dsn" not in result.stdout.lower()
@@ -48,6 +57,7 @@ def test_config_check_reports_only_capability_presence() -> None:
             "AQ_TUSHARE_TOKEN": "configured-token",
             "AQ_POSTGRES_DSN": "postgresql+asyncpg://configured-secret",
             "AQ_CLICKHOUSE_DSN": "https://configured-secret",
+            "AQ_WEB_PASSWORD": "configured-web-password",
         },
     )
 
@@ -99,7 +109,7 @@ def test_ingestion_requires_timezone_aware_bounds() -> None:
 
 
 def test_tushare_check_requires_token_without_leaking_configuration() -> None:
-    result = runner.invoke(app, ["tushare-check"], env={})
+    result = runner.invoke(app, ["tushare-check"], env={"AQ_TUSHARE_TOKEN": ""})
 
     assert result.exit_code == 2
     assert "Tushare capability check failed" in result.stdout
@@ -218,3 +228,29 @@ def test_daily_ingestion_emits_completed_result_from_async_wiring() -> None:
     assert result.exit_code == 0
     assert json.loads(result.stdout) == payload
     ingestion.assert_awaited_once()
+
+
+def test_web_console_requires_credentials_without_leaking_configuration() -> None:
+    result = runner.invoke(app, ["serve-web"], env={"AQ_WEB_PASSWORD": ""})
+
+    assert result.exit_code == 2
+    assert "operator console configuration failed" in result.stdout
+    assert "password" not in result.stdout.casefold()
+
+
+def test_web_console_starts_only_on_configured_loopback() -> None:
+    with patch("uvicorn.run") as run:
+        result = runner.invoke(
+            app,
+            ["serve-web"],
+            env={
+                "AQ_WEB_USERNAME": "operator",
+                "AQ_WEB_PASSWORD": "local-console-password",
+                "AQ_WEB_HOST": "127.0.0.1",
+                "AQ_WEB_PORT": "8765",
+            },
+        )
+
+    assert result.exit_code == 0
+    assert run.call_args.kwargs["host"] == "127.0.0.1"
+    assert run.call_args.kwargs["port"] == 8765

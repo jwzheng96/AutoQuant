@@ -23,6 +23,11 @@ class TushareCredentials(BaseModel):
     token: SecretStr = Field(repr=False)
 
 
+class WebCredentials(BaseModel):
+    username: str
+    password: SecretStr = Field(repr=False)
+
+
 class AppSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="AQ_", env_file=".env", extra="forbid")
 
@@ -36,6 +41,10 @@ class AppSettings(BaseSettings):
     tushare_api_url: str = "https://api.tushare.pro"
     postgres_dsn: SecretStr | None = None
     clickhouse_dsn: SecretStr | None = None
+    web_host: str = "127.0.0.1"
+    web_port: int = Field(default=8000, ge=1, le=65535)
+    web_username: str = "operator"
+    web_password: SecretStr | None = None
 
     @field_validator("tushare_api_url")
     @classmethod
@@ -67,3 +76,22 @@ class AppSettings(BaseSettings):
         if token is None or not token.get_secret_value().strip():
             raise MissingCapabilityError("Tushare token is not configured")
         return TushareCredentials(token=token)
+
+    @field_validator("web_host")
+    @classmethod
+    def require_web_loopback(cls, value: str) -> str:
+        normalized = value.strip().casefold()
+        if normalized not in {"127.0.0.1", "::1", "localhost"}:
+            raise ValueError("Web console must bind to a loopback host")
+        return normalized
+
+    def require_web(self) -> WebCredentials:
+        username = self.web_username.strip()
+        password = self.web_password
+        if (
+            not username
+            or password is None
+            or len(password.get_secret_value().strip()) < 16
+        ):
+            raise MissingCapabilityError("Web credentials are not configured")
+        return WebCredentials(username=username, password=password)

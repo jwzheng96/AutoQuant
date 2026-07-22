@@ -184,6 +184,30 @@ async def test_fetch_maps_daily_units_factor_coverage_and_next_open_visibility()
 
 
 @pytest.mark.asyncio
+async def test_stock_basic_ignores_out_of_scope_bse_rows_before_symbol_mapping() -> None:
+    responses = base_responses()
+    listed = responses["stock_basic"][0]
+    assert isinstance(listed, list)
+    listed.append(
+        {
+            "ts_code": "920000.BJ",
+            "list_status": "L",
+            "list_date": "20240101",
+            "delist_date": None,
+        }
+    )
+    client = FakeClient(responses)
+
+    batch = await source(client).fetch_daily_dataset(
+        ("000001.XSHE",), date(2026, 7, 20), date(2026, 7, 20)
+    )
+
+    assert tuple(item.instrument for item in batch.coverage.lifecycles) == (
+        "000001.XSHE",
+    )
+
+
+@pytest.mark.asyncio
 async def test_fetch_sorts_descending_vendor_rows_and_tracks_suspension_interval() -> None:
     responses = base_responses(
         daily=[

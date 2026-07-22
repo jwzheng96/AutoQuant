@@ -527,7 +527,13 @@ class PostgresControlRepository:
                     f'CREATE SCHEMA IF NOT EXISTS "{self._schema}"'
                 )
                 await connection.exec_driver_sql(f'SET LOCAL search_path TO "{self._schema}"')
-                await connection.exec_driver_sql(migration)
+                raw_connection = await connection.get_raw_connection()
+                driver_connection = raw_connection.driver_connection
+                if driver_connection is None:
+                    raise PersistenceUnavailableError(
+                        "PostgreSQL driver connection is unavailable"
+                    )
+                await driver_connection.execute(migration)
         except Exception:
             raise PersistenceUnavailableError("PostgreSQL migration failed") from None
 
@@ -536,7 +542,10 @@ class PostgresControlRepository:
             raise ValueError("only isolated test schemas may be dropped")
         try:
             async with self._engine.begin() as connection:
-                await connection.exec_driver_sql(f'DROP SCHEMA "{self._schema}" CASCADE')
+                await connection.exec_driver_sql("SET LOCAL search_path TO public")
+                await connection.exec_driver_sql(
+                    f'DROP SCHEMA IF EXISTS "{self._schema}" CASCADE'
+                )
         except Exception:
             raise PersistenceUnavailableError("PostgreSQL test cleanup failed") from None
 
@@ -577,7 +586,11 @@ class PostgresControlRepository:
             raise PersistenceUnavailableError("PostgreSQL connection check failed") from None
         if found != set(required):
             raise PersistenceUnavailableError("PostgreSQL phase-1 schema is unavailable")
-        if version != 1:
+        if (
+            not isinstance(version, int)
+            or isinstance(version, bool)
+            or version < 1
+        ):
             raise PersistenceUnavailableError(
                 "PostgreSQL phase-1 schema version is unavailable"
             )

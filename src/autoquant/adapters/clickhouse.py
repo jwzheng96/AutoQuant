@@ -348,10 +348,13 @@ ORDER BY instrument, event_time, source
                 instrument,
                 source_revision,
                 availability_policy,
-                content_hash,
             )
         ):
             raise TypeError("unexpected string field type")
+        if isinstance(content_hash, bytes):
+            content_hash = content_hash.decode("ascii")
+        if not isinstance(content_hash, str):
+            raise TypeError("unexpected content_hash field type")
         if not all(
             isinstance(value, datetime)
             for value in (event_time, available_at, ingested_at)

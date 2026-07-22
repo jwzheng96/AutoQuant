@@ -453,6 +453,11 @@ ORDER BY instrument, session_date, source
 
     @staticmethod
     def _string(value: object) -> str:
+        if isinstance(value, bytes):
+            try:
+                return value.decode("ascii")
+            except UnicodeDecodeError:
+                raise TypeError("expected ASCII string") from None
         if not isinstance(value, str):
             raise TypeError("expected string")
         return value
