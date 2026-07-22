@@ -14,6 +14,7 @@ from autoquant.config import AppSettings
 from autoquant.errors import AutoQuantError, PersistenceUnavailableError
 from autoquant.execution.control import KillSwitchReason
 from autoquant.execution.control_store import PostgresExecutionControlRepository
+from autoquant.execution.simulated_broker import PersistentSimulatedBroker
 from autoquant.execution.store import PostgresPaperExecutionRepository
 from autoquant.operations import run_daily_ingestion
 from autoquant.web.backtest_store import PostgresBacktestRepository
@@ -126,6 +127,7 @@ class ConsoleService:
         risk_repository: PostgresRiskDecisionRepository | None = None,
         execution_repository: PostgresPaperExecutionRepository | None = None,
         execution_control_repository: PostgresExecutionControlRepository | None = None,
+        simulated_broker: PersistentSimulatedBroker | None = None,
         ingestion_runner: IngestionRunner = run_daily_ingestion,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
         poll_interval: float = 1.0,
@@ -145,6 +147,7 @@ class ConsoleService:
         self._risk = risk_repository
         self._execution = execution_repository
         self._execution_controls = execution_control_repository
+        self._simulated_broker = simulated_broker
         self._ingestion_runner = ingestion_runner
         self._now = now
         self._poll_interval = poll_interval
@@ -169,6 +172,19 @@ class ConsoleService:
                     await self._execution_controls.activate(
                         account_id=self._settings.paper_account_id,
                         command_id=f"startup-recovery-{uuid4()}",
+                        reason=KillSwitchReason.RECOVERY_FAILED,
+                        actor="console-startup",
+                        now=self._now(),
+                    )
+                raise
+        if self._simulated_broker is not None:
+            try:
+                await self._simulated_broker.verify_recovery()
+            except Exception:
+                if self._execution_controls is not None:
+                    await self._execution_controls.activate(
+                        account_id=self._settings.paper_account_id,
+                        command_id=f"broker-recovery-{uuid4()}",
                         reason=KillSwitchReason.RECOVERY_FAILED,
                         actor="console-startup",
                         now=self._now(),
@@ -229,6 +245,8 @@ class ConsoleService:
             await self._execution.close()
         if self._execution_controls is not None:
             await self._execution_controls.close()
+        if self._simulated_broker is not None:
+            await self._simulated_broker.close()
         await self._operators.close()
         await self._control.close()
         await self._market.client.close()
@@ -434,6 +452,10 @@ class ConsoleService:
                 kill_switch_active=True,
                 kill_switch_reason="control_store_unavailable",
                 kill_switch_version=0,
+                simulated_broker_available=False,
+                simulated_broker_recovery_verified=False,
+                simulated_broker_order_count=0,
+                simulated_broker_fact_count=0,
                 remaining_gates=(
                     "paper_execution_store",
                     "paper_broker_adapter",
@@ -443,6 +465,11 @@ class ConsoleService:
                 ),
             )
         summary = await self._execution.verify_recovery()
+        broker_summary = (
+            None
+            if self._simulated_broker is None
+            else await self._simulated_broker.verify_recovery()
+        )
         control = (
             None
             if self._execution_controls is None
@@ -466,8 +493,19 @@ class ConsoleService:
                 "control_store_unavailable" if control is None else control.reason.value
             ),
             kill_switch_version=0 if control is None else control.version,
+            simulated_broker_available=broker_summary is not None,
+            simulated_broker_recovery_verified=(
+                False if broker_summary is None else broker_summary.recovery_verified
+            ),
+            simulated_broker_order_count=(
+                0 if broker_summary is None else broker_summary.order_count
+            ),
+            simulated_broker_fact_count=(
+                0 if broker_summary is None else broker_summary.fact_count
+            ),
             remaining_gates=(
-                "paper_broker_adapter",
+                "paper_order_coordinator",
+                "paper_account_projection",
                 "reconciliation_loop",
                 "restart_recovery_drill",
                 "kill_switch_drill",

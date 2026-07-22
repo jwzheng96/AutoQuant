@@ -43,6 +43,12 @@ can only be reset by code that supplies a current passing persisted reconciliati
 control version, and verified execution recovery. The Web console exposes activation only.
 `AQ_LIVE_TRADING_ENABLED=true` is rejected even in a live environment in this release.
 
+PostgreSQL schema v10 contains an explicitly local, zero-network simulated broker. It owns an
+independent append-only broker-fact chain, applies deterministic bid/ask marketability, rejects
+closed-market submissions, and verifies all broker projections by replay at startup. It is not
+yet connected to an account projection or order-coordination API, so paper submission remains
+unavailable from the console.
+
 All dependency, test, lint, type-check, migration, and Git mutation commands for this
 checkout must run on `rlocal`; see [the phase-1 runbook](docs/runbooks/phase1-data-foundation.md).
 

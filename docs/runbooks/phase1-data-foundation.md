@@ -27,6 +27,7 @@ Apply `migrations/postgres/001_phase1.sql`,
 `migrations/postgres/007_risk_decisions.sql`, then
 `migrations/postgres/008_paper_execution.sql`, then
 `migrations/postgres/009_execution_controls.sql`, then
+`migrations/postgres/010_simulated_broker.sql`, then
 `migrations/clickhouse/001_phase1.sql` and
 `migrations/clickhouse/002_tushare_daily.sql` and
 `migrations/clickhouse/003_daily_coverage.sql` in order, only to explicitly authorized
@@ -131,6 +132,12 @@ page may activate it with an authenticated, CSRF-protected command; there is int
 Web reset endpoint. Reset code requires a matching optimistic version, a recent passing
 reconciliation already persisted in schema v8, and a successful execution-history replay.
 Setting `AQ_LIVE_TRADING_ENABLED=true` is rejected by configuration validation in this release.
+
+Schema v10 adds a local deterministic simulated broker with no network client or real-money
+capability. On startup the console replays its immutable broker facts independently from the
+internal paper-order event chain. `/api/v1/execution` reports both recovery results. The adapter
+is not an order endpoint: an account projector, coordinator and continuously reconciled quote
+source must still be connected before paper submission can be exposed.
 
 ## Research execution boundary
 

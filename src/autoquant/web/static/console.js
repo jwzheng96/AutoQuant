@@ -210,6 +210,7 @@ async function loadTrading() {
     setText("execution-remaining-gates", data.execution?.remaining_gates?.join(", ") ?? "—");
     setText("kill-switch-state", data.execution?.kill_switch_active ? "ACTIVE" : "RESET");
     setText("kill-switch-reason", data.execution?.kill_switch_reason ?? "—");
+    setText("simulated-broker-state", data.execution?.simulated_broker_recovery_verified ? "持久化模拟券商事实链已验证" : "模拟券商不可用");
   }
   catch (error) { showToast(`能力读取失败：${error.message}`); }
 }

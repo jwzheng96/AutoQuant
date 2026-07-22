@@ -184,6 +184,10 @@ class FakeConsoleService:
             kill_switch_active=True,
             kill_switch_reason="initializing",
             kill_switch_version=1,
+            simulated_broker_available=True,
+            simulated_broker_recovery_verified=True,
+            simulated_broker_order_count=0,
+            simulated_broker_fact_count=0,
             remaining_gates=("paper_broker_adapter", "kill_switch_drill"),
         )
 

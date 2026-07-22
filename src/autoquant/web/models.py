@@ -406,6 +406,10 @@ class PaperExecutionStatus(BaseModel):
     kill_switch_active: bool
     kill_switch_reason: str
     kill_switch_version: int = Field(ge=0)
+    simulated_broker_available: bool
+    simulated_broker_recovery_verified: bool
+    simulated_broker_order_count: int = Field(ge=0)
+    simulated_broker_fact_count: int = Field(ge=0)
     remaining_gates: tuple[str, ...]
 
     @field_validator("latest_reconciliation_at")

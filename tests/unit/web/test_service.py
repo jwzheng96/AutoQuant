@@ -54,6 +54,7 @@ def _service(
     risks: MagicMock | None = None,
     executions: MagicMock | None = None,
     execution_controls: MagicMock | None = None,
+    simulated_broker: MagicMock | None = None,
 ) -> ConsoleService:
     market = MagicMock()
     market.client = MagicMock()
@@ -70,6 +71,7 @@ def _service(
         risk_repository=risks,
         execution_repository=executions,
         execution_control_repository=execution_controls,
+        simulated_broker=simulated_broker,
         now=lambda: NOW,
         poll_interval=0.01,
     )
@@ -159,7 +161,7 @@ async def test_execution_status_requires_gateway_even_after_verified_recovery() 
     assert isinstance(status, PaperExecutionStatus)
     assert status.recovery_verified is True
     assert status.gateway_available is False
-    assert "paper_broker_adapter" in status.remaining_gates
+    assert "paper_order_coordinator" in status.remaining_gates
 
 
 @pytest.mark.asyncio
@@ -183,6 +185,32 @@ async def test_startup_recovery_failure_activates_kill_switch_and_aborts() -> No
         await service.start()
 
     controls.ensure_fail_closed.assert_awaited_once()
+    assert controls.activate.await_args.kwargs["reason"] is KillSwitchReason.RECOVERY_FAILED
+
+
+@pytest.mark.asyncio
+async def test_simulated_broker_recovery_failure_also_aborts_startup() -> None:
+    executions = MagicMock()
+    executions.verify_recovery = AsyncMock()
+    broker = MagicMock()
+    broker.verify_recovery = AsyncMock(
+        side_effect=PersistenceUnavailableError("broker fact mismatch")
+    )
+    controls = MagicMock()
+    controls.ensure_fail_closed = AsyncMock()
+    controls.activate = AsyncMock()
+    service = _service(
+        operator=MagicMock(),
+        control=MagicMock(),
+        runner=AsyncMock(),
+        executions=executions,
+        execution_controls=controls,
+        simulated_broker=broker,
+    )
+
+    with pytest.raises(PersistenceUnavailableError, match="broker fact mismatch"):
+        await service.start()
+
     assert controls.activate.await_args.kwargs["reason"] is KillSwitchReason.RECOVERY_FAILED
 
 
