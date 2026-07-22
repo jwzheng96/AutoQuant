@@ -9,24 +9,53 @@ git clone https://github.com/jwzheng96/AutoQuant.git
 cd AutoQuant
 /Users/zjw/.local/bin/uv sync --frozen --all-groups
 /Users/zjw/.local/bin/uv run autoquant config-check
+/Users/zjw/.local/bin/uv run autoquant tushare-check
 /Users/zjw/.local/bin/uv run pytest -m "not live" -q
 /Users/zjw/.local/bin/uv run ruff check . && /Users/zjw/.local/bin/uv run mypy src
 ```
 
-Apply `migrations/postgres/001_phase1.sql` and
-`migrations/clickhouse/001_phase1.sql` only to explicitly authorized phase-1 databases,
-then run `autoquant db-check`.
+`config-check` reports all configured capabilities and exits nonzero if an intentionally
+unused provider such as RQData is absent. Use `tushare-check` as the authoritative read-only
+matrix for the Tushare daily endpoints.
+
+Apply `migrations/postgres/001_phase1.sql`, then
+`migrations/clickhouse/001_phase1.sql` and
+`migrations/clickhouse/002_tushare_daily.sql` in order, only to explicitly authorized
+phase-1 databases. Then run `autoquant db-check`.
+
+Configure only a newly rotated Token on the trusted host:
+
+```bash
+export AQ_TUSHARE_TOKEN='<enter locally; do not paste into chat>'
+/Users/zjw/.local/bin/uv run autoquant tushare-check
+```
+
+When all five endpoints report `available` and both databases have the required schemas,
+ingest a small explicit interval:
+
+```bash
+/Users/zjw/.local/bin/uv run autoquant ingest-daily \
+  --instrument 000001.XSHE \
+  --start 2020-01-02 \
+  --end 2020-01-03
+```
+
+The command must produce `status=completed`, a quality hash, and a manifest hash. Any
+permission denial, unexplained trading-day gap, missing database, or incomplete metadata
+exits nonzero and must be investigated rather than bypassed.
 
 ## Opt-in external evidence
 
-The RQData smoke test never runs by default. With credentials loaded only in the trusted
-remote environment:
+Vendor smoke tests never run by default. With credentials loaded only in the trusted remote
+environment:
 
 ```bash
 AQ_RUN_RQDATA_LIVE=1 /Users/zjw/.local/bin/uv run pytest tests/live/test_rqdata_readonly.py -q -rs
+AQ_RUN_TUSHARE_LIVE=1 /Users/zjw/.local/bin/uv run pytest tests/live/test_tushare_readonly.py -q -rs
 ```
 
-Real RQData, PostgreSQL, and ClickHouse checks are required before phase 1 can be declared
-complete. A real end-to-end ingestion must produce a passing quality report, immutable
-manifest, ClickHouse rows, PostgreSQL checkpoint, and audit event. Credential-dependent or
-database-dependent skips are incomplete evidence, not successes.
+For the Tushare daily path, real Tushare, PostgreSQL, and ClickHouse checks are required
+before it can be declared operational. A real end-to-end ingestion must produce a passing
+quality report, immutable manifest, ClickHouse rows, separate daily/factor PostgreSQL
+checkpoints, and an audit event. Credential-dependent or database-dependent skips are
+incomplete evidence, not successes.
