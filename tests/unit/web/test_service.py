@@ -12,6 +12,8 @@ from autoquant.web.models import (
     DailyIngestionJobRequest,
     OperatorJob,
     OperatorJobState,
+    ValidationExperiment,
+    WalkForwardJobRequest,
 )
 from autoquant.web.service import ConsoleService
 
@@ -44,6 +46,8 @@ def _service(
     runner: AsyncMock,
     backtests: MagicMock | None = None,
     backtest_runner: MagicMock | None = None,
+    validations: MagicMock | None = None,
+    validation_runner: MagicMock | None = None,
 ) -> ConsoleService:
     market = MagicMock()
     market.client = MagicMock()
@@ -55,6 +59,8 @@ def _service(
         ingestion_runner=runner,
         backtest_repository=backtests,
         backtest_runner=backtest_runner,
+        validation_repository=validations,
+        validation_runner=validation_runner,
         now=lambda: NOW,
         poll_interval=0.01,
     )
@@ -74,6 +80,25 @@ def _backtest_run() -> BacktestRun:
         state=OperatorJobState.RUNNING,
         strategy_id="manifest_buy_hold_v1",
         request=_backtest_request(),
+        requested_by="operator",
+        created_at=NOW,
+        started_at=NOW,
+    )
+
+
+def _validation_experiment() -> ValidationExperiment:
+    return ValidationExperiment(
+        experiment_id=uuid4(),
+        state=OperatorJobState.RUNNING,
+        validator_id="sma_cross_walk_forward_v1",
+        request=WalkForwardJobRequest(
+            manifest_hash="a" * 64,
+            instrument="000001.XSHE",
+            train_sessions=60,
+            test_sessions=20,
+            candidates=({"fast_sessions": 5, "slow_sessions": 20},),
+            idempotency_key="service-validation-request-0001",
+        ),
         requested_by="operator",
         created_at=NOW,
         started_at=NOW,
@@ -207,3 +232,65 @@ async def test_backtest_worker_exposes_stable_failure_code_not_exception_detail(
     )
     audit = control.append_audit_event.await_args_list[-1].args[2]
     assert "sensitive research detail" not in str(audit)
+
+
+@pytest.mark.asyncio
+async def test_validation_worker_commits_result_and_safe_audit_summary() -> None:
+    validations = MagicMock()
+    validations.complete_experiment = AsyncMock()
+    validations.fail_experiment = AsyncMock()
+    result = MagicMock()
+    result.result_hash = "b" * 64
+    result.manifest_hash = "a" * 64
+    result.folds = (MagicMock(), MagicMock())
+    runner = MagicMock()
+    runner.run = AsyncMock(return_value=result)
+    control = MagicMock()
+    control.append_audit_event = AsyncMock(return_value="d" * 64)
+    service = _service(
+        operator=MagicMock(),
+        control=control,
+        runner=AsyncMock(),
+        validations=validations,
+        validation_runner=runner,
+    )
+    experiment = _validation_experiment()
+
+    await service._run_validation(experiment)
+
+    validations.complete_experiment.assert_awaited_once_with(
+        experiment.experiment_id, result=result, now=NOW
+    )
+    validations.fail_experiment.assert_not_awaited()
+    audit = control.append_audit_event.await_args_list[-1].args[2]
+    assert audit["fold_count"] == 2
+    assert set(audit) == {"job_id", "result_hash", "manifest_hash", "fold_count"}
+
+
+@pytest.mark.asyncio
+async def test_validation_worker_uses_stable_failure_code() -> None:
+    validations = MagicMock()
+    validations.complete_experiment = AsyncMock()
+    validations.fail_experiment = AsyncMock()
+    runner = MagicMock()
+    runner.run = AsyncMock(side_effect=ValueError("do not expose this detail"))
+    control = MagicMock()
+    control.append_audit_event = AsyncMock(return_value="d" * 64)
+    service = _service(
+        operator=MagicMock(),
+        control=control,
+        runner=AsyncMock(),
+        validations=validations,
+        validation_runner=runner,
+    )
+    experiment = _validation_experiment()
+
+    await service._run_validation(experiment)
+
+    validations.fail_experiment.assert_awaited_once_with(
+        experiment.experiment_id,
+        error_code="invalid_validation_input",
+        now=NOW,
+    )
+    audit = control.append_audit_event.await_args_list[-1].args[2]
+    assert "do not expose this detail" not in str(audit)

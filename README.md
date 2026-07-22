@@ -16,6 +16,12 @@ lifecycles, suspension revisions, and exact daily price limits. PostgreSQL schem
 bounded baseline runs, executions, daily snapshots, and event chains atomically; `/research`
 shows those results and verifies stored hashes when they are read.
 
+PostgreSQL schemas v5-v6 add a persistent rolling walk-forward queue for the fixed
+`sma_cross_v1` research baseline. Parameters are selected only in training windows, tests are
+separated by an embargo, every fold is compared with the same-period buy-and-hold benchmark,
+and complete selected-fold artifacts are hash-verified on read. This is a research filter,
+not a live-trading release.
+
 All dependency, test, lint, type-check, migration, and Git mutation commands for this
 checkout must run on `rlocal`; see [the phase-1 runbook](docs/runbooks/phase1-data-foundation.md).
 

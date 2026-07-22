@@ -75,6 +75,7 @@ input:focus, select:focus { border-color: var(--green-2); box-shadow: 0 0 0 3px 
 .research-form .check-label { display: flex; align-items: center; min-height: 42px; gap: 9px; color: var(--text); }
 .check-label input { width: 16px; height: 16px; accent-color: var(--green); }
 .research-detail { margin-top: 14px; }
+.research-section-heading { margin-top: 56px; }
 .selectable-row { cursor: pointer; }
 .selectable-row:hover, .selectable-row:focus { background: rgba(81,230,168,.05); outline: none; }
 .form-help { margin: 14px 0 0; color: var(--muted); font-size: 12px; }

@@ -206,9 +206,11 @@ const researchManifests = new Map();
 
 async function loadResearchManifests() {
   const select = document.getElementById("backtest-manifest");
+  const validationSelect = document.getElementById("validation-manifest");
   try {
     const data = await requestJson("/api/v1/research/manifests?limit=100");
     select.replaceChildren();
+    validationSelect.replaceChildren();
     researchManifests.clear();
     data.items.forEach(item => {
       researchManifests.set(item.manifest_hash, item);
@@ -216,20 +218,25 @@ async function loadResearchManifests() {
       option.value = item.manifest_hash;
       option.textContent = `${item.instruments.join(", ")} · ${item.start_time.slice(0, 10)} — ${item.end_time.slice(0, 10)} · ${item.manifest_hash.slice(0, 10)}`;
       select.append(option);
+      validationSelect.append(option.cloneNode(true));
     });
     if (!data.items.length) {
       const option = document.createElement("option");
       option.value = "";
       option.textContent = "暂无生产完整的数据清单";
       select.append(option);
+      validationSelect.append(option.cloneNode(true));
     }
     syncManifestInstrument();
+    syncValidationManifestInstrument();
   } catch (error) {
     select.replaceChildren();
+    validationSelect.replaceChildren();
     const option = document.createElement("option");
     option.value = "";
     option.textContent = "数据清单读取失败";
     select.append(option);
+    validationSelect.append(option.cloneNode(true));
     showToast(`数据清单读取失败：${error.message}`);
   }
 }
@@ -237,6 +244,11 @@ async function loadResearchManifests() {
 function syncManifestInstrument() {
   const selected = researchManifests.get(document.getElementById("backtest-manifest").value);
   if (selected?.instruments?.length) document.getElementById("backtest-instrument").value = selected.instruments[0];
+}
+
+function syncValidationManifestInstrument() {
+  const selected = researchManifests.get(document.getElementById("validation-manifest").value);
+  if (selected?.instruments?.length) document.getElementById("validation-instrument").value = selected.instruments[0];
 }
 
 function formatPercent(value) {
@@ -324,6 +336,94 @@ async function createBacktest(event) {
   } catch (error) { showToast(`回测创建失败：${error.message}`); }
 }
 
+async function loadValidationDetail(experimentId) {
+  try {
+    const detail = await requestJson(`/api/v1/validations/${experimentId}`);
+    const host = document.getElementById("validation-detail");
+    host.hidden = false;
+    const summary = detail.experiment.summary;
+    setText("val-oos-return", formatPercent(summary?.compounded_oos_return));
+    setText("val-benchmark-return", formatPercent(summary?.benchmark_compounded_oos_return));
+    setText("val-excess-return", formatPercent(summary?.excess_oos_return));
+    setText("val-evidence-status", summary?.evidence_status ?? "—");
+    setText("val-gate-failures", summary?.gate_failures?.length ? summary.gate_failures.join(", ") : "预筛门槛通过，仍非实盘放行");
+    setText("val-worst-drawdown", formatPercent(summary?.worst_oos_drawdown));
+    setText("val-profitable-rate", formatPercent(summary?.profitable_fold_rate));
+    setText("val-optimism", formatPercent(summary?.selection_optimism));
+    setText("val-oos-sessions", summary?.oos_sessions ?? "—");
+    const table = document.getElementById("validation-folds-table");
+    table.replaceChildren();
+    detail.folds.forEach(fold => {
+      const row = document.createElement("tr");
+      [fold.sequence, `${fold.train_start} — ${fold.train_end}`, `${fold.test_start} — ${fold.test_end}`, `${fold.selected.fast_sessions}/${fold.selected.slow_sessions}`, formatPercent(fold.training.total_return), formatPercent(fold.test.total_return), formatPercent(fold.benchmark?.total_return), formatPercent(fold.test.max_drawdown)].forEach(value => {
+        const cell = document.createElement("td"); cell.textContent = value; row.append(cell);
+      });
+      table.append(row);
+    });
+  } catch (error) { showToast(`验证明细读取失败：${error.message}`); }
+}
+
+async function loadValidations() {
+  try {
+    const data = await requestJson("/api/v1/validations?limit=50");
+    const table = document.getElementById("validations-table");
+    table.replaceChildren();
+    data.items.forEach(experiment => {
+      const row = document.createElement("tr");
+      row.className = "selectable-row";
+      row.tabIndex = 0;
+      [new Date(experiment.created_at).toLocaleString(), experiment.request.instrument, `${experiment.request.train_sessions}/${experiment.request.test_sessions}`].forEach(value => {
+        const cell = document.createElement("td"); cell.textContent = value; row.append(cell);
+      });
+      const stateCell = document.createElement("td");
+      const badge = document.createElement("span"); statusPill(badge, experiment.state); stateCell.append(badge); row.append(stateCell);
+      [formatPercent(experiment.summary?.compounded_oos_return), formatPercent(experiment.summary?.profitable_fold_rate)].forEach(value => {
+        const cell = document.createElement("td"); cell.textContent = value; row.append(cell);
+      });
+      const open = () => loadValidationDetail(experiment.experiment_id);
+      row.addEventListener("click", open);
+      row.addEventListener("keydown", event => { if (event.key === "Enter" || event.key === " ") open(); });
+      table.append(row);
+    });
+    if (data.items.length) await loadValidationDetail(data.items[0].experiment_id);
+  } catch (error) { showToast(`验证实验读取失败：${error.message}`); }
+}
+
+function parseCandidates(value) {
+  return value.split(",").map(pair => {
+    const [fast, slow, extra] = pair.trim().split("/");
+    if (!fast || !slow || extra) throw new Error("候选参数格式应为 5/20,10/30");
+    return { fast_sessions: Number(fast), slow_sessions: Number(slow) };
+  });
+}
+
+async function createValidation(event) {
+  event.preventDefault();
+  try {
+    const payload = {
+      manifest_hash: document.getElementById("validation-manifest").value,
+      instrument: document.getElementById("validation-instrument").value.trim().toUpperCase(),
+      initial_cash: document.getElementById("backtest-cash").value,
+      allocation: document.getElementById("backtest-allocation").value,
+      slippage_bps: document.getElementById("backtest-slippage").value,
+      train_sessions: Number(document.getElementById("validation-train").value),
+      test_sessions: Number(document.getElementById("validation-test").value),
+      embargo_sessions: Number(document.getElementById("validation-embargo").value),
+      candidates: parseCandidates(document.getElementById("validation-candidates").value),
+      idempotency_key: `web-validation-${crypto.randomUUID()}`,
+    };
+    const experiment = await requestJson("/api/v1/validations", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-AutoQuant-CSRF": csrf },
+      body: JSON.stringify(payload),
+    });
+    showToast("样本外验证已进入持久化队列");
+    await loadValidations();
+    window.setTimeout(loadValidations, 1800);
+    await loadValidationDetail(experiment.experiment_id);
+  } catch (error) { showToast(`验证创建失败：${error.message}`); }
+}
+
 if (page === "/") {
   document.getElementById("page-title").textContent = "系统总览";
   document.getElementById("refresh-overview").addEventListener("click", loadOverview);
@@ -346,9 +446,12 @@ if (page === "/") {
   document.getElementById("page-title").textContent = "回测研究";
   document.getElementById("backtest-form").addEventListener("submit", createBacktest);
   document.getElementById("backtest-manifest").addEventListener("change", syncManifestInstrument);
+  document.getElementById("validation-manifest").addEventListener("change", syncValidationManifestInstrument);
   document.getElementById("refresh-backtests").addEventListener("click", loadBacktests);
+  document.getElementById("validation-form").addEventListener("submit", createValidation);
+  document.getElementById("refresh-validations").addEventListener("click", loadValidations);
   renderEquityChart([]);
-  loadResearchManifests().then(loadBacktests);
+  loadResearchManifests().then(() => Promise.all([loadBacktests(), loadValidations()]));
 } else {
   statusPill(document.getElementById("global-status"), "研究模式");
   document.getElementById("page-title").textContent = "交易中心";

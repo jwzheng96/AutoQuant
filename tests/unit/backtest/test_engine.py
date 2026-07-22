@@ -3,6 +3,7 @@ from decimal import Decimal
 
 import pytest
 
+from autoquant.backtest.codec import decode_backtest_result, encode_backtest_result
 from autoquant.backtest.engine import BacktestEngine
 from autoquant.backtest.models import (
     AccountSnapshot,
@@ -132,6 +133,33 @@ def test_backtest_rejects_data_not_visible_at_as_of() -> None:
         )
 
 
+def test_drawdown_includes_initial_capital_before_first_snapshot() -> None:
+    one_day = BacktestSession(
+        session_date=DAY,
+        markets=(
+            market(
+                open_price="10",
+                high_price="10.1",
+                low_price="9.9",
+                close_price="10",
+                pre_close="10",
+            ),
+        ),
+        orders=(order("buy", OrderSide.BUY),),
+    )
+
+    result = BacktestEngine().run(
+        strategy_id="scheduled-orders-v1",
+        manifest_hash="a" * 64,
+        as_of=datetime(2026, 7, 24, tzinfo=UTC),
+        initial_cash=Decimal("10000"),
+        sessions=(one_day,),
+    )
+
+    assert result.ending_equity == Decimal("9993.99")
+    assert result.max_drawdown == Decimal("0.000601")
+
+
 def test_artifact_hash_commits_daily_snapshots_beyond_semantic_result_hash() -> None:
     result = BacktestEngine().run(
         strategy_id="scheduled-orders-v1",
@@ -170,3 +198,24 @@ def test_artifact_hash_commits_daily_snapshots_beyond_semantic_result_hash() -> 
 
     assert altered.result_hash == result.result_hash
     assert backtest_artifact_hash(altered) != backtest_artifact_hash(result)
+
+
+def test_backtest_result_codec_round_trips_and_rejects_artifact_tampering() -> None:
+    result = BacktestEngine().run(
+        strategy_id="scheduled-orders-v1",
+        manifest_hash="a" * 64,
+        as_of=datetime(2026, 7, 24, tzinfo=UTC),
+        initial_cash=Decimal("10000"),
+        sessions=sessions(),
+    )
+    payload = encode_backtest_result(result)
+
+    assert decode_backtest_result(payload) == result
+
+    snapshots = payload["snapshots"]
+    assert isinstance(snapshots, list)
+    first = snapshots[0]
+    assert isinstance(first, dict)
+    first["equity"] = "999999"
+    with pytest.raises(ValueError, match="artifact hash"):
+        decode_backtest_result(payload)

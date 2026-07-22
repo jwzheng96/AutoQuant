@@ -22,6 +22,8 @@ Apply `migrations/postgres/001_phase1.sql`,
 `migrations/postgres/002_operator_console.sql`, then
 `migrations/postgres/003_revision_checkpoints.sql`, then
 `migrations/postgres/004_backtest_runs.sql`, then
+`migrations/postgres/005_walk_forward_validation.sql`, then
+`migrations/postgres/006_validation_benchmark.sql`, then
 `migrations/clickhouse/001_phase1.sql` and
 `migrations/clickhouse/002_tushare_daily.sql` and
 `migrations/clickhouse/003_daily_coverage.sql` in order, only to explicitly authorized
@@ -121,6 +123,13 @@ The current baseline fails closed when an adjustment factor changes because corp
 position and cash accounting is not implemented yet. A one-day positive baseline return proves
 only that the pipeline works; it is not strategy evidence. Use multi-year walk-forward and
 out-of-sample tests only after corporate actions and a real strategy interface are implemented.
+
+The `/research` walk-forward form runs the built-in SMA-cross baseline only. Its candidates
+use `fast/slow` session notation, are selected separately in every training window, and are
+never reselected from the corresponding test result. Inspect absolute return, buy-and-hold
+return, excess return, fold dispersion, drawdown, and the persisted evidence status together.
+`research_candidate` means only that preliminary sample-size and performance filters passed;
+it does not unlock paper trading or real orders.
 
 Trading calendars, instrument lifecycles, suspension state and exact `stk_limit` boundaries are
 persisted as point-in-time revisions and included in new validated manifests. Only manifests

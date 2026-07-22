@@ -31,6 +31,82 @@ class DailyDatasetReaderPort(Protocol):
     ) -> ValidatedDailyDataset: ...
 
 
+class ManifestMarketCompiler:
+    """Validate a daily research dataset and compile point-in-time market states."""
+
+    def __init__(self, *, rulebook: AshareRuleBook | None = None) -> None:
+        self._rulebook = rulebook or AshareRuleBook()
+
+    def compile(
+        self,
+        instrument: str,
+        dataset: ValidatedDailyDataset,
+    ) -> tuple[MarketState, ...]:
+        bars = tuple(
+            sorted(
+                (bar for bar in dataset.bars if bar.instrument == instrument),
+                key=lambda bar: bar.session_date,
+            )
+        )
+        if not bars:
+            raise ValueError("manifest has no bars for the selected instrument")
+        factors = tuple(
+            factor.factor
+            for factor in dataset.factors
+            if factor.instrument == instrument
+        )
+        if len(factors) != len(bars) or len(set(factors)) != 1:
+            raise ValueError("corporate-action accounting is required for this manifest")
+
+        lifecycle = tuple(
+            item
+            for item in dataset.coverage.lifecycles
+            if item.instrument == instrument
+        )
+        if len(lifecycle) != 1:
+            raise ValueError("manifest must contain one instrument lifecycle")
+        first_date = bars[0].session_date
+        last_date = bars[-1].session_date
+        if lifecycle[0].list_date > first_date or (
+            lifecycle[0].delist_date is not None
+            and lifecycle[0].delist_date < last_date
+        ):
+            raise ValueError("instrument lifecycle does not cover the backtest interval")
+
+        open_sessions = {
+            item.session_date for item in dataset.coverage.sessions if item.is_open
+        }
+        suspension_by_date = {
+            item.session_date: item
+            for item in dataset.coverage.suspensions
+            if item.instrument == instrument
+        }
+        limit_by_date = {
+            item.session_date: item
+            for item in dataset.coverage.price_limits
+            if item.instrument == instrument
+        }
+        bar_dates = {bar.session_date for bar in bars}
+        if not bar_dates.issubset(open_sessions):
+            raise ValueError("trading calendar does not cover every market bar")
+        if set(suspension_by_date) != bar_dates:
+            raise ValueError("suspension evidence does not cover every market bar")
+        if set(limit_by_date) != bar_dates:
+            raise ValueError("exact price limits do not cover every market bar")
+
+        return tuple(
+            MarketState(
+                bar=bar,
+                rules=self._rulebook.resolve_with_price_limit(
+                    instrument, bar.session_date, limit_by_date[bar.session_date]
+                ),
+                suspended=suspension_by_date[bar.session_date].suspended,
+                daily_price_limit=limit_by_date[bar.session_date],
+            )
+            for bar in bars
+        )
+
+
 class ManifestBacktestRunner:
     """Compile one immutable daily manifest into a deterministic baseline run."""
 
@@ -40,10 +116,13 @@ class ManifestBacktestRunner:
         control_repository: ManifestControlPort,
         dataset_reader: DailyDatasetReaderPort,
         rulebook: AshareRuleBook | None = None,
+        compiler: ManifestMarketCompiler | None = None,
     ) -> None:
         self._control = control_repository
         self._reader = dataset_reader
-        self._rulebook = rulebook or AshareRuleBook()
+        if rulebook is not None and compiler is not None:
+            raise ValueError("rulebook and compiler cannot both be supplied")
+        self._compiler = compiler or ManifestMarketCompiler(rulebook=rulebook)
 
     async def run(self, request: BacktestRunRequest) -> BacktestResult:
         manifest = await self._control.read_manifest(request.manifest_hash)
@@ -67,68 +146,14 @@ class ManifestBacktestRunner:
         request: BacktestRunRequest,
         dataset: ValidatedDailyDataset,
     ) -> tuple[BacktestSession, ...]:
-        bars = tuple(
-            sorted(
-                (bar for bar in dataset.bars if bar.instrument == request.instrument),
-                key=lambda bar: bar.session_date,
-            )
-        )
-        if not bars:
-            raise ValueError("manifest has no bars for the selected instrument")
-        factors = tuple(
-            factor.factor
-            for factor in dataset.factors
-            if factor.instrument == request.instrument
-        )
-        if len(factors) != len(bars) or len(set(factors)) != 1:
-            raise ValueError("corporate-action accounting is required for this manifest")
-
-        lifecycle = tuple(
-            item
-            for item in dataset.coverage.lifecycles
-            if item.instrument == request.instrument
-        )
-        if len(lifecycle) != 1:
-            raise ValueError("manifest must contain one instrument lifecycle")
-        first_date = bars[0].session_date
-        last_date = bars[-1].session_date
-        if lifecycle[0].list_date > first_date or (
-            lifecycle[0].delist_date is not None
-            and lifecycle[0].delist_date < last_date
-        ):
-            raise ValueError("instrument lifecycle does not cover the backtest interval")
-
-        open_sessions = {
-            item.session_date
-            for item in dataset.coverage.sessions
-            if item.is_open
-        }
-        suspension_by_date = {
-            item.session_date: item
-            for item in dataset.coverage.suspensions
-            if item.instrument == request.instrument
-        }
-        limit_by_date = {
-            item.session_date: item
-            for item in dataset.coverage.price_limits
-            if item.instrument == request.instrument
-        }
-        bar_dates = {bar.session_date for bar in bars}
-        if not bar_dates.issubset(open_sessions):
-            raise ValueError("trading calendar does not cover every market bar")
-        if set(suspension_by_date) != bar_dates:
-            raise ValueError("suspension evidence does not cover every market bar")
-        if set(limit_by_date) != bar_dates:
-            raise ValueError("exact price limits do not cover every market bar")
-
-        first_limit = limit_by_date[first_date]
-        first_rules = self._rulebook.resolve_with_price_limit(
-            request.instrument, first_date, first_limit
-        )
+        markets = self._compiler.compile(request.instrument, dataset)
+        first_date = markets[0].bar.session_date
+        last_date = markets[-1].bar.session_date
+        first_rules = markets[0].rules
         quantity = _baseline_quantity(
             initial_cash=request.initial_cash,
             allocation=request.allocation,
-            reference_price=bars[0].pre_close,
+            reference_price=markets[0].bar.pre_close,
             slippage_bps=request.slippage_bps,
             buy_minimum=first_rules.buy_minimum,
             buy_step=first_rules.buy_step,
@@ -136,26 +161,23 @@ class ManifestBacktestRunner:
         )
 
         compiled: list[BacktestSession] = []
-        for bar in bars:
-            daily_limit = limit_by_date[bar.session_date]
-            rules = self._rulebook.resolve_with_price_limit(
-                request.instrument, bar.session_date, daily_limit
-            )
+        for market in markets:
+            session_date = market.bar.session_date
             orders: list[OrderIntent] = []
-            if bar.session_date == first_date:
+            if session_date == first_date:
                 orders.append(
                     _order(
                         order_id="baseline-entry",
                         instrument=request.instrument,
                         side=OrderSide.BUY,
                         quantity=quantity,
-                        session_date=bar.session_date,
+                        session_date=session_date,
                     )
                 )
             if (
                 request.liquidate_at_end
                 and last_date > first_date
-                and bar.session_date == last_date
+                and session_date == last_date
             ):
                 orders.append(
                     _order(
@@ -163,20 +185,13 @@ class ManifestBacktestRunner:
                         instrument=request.instrument,
                         side=OrderSide.SELL,
                         quantity=quantity,
-                        session_date=bar.session_date,
+                        session_date=session_date,
                     )
                 )
             compiled.append(
                 BacktestSession(
-                    session_date=bar.session_date,
-                    markets=(
-                        MarketState(
-                            bar=bar,
-                            rules=rules,
-                            suspended=suspension_by_date[bar.session_date].suspended,
-                            daily_price_limit=daily_limit,
-                        ),
-                    ),
+                    session_date=session_date,
+                    markets=(market,),
                     orders=tuple(orders),
                 )
             )

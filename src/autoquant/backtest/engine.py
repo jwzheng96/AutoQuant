@@ -77,7 +77,7 @@ class BacktestEngine:
             snapshots.append(ledger.snapshot(session.markets))
 
         equities = tuple(snapshot.equity for snapshot in snapshots)
-        peak = equities[0]
+        peak = ledger.initial_cash
         max_drawdown = Decimal("0")
         for equity in equities:
             peak = max(peak, equity)

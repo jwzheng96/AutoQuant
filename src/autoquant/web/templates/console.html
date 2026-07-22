@@ -135,6 +135,39 @@
               <div class="table-wrap"><table><thead><tr><th>交易日</th><th>方向</th><th>状态</th><th>数量</th><th>成交价</th><th>费用</th><th>拒单原因</th></tr></thead><tbody id="executions-table"></tbody></table></div>
             </article>
           </section>
+          <div class="section-heading research-section-heading"><div><p class="eyebrow">OUT-OF-SAMPLE GATE</p><h2>滚动样本外验证</h2></div><button id="refresh-validations" class="secondary-button" type="button">刷新实验</button></div>
+          <article class="panel">
+            <form id="validation-form" class="research-form">
+              <label>生产数据清单<select id="validation-manifest" required><option value="">正在读取…</option></select></label>
+              <label>证券代码<input id="validation-instrument" value="000001.XSHE" pattern="[0-9]{6}\.(XSHG|XSHE)" required></label>
+              <label>训练交易日<input id="validation-train" type="number" min="60" max="750" value="120" required></label>
+              <label>测试交易日<input id="validation-test" type="number" min="20" max="250" value="40" required></label>
+              <label>隔离交易日<input id="validation-embargo" type="number" min="1" max="20" value="1" required></label>
+              <label>均线候选<input id="validation-candidates" value="5/20,10/30,20/60" required></label>
+              <button class="primary-button" type="submit">创建验证实验</button>
+            </form>
+            <p class="form-help">参数只在每个训练窗选择；隔离期后的测试窗只计分、不回填。候选格式为“快线/慢线”，最多 25 组。</p>
+          </article>
+          <article class="panel">
+            <div class="panel-title"><div><p class="eyebrow">VALIDATION RUNS</p><h3>最近实验</h3></div></div>
+            <div class="table-wrap"><table><thead><tr><th>创建时间</th><th>证券</th><th>训练/测试</th><th>状态</th><th>样本外复合收益</th><th>盈利折叠</th></tr></thead><tbody id="validations-table"></tbody></table></div>
+          </article>
+          <section id="validation-detail" class="research-detail" hidden>
+            <div class="metric-grid">
+              <article class="metric"><span>样本外复合收益</span><strong id="val-oos-return">—</strong><small>独立测试折叠顺序复合</small></article>
+              <article class="metric"><span>同期买入持有</span><strong id="val-benchmark-return">—</strong><small>同一费用和执行模型</small></article>
+              <article class="metric"><span>样本外超额收益</span><strong id="val-excess-return">—</strong><small>策略减同期基准</small></article>
+              <article class="metric"><span>证据状态</span><strong id="val-evidence-status">—</strong><small id="val-gate-failures">尚未评估</small></article>
+              <article class="metric"><span>最差测试回撤</span><strong id="val-worst-drawdown">—</strong><small>各测试折叠最大值</small></article>
+              <article class="metric"><span>盈利折叠比例</span><strong id="val-profitable-rate">—</strong><small>不等同统计显著性</small></article>
+              <article class="metric"><span>选择乐观偏差</span><strong id="val-optimism">—</strong><small>训练均值减测试均值</small></article>
+              <article class="metric"><span>样本外交易日</span><strong id="val-oos-sessions">—</strong><small>最低预筛门槛 120 日</small></article>
+            </div>
+            <article class="panel">
+              <div class="panel-title"><div><p class="eyebrow">FOLD AUDIT</p><h3>滚动折叠</h3></div></div>
+              <div class="table-wrap"><table><thead><tr><th>#</th><th>训练区间</th><th>测试区间</th><th>参数</th><th>训练收益</th><th>测试收益</th><th>基准收益</th><th>测试回撤</th></tr></thead><tbody id="validation-folds-table"></tbody></table></div>
+            </article>
+          </section>
         </section>
         {% else %}
         <section class="page" aria-labelledby="trading-title">

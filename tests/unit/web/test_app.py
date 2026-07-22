@@ -18,6 +18,9 @@ from autoquant.web.models import (
     OperatorJobState,
     OperatorOverview,
     ResearchManifest,
+    ValidationExperiment,
+    ValidationExperimentDetail,
+    WalkForwardJobRequest,
 )
 
 
@@ -28,6 +31,8 @@ class FakeConsoleService:
         self.created: list[DailyIngestionJobRequest] = []
         self.created_backtests: list[BacktestRunRequest] = []
         self.backtest_run_id = uuid4()
+        self.created_validations: list[WalkForwardJobRequest] = []
+        self.validation_experiment_id = uuid4()
 
     async def start(self) -> None:
         self.started = True
@@ -117,6 +122,39 @@ class FakeConsoleService:
             requested_by="operator",
         )
         return BacktestRunDetail(run=run, executions=(), snapshots=(), events=())
+
+    async def list_validations(
+        self, *, limit: int = 50
+    ) -> tuple[ValidationExperiment, ...]:
+        assert 1 <= limit <= 200
+        return ()
+
+    async def create_validation(
+        self, request: WalkForwardJobRequest, *, requested_by: str
+    ) -> ValidationExperiment:
+        self.created_validations.append(request)
+        return ValidationExperiment(
+            experiment_id=self.validation_experiment_id,
+            state=OperatorJobState.QUEUED,
+            validator_id="sma_cross_walk_forward_v1",
+            request=request,
+            requested_by=requested_by,
+            created_at=datetime(2025, 1, 1, tzinfo=UTC),
+        )
+
+    async def validation_detail(
+        self, experiment_id: object
+    ) -> ValidationExperimentDetail:
+        assert experiment_id == self.validation_experiment_id
+        experiment = await self.create_validation(
+            WalkForwardJobRequest(
+                manifest_hash="a" * 64,
+                instrument="000001.XSHE",
+                idempotency_key="web-validation-detail-0001",
+            ),
+            requested_by="operator",
+        )
+        return ValidationExperimentDetail(experiment=experiment, folds=())
 
 
 def _settings() -> AppSettings:
@@ -270,3 +308,42 @@ def test_backtest_creation_is_csrf_protected_and_strategy_is_server_selected() -
     assert accepted.json()["strategy_id"] == "manifest_buy_hold_v1"
     assert service.created_backtests[0].manifest_hash == "a" * 64
     assert manifests.json()["items"][0]["row_count"] == 8
+
+
+def test_walk_forward_validation_is_csrf_protected_and_parameter_grid_is_bounded() -> None:
+    service = FakeConsoleService()
+    app = create_app(_settings(), service=service)
+    payload = {
+        "manifest_hash": "a" * 64,
+        "instrument": "000001.XSHE",
+        "train_sessions": 60,
+        "test_sessions": 20,
+        "embargo_sessions": 1,
+        "candidates": [
+            {"fast_sessions": 5, "slow_sessions": 20},
+            {"fast_sessions": 10, "slow_sessions": 30},
+        ],
+        "idempotency_key": "web-validation-request-0001",
+    }
+
+    with TestClient(app) as client:
+        page = client.get("/research", auth=_auth())
+        match = re.search(r'name="autoquant-csrf" content="([^"]+)"', page.text)
+        assert match is not None
+        accepted = client.post(
+            "/api/v1/validations",
+            json=payload,
+            auth=_auth(),
+            headers={"X-AutoQuant-CSRF": match.group(1)},
+        )
+        rejected = client.post(
+            "/api/v1/validations",
+            json={**payload, "candidates": [{"fast_sessions": 20, "slow_sessions": 20}]},
+            auth=_auth(),
+            headers={"X-AutoQuant-CSRF": match.group(1)},
+        )
+
+    assert accepted.status_code == 202
+    assert accepted.json()["validator_id"] == "sma_cross_walk_forward_v1"
+    assert rejected.status_code == 422
+    assert service.created_validations[0].train_sessions == 60

@@ -9,6 +9,7 @@ from uuid import UUID
 from autoquant.adapters.clickhouse_daily import ClickHouseDailyRepository
 from autoquant.adapters.postgres import PostgresControlRepository
 from autoquant.backtest.models import BacktestResult
+from autoquant.backtest.validation import WalkForwardConfig, WalkForwardResult
 from autoquant.config import AppSettings
 from autoquant.errors import AutoQuantError, PersistenceUnavailableError
 from autoquant.operations import run_daily_ingestion
@@ -22,14 +23,31 @@ from autoquant.web.models import (
     OperatorJob,
     OperatorOverview,
     ResearchManifest,
+    ValidationExperiment,
+    ValidationExperimentDetail,
+    WalkForwardJobRequest,
 )
 from autoquant.web.store import PostgresOperatorRepository
+from autoquant.web.validation_store import (
+    PostgresValidationRepository,
+    validation_config,
+)
 
 IngestionRunner = Callable[[AppSettings, tuple[str, ...], date, date], Awaitable[dict[str, object]]]
 
 
 class BacktestRunnerPort(Protocol):
     async def run(self, request: BacktestRunRequest) -> BacktestResult: ...
+
+
+class WalkForwardRunnerPort(Protocol):
+    async def run(
+        self,
+        *,
+        manifest_hash: str,
+        instrument: str,
+        config: WalkForwardConfig,
+    ) -> WalkForwardResult: ...
 
 
 class ConsoleServicePort(Protocol):
@@ -57,6 +75,18 @@ class ConsoleServicePort(Protocol):
 
     async def backtest_detail(self, run_id: UUID) -> BacktestRunDetail: ...
 
+    async def list_validations(
+        self, *, limit: int = 50
+    ) -> tuple[ValidationExperiment, ...]: ...
+
+    async def create_validation(
+        self, request: WalkForwardJobRequest, *, requested_by: str
+    ) -> ValidationExperiment: ...
+
+    async def validation_detail(
+        self, experiment_id: UUID
+    ) -> ValidationExperimentDetail: ...
+
     async def bars(
         self,
         *,
@@ -77,6 +107,8 @@ class ConsoleService:
         market_repository: ClickHouseDailyRepository,
         backtest_repository: PostgresBacktestRepository | None = None,
         backtest_runner: BacktestRunnerPort | None = None,
+        validation_repository: PostgresValidationRepository | None = None,
+        validation_runner: WalkForwardRunnerPort | None = None,
         ingestion_runner: IngestionRunner = run_daily_ingestion,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
         poll_interval: float = 1.0,
@@ -89,6 +121,10 @@ class ConsoleService:
             raise ValueError("backtest repository and runner must be configured together")
         self._backtests = backtest_repository
         self._backtest_runner = backtest_runner
+        if (validation_repository is None) != (validation_runner is None):
+            raise ValueError("validation repository and runner must be configured together")
+        self._validations = validation_repository
+        self._validation_runner = validation_runner
         self._ingestion_runner = ingestion_runner
         self._now = now
         self._poll_interval = poll_interval
@@ -96,6 +132,8 @@ class ConsoleService:
         self._worker: asyncio.Task[None] | None = None
         self._backtest_wake = asyncio.Event()
         self._backtest_worker: asyncio.Task[None] | None = None
+        self._validation_wake = asyncio.Event()
+        self._validation_worker: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
         await self._operators.interrupt_running_jobs(now=self._now())
@@ -106,6 +144,12 @@ class ConsoleService:
             if self._backtest_worker is None:
                 self._backtest_worker = asyncio.create_task(
                     self._backtest_work_loop(), name="backtest-run-worker"
+                )
+        if self._validations is not None:
+            await self._validations.interrupt_running_experiments(now=self._now())
+            if self._validation_worker is None:
+                self._validation_worker = asyncio.create_task(
+                    self._validation_work_loop(), name="validation-experiment-worker"
                 )
 
     async def stop(self) -> None:
@@ -127,6 +171,16 @@ class ConsoleService:
                 pass
         if self._backtests is not None:
             await self._backtests.close()
+        validation_worker = self._validation_worker
+        self._validation_worker = None
+        if validation_worker is not None:
+            validation_worker.cancel()
+            try:
+                await validation_worker
+            except asyncio.CancelledError:
+                pass
+        if self._validations is not None:
+            await self._validations.close()
         await self._operators.close()
         await self._control.close()
         await self._market.client.close()
@@ -238,6 +292,52 @@ class ConsoleService:
         repository, _ = self._require_backtests()
         return await repository.detail(run_id)
 
+    async def list_validations(
+        self, *, limit: int = 50
+    ) -> tuple[ValidationExperiment, ...]:
+        repository, _ = self._require_validations()
+        return await repository.list_experiments(limit=limit)
+
+    async def create_validation(
+        self, request: WalkForwardJobRequest, *, requested_by: str
+    ) -> ValidationExperiment:
+        repository, _ = self._require_validations()
+        manifest = await self._control.read_manifest(request.manifest_hash)
+        if not manifest.production_complete:
+            raise ValueError("validation requires a production-complete manifest")
+        if request.instrument not in manifest.instruments:
+            raise ValueError("instrument is not present in the selected manifest")
+        experiment = await repository.create_experiment(
+            request, requested_by=requested_by, now=self._now()
+        )
+        try:
+            await self._audit(
+                "operator.validation.requested",
+                experiment.experiment_id,
+                {
+                    "manifest_hash": request.manifest_hash,
+                    "instrument": request.instrument,
+                    "validator_id": experiment.validator_id,
+                    "requested_by": requested_by,
+                },
+            )
+        except AutoQuantError:
+            await repository.fail_experiment(
+                experiment.experiment_id,
+                error_code="audit_unavailable",
+                now=self._now(),
+                queued=True,
+            )
+            raise PersistenceUnavailableError("Operator audit is unavailable") from None
+        self._validation_wake.set()
+        return experiment
+
+    async def validation_detail(
+        self, experiment_id: UUID
+    ) -> ValidationExperimentDetail:
+        repository, _ = self._require_validations()
+        return await repository.detail(experiment_id)
+
     async def bars(
         self,
         *,
@@ -321,6 +421,25 @@ class ConsoleService:
                 continue
             await self._run_backtest(run)
 
+    async def _validation_work_loop(self) -> None:
+        repository, _ = self._require_validations()
+        while True:
+            try:
+                experiment = await repository.claim_next_experiment(now=self._now())
+            except AutoQuantError:
+                await asyncio.sleep(self._poll_interval)
+                continue
+            if experiment is None:
+                self._validation_wake.clear()
+                try:
+                    await asyncio.wait_for(
+                        self._validation_wake.wait(), timeout=self._poll_interval
+                    )
+                except TimeoutError:
+                    pass
+                continue
+            await self._run_validation(experiment)
+
     async def _run_backtest(self, run: BacktestRun) -> None:
         repository, runner = self._require_backtests()
         try:
@@ -355,6 +474,61 @@ class ConsoleService:
                         "result_hash": result.result_hash,
                         "ledger_hash": result.ledger_hash,
                         "manifest_hash": result.manifest_hash,
+                    },
+                )
+            except AutoQuantError:
+                pass
+
+    async def _run_validation(self, experiment: ValidationExperiment) -> None:
+        repository, runner = self._require_validations()
+        try:
+            await self._audit(
+                "operator.validation.started", experiment.experiment_id, {}
+            )
+            result = await runner.run(
+                manifest_hash=experiment.request.manifest_hash,
+                instrument=experiment.request.instrument,
+                config=validation_config(experiment.request),
+            )
+            await repository.complete_experiment(
+                experiment.experiment_id, result=result, now=self._now()
+            )
+        except ValueError:
+            await repository.fail_experiment(
+                experiment.experiment_id,
+                error_code="invalid_validation_input",
+                now=self._now(),
+            )
+            await self._best_effort_validation_failure_audit(
+                experiment.experiment_id, "invalid_validation_input"
+            )
+        except AutoQuantError:
+            await repository.fail_experiment(
+                experiment.experiment_id,
+                error_code="validation_dependency_failed",
+                now=self._now(),
+            )
+            await self._best_effort_validation_failure_audit(
+                experiment.experiment_id, "validation_dependency_failed"
+            )
+        except Exception:
+            await repository.fail_experiment(
+                experiment.experiment_id,
+                error_code="internal_error",
+                now=self._now(),
+            )
+            await self._best_effort_validation_failure_audit(
+                experiment.experiment_id, "internal_error"
+            )
+        else:
+            try:
+                await self._audit(
+                    "operator.validation.completed",
+                    experiment.experiment_id,
+                    {
+                        "result_hash": result.result_hash,
+                        "manifest_hash": result.manifest_hash,
+                        "fold_count": len(result.folds),
                     },
                 )
             except AutoQuantError:
@@ -406,12 +580,31 @@ class ConsoleService:
         except AutoQuantError:
             pass
 
+    async def _best_effort_validation_failure_audit(
+        self, experiment_id: UUID, error_code: str
+    ) -> None:
+        try:
+            await self._audit(
+                "operator.validation.failed",
+                experiment_id,
+                {"error_code": error_code},
+            )
+        except AutoQuantError:
+            pass
+
     def _require_backtests(
         self,
     ) -> tuple[PostgresBacktestRepository, BacktestRunnerPort]:
         if self._backtests is None or self._backtest_runner is None:
             raise PersistenceUnavailableError("Backtest service is unavailable")
         return self._backtests, self._backtest_runner
+
+    def _require_validations(
+        self,
+    ) -> tuple[PostgresValidationRepository, WalkForwardRunnerPort]:
+        if self._validations is None or self._validation_runner is None:
+            raise PersistenceUnavailableError("Validation service is unavailable")
+        return self._validations, self._validation_runner
 
     async def _audit(self, event_type: str, job_id: UUID, payload: Mapping[str, object]) -> None:
         normalized = {"job_id": str(job_id), **dict(payload)}

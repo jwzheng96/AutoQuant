@@ -225,3 +225,135 @@ class ResearchManifest(BaseModel):
     end_time: datetime
     as_of: datetime
     row_count: int = Field(ge=0)
+
+
+class SmaCandidateRequest(BaseModel):
+    fast_sessions: int = Field(ge=2, le=60)
+    slow_sessions: int = Field(ge=5, le=250)
+
+    @model_validator(mode="after")
+    def validate_windows(self) -> Self:
+        if self.fast_sessions >= self.slow_sessions:
+            raise ValueError("fast_sessions must be smaller than slow_sessions")
+        return self
+
+
+class WalkForwardJobRequest(BaseModel):
+    manifest_hash: str
+    instrument: str
+    initial_cash: Decimal = Field(default=Decimal("1000000"), ge=10_000, le=1_000_000_000)
+    allocation: Decimal = Field(default=Decimal("0.95"), gt=0, le=1)
+    slippage_bps: Decimal = Field(default=Decimal("5"), ge=0, le=100)
+    train_sessions: int = Field(default=120, ge=60, le=750)
+    test_sessions: int = Field(default=40, ge=20, le=250)
+    embargo_sessions: int = Field(default=1, ge=1, le=20)
+    candidates: tuple[SmaCandidateRequest, ...] = Field(
+        default=(
+            SmaCandidateRequest(fast_sessions=5, slow_sessions=20),
+            SmaCandidateRequest(fast_sessions=10, slow_sessions=30),
+            SmaCandidateRequest(fast_sessions=20, slow_sessions=60),
+        ),
+        min_length=1,
+        max_length=25,
+    )
+    idempotency_key: str
+
+    @field_validator("manifest_hash")
+    @classmethod
+    def validate_validation_manifest_hash(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if re.fullmatch(r"[0-9a-f]{64}", normalized) is None:
+            raise ValueError("manifest_hash must be a lowercase SHA-256 hash")
+        return normalized
+
+    @field_validator("instrument")
+    @classmethod
+    def validate_validation_instrument(cls, value: str) -> str:
+        normalized = value.strip().upper()
+        if _INSTRUMENT.fullmatch(normalized) is None:
+            raise ValueError("instrument must use the 000001.XSHE form")
+        return normalized
+
+    @field_validator("idempotency_key")
+    @classmethod
+    def validate_validation_idempotency_key(cls, value: str) -> str:
+        normalized = value.strip()
+        if _IDEMPOTENCY_KEY.fullmatch(normalized) is None:
+            raise ValueError("idempotency_key must be 16-128 safe characters")
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_validation_grid(self) -> Self:
+        pairs = tuple(
+            (candidate.fast_sessions, candidate.slow_sessions)
+            for candidate in self.candidates
+        )
+        if len(set(pairs)) != len(pairs):
+            raise ValueError("candidates must be unique")
+        if max(candidate.slow_sessions for candidate in self.candidates) >= self.train_sessions:
+            raise ValueError("every slow window must be smaller than train_sessions")
+        return self
+
+
+class ValidationSummary(BaseModel):
+    fold_count: int = Field(ge=1)
+    compounded_oos_return: Decimal
+    mean_oos_return: Decimal
+    worst_oos_drawdown: Decimal
+    profitable_fold_rate: Decimal
+    mean_training_return: Decimal
+    selection_optimism: Decimal
+    validation_version: str
+    objective_version: str
+    benchmark_compounded_oos_return: Decimal | None = None
+    excess_oos_return: Decimal | None = None
+    oos_sessions: int = Field(default=0, ge=0)
+    evidence_status: str = "insufficient"
+    gate_failures: tuple[str, ...] = ("legacy_assessment_missing",)
+
+
+class ValidationExperiment(BaseModel):
+    experiment_id: UUID
+    state: OperatorJobState
+    validator_id: str
+    request: WalkForwardJobRequest
+    requested_by: str
+    created_at: datetime
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    as_of: datetime | None = None
+    result_hash: str | None = None
+    summary: ValidationSummary | None = None
+    error_code: str | None = None
+
+    @field_validator("created_at", "started_at", "completed_at", "as_of")
+    @classmethod
+    def require_aware_validation_time(
+        cls, value: datetime | None
+    ) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("validation timestamps must be timezone-aware")
+        return value.astimezone(UTC)
+
+
+class ValidationFoldView(BaseModel):
+    sequence: int = Field(ge=1)
+    train_start: date
+    train_end: date
+    test_start: date
+    test_end: date
+    selected: SmaCandidateRequest
+    selection_score: Decimal
+    training: BacktestMetrics
+    test: BacktestMetrics
+    benchmark: BacktestMetrics | None = None
+    training_result_hash: str
+    test_result_hash: str
+    fold_hash: str
+
+
+class ValidationExperimentDetail(BaseModel):
+    experiment: ValidationExperiment
+    folds: tuple[ValidationFoldView, ...]
