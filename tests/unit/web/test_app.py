@@ -18,6 +18,7 @@ from autoquant.web.models import (
     OperatorJobState,
     OperatorOverview,
     ResearchManifest,
+    RiskControlStatus,
     ValidationExperiment,
     ValidationExperimentDetail,
     WalkForwardJobRequest,
@@ -156,6 +157,16 @@ class FakeConsoleService:
         )
         return ValidationExperimentDetail(experiment=experiment, folds=())
 
+    async def risk_status(self) -> RiskControlStatus:
+        return RiskControlStatus(
+            status="locked",
+            live_trading_locked=True,
+            paper_gateway_available=False,
+            decision_count=7,
+            recent_decisions=(),
+            remaining_gates=("paper_account_state", "qmt_gateway"),
+        )
+
 
 def _settings() -> AppSettings:
     return AppSettings(
@@ -275,6 +286,20 @@ def test_trading_endpoint_is_explicitly_unavailable() -> None:
     assert response.json()["status"] == "unavailable"
     assert response.json()["orders"] == []
     assert response.json()["positions"] == []
+    assert response.json()["risk"]["live_trading_locked"] is True
+
+
+def test_risk_endpoint_is_authenticated_and_read_only() -> None:
+    app = create_app(_settings(), service=FakeConsoleService())
+
+    with TestClient(app) as client:
+        denied = client.get("/api/v1/risk")
+        accepted = client.get("/api/v1/risk", auth=_auth())
+
+    assert denied.status_code == 401
+    assert accepted.status_code == 200
+    assert accepted.json()["decision_count"] == 7
+    assert accepted.json()["live_trading_locked"] is True
 
 
 def test_backtest_creation_is_csrf_protected_and_strategy_is_server_selected() -> None:

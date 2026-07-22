@@ -12,6 +12,7 @@ from autoquant.web.models import (
     DailyIngestionJobRequest,
     OperatorJob,
     OperatorJobState,
+    RiskControlStatus,
     ValidationExperiment,
     WalkForwardJobRequest,
 )
@@ -48,6 +49,7 @@ def _service(
     backtest_runner: MagicMock | None = None,
     validations: MagicMock | None = None,
     validation_runner: MagicMock | None = None,
+    risks: MagicMock | None = None,
 ) -> ConsoleService:
     market = MagicMock()
     market.client = MagicMock()
@@ -61,6 +63,7 @@ def _service(
         backtest_runner=backtest_runner,
         validation_repository=validations,
         validation_runner=validation_runner,
+        risk_repository=risks,
         now=lambda: NOW,
         poll_interval=0.01,
     )
@@ -103,6 +106,27 @@ def _validation_experiment() -> ValidationExperiment:
         created_at=NOW,
         started_at=NOW,
     )
+
+
+@pytest.mark.asyncio
+async def test_risk_status_keeps_live_trading_locked_and_reports_audit_count() -> None:
+    risks = MagicMock()
+    risks.count = AsyncMock(return_value=12)
+    risks.list_recent = AsyncMock(return_value=())
+    service = _service(
+        operator=MagicMock(),
+        control=MagicMock(),
+        runner=AsyncMock(),
+        risks=risks,
+    )
+
+    status = await service.risk_status()
+
+    assert isinstance(status, RiskControlStatus)
+    assert status.live_trading_locked is True
+    assert status.paper_gateway_available is False
+    assert status.decision_count == 12
+    assert "qmt_gateway" in status.remaining_gates
 
 
 @pytest.mark.asyncio

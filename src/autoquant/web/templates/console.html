@@ -178,10 +178,12 @@
             <p id="trading-reason">正在读取能力状态…</p>
             <div class="gate-grid">
               <div><span>01</span><strong>回测账本</strong><small>已接入，等待策略验证</small></div>
-              <div><span>02</span><strong>风险引擎</strong><small>仓位、回撤和流动性硬限制</small></div>
+              <div><span>02</span><strong>风险引擎</strong><small id="risk-engine-state">读取状态中…</small></div>
               <div><span>03</span><strong>QMT 网关</strong><small>幂等订单、对账与紧急停机</small></div>
               <div><span>04</span><strong>模拟盘放行</strong><small>统计证据和故障演练</small></div>
             </div>
+            <p class="eyebrow">RISK AUDIT</p>
+            <p><strong id="risk-decision-count">—</strong> 条不可变盘前风控决策；待通过门禁：<span id="risk-remaining-gates">—</span></p>
             <button class="disabled-button" type="button" disabled>下单功能已安全禁用</button>
           </article>
         </section>

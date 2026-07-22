@@ -31,6 +31,7 @@ from autoquant.web.models import (
     DailyIngestionJobRequest,
     WalkForwardJobRequest,
 )
+from autoquant.web.risk_store import PostgresRiskDecisionRepository
 from autoquant.web.service import ConsoleService, ConsoleServicePort
 from autoquant.web.store import PostgresOperatorRepository
 from autoquant.web.validation_store import PostgresValidationRepository
@@ -273,17 +274,29 @@ def create_app(
 
     @app.get("/api/v1/trading")
     async def trading(
+        request: Request,
         _: str = Depends(authenticated_user),
     ) -> dict[str, object]:
+        risk = await active_service(request).risk_status()
         return {
             "status": "unavailable",
             "orders": [],
             "positions": [],
+            "risk": risk.model_dump(mode="json"),
             "reason": (
-                "Strategy validation, portfolio risk controls, paper-trading "
-                "reconciliation, and the QMT gateway have not passed release gates"
+                "Pre-trade risk controls are implemented and live mode remains "
+                "hard-locked. Strategy evidence, paper-account reconciliation, "
+                "failure drills, and the QMT gateway have not passed release gates"
             ),
         }
+
+    @app.get("/api/v1/risk")
+    async def risk_status(
+        request: Request,
+        _: str = Depends(authenticated_user),
+    ) -> dict[str, object]:
+        result = await active_service(request).risk_status()
+        return result.model_dump(mode="json")
 
     return app
 
@@ -294,6 +307,7 @@ async def _production_service(settings: AppSettings) -> ConsoleService:
     operators = PostgresOperatorRepository.connect(dsn=postgres_dsn)
     backtests = PostgresBacktestRepository.connect(dsn=postgres_dsn)
     validations = PostgresValidationRepository.connect(dsn=postgres_dsn)
+    risks = PostgresRiskDecisionRepository.connect(dsn=postgres_dsn)
     control = PostgresControlRepository.connect(dsn=postgres_dsn)
     try:
         market = await ClickHouseDailyRepository.connect(dsn=clickhouse_dsn, source="tushare")
@@ -301,6 +315,7 @@ async def _production_service(settings: AppSettings) -> ConsoleService:
         await operators.close()
         await backtests.close()
         await validations.close()
+        await risks.close()
         await control.close()
         raise
     reader = ValidatedDailyDatasetReader(
@@ -324,6 +339,7 @@ async def _production_service(settings: AppSettings) -> ConsoleService:
         backtest_runner=backtest_runner,
         validation_repository=validations,
         validation_runner=validation_runner,
+        risk_repository=risks,
     )
 
 

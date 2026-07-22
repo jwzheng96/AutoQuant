@@ -198,7 +198,13 @@ async function createJob(event) {
 }
 
 async function loadTrading() {
-  try { const data = await requestJson("/api/v1/trading"); setText("trading-reason", data.reason); }
+  try {
+    const data = await requestJson("/api/v1/trading");
+    setText("trading-reason", data.reason);
+    setText("risk-engine-state", data.risk?.status === "locked" ? "盘前硬限制已就绪，实盘锁定" : "风控状态不可用");
+    setText("risk-decision-count", data.risk?.decision_count ?? 0);
+    setText("risk-remaining-gates", data.risk?.remaining_gates?.join(", ") ?? "—");
+  }
   catch (error) { showToast(`能力读取失败：${error.message}`); }
 }
 

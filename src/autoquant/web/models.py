@@ -357,3 +357,36 @@ class ValidationFoldView(BaseModel):
 class ValidationExperimentDetail(BaseModel):
     experiment: ValidationExperiment
     folds: tuple[ValidationFoldView, ...]
+
+
+class RiskDecisionView(BaseModel):
+    decision_hash: str
+    account_id: str
+    client_order_id: str
+    instrument: str
+    side: str
+    quantity: int = Field(gt=0)
+    mode: str
+    state: str
+    violations: tuple[str, ...]
+    evaluated_at: datetime
+    policy_hash: str
+    account_state_hash: str
+    quote_hash: str
+    order_notional: Decimal
+
+    @field_validator("evaluated_at")
+    @classmethod
+    def require_aware_risk_time(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("risk decision time must be timezone-aware")
+        return value.astimezone(UTC)
+
+
+class RiskControlStatus(BaseModel):
+    status: str
+    live_trading_locked: bool
+    paper_gateway_available: bool
+    decision_count: int = Field(ge=0)
+    recent_decisions: tuple[RiskDecisionView, ...]
+    remaining_gates: tuple[str, ...]

@@ -22,6 +22,13 @@ separated by an embargo, every fold is compared with the same-period buy-and-hol
 and complete selected-fold artifacts are hash-verified on read. This is a research filter,
 not a live-trading release.
 
+PostgreSQL schema v7 adds an immutable pre-trade risk decision ledger. The shared,
+deterministic risk engine rejects stale or unreconciled account state, stale/closed quotes,
+duplicate orders, A-share lot and T+1 violations, excessive notional/concentration/exposure,
+daily turnover/loss/drawdown breaches, and price-deviation errors. Live mode is hard-locked.
+The console exposes read-only risk status and audit counts; it still has no order action or
+paper/QMT gateway.
+
 All dependency, test, lint, type-check, migration, and Git mutation commands for this
 checkout must run on `rlocal`; see [the phase-1 runbook](docs/runbooks/phase1-data-foundation.md).
 
@@ -48,7 +55,8 @@ The console binds only to `127.0.0.1` and requires `AQ_WEB_USERNAME` plus a pass
 least 16 characters in the untracked root `.env`. It can inspect trusted daily data and
 submit bounded ingestion and fixed baseline backtest jobs. Its trading page remains explicitly
 locked until sample-out strategy evidence, a portfolio risk engine, QMT gateway, reconciliation,
-and simulation evidence exist.
+and simulation evidence exist. The portfolio risk core is now present, but the other release
+gates remain open and the current real-data validation result is not profitable evidence.
 
 Copy `.env.example` to an untracked `.env` and supply credentials/DSNs only on the trusted
 runtime host. The Tushare Token previously shared in chat must be rotated before use; set

@@ -23,10 +23,12 @@ from autoquant.web.models import (
     OperatorJob,
     OperatorOverview,
     ResearchManifest,
+    RiskControlStatus,
     ValidationExperiment,
     ValidationExperimentDetail,
     WalkForwardJobRequest,
 )
+from autoquant.web.risk_store import PostgresRiskDecisionRepository
 from autoquant.web.store import PostgresOperatorRepository
 from autoquant.web.validation_store import (
     PostgresValidationRepository,
@@ -87,6 +89,8 @@ class ConsoleServicePort(Protocol):
         self, experiment_id: UUID
     ) -> ValidationExperimentDetail: ...
 
+    async def risk_status(self) -> RiskControlStatus: ...
+
     async def bars(
         self,
         *,
@@ -109,6 +113,7 @@ class ConsoleService:
         backtest_runner: BacktestRunnerPort | None = None,
         validation_repository: PostgresValidationRepository | None = None,
         validation_runner: WalkForwardRunnerPort | None = None,
+        risk_repository: PostgresRiskDecisionRepository | None = None,
         ingestion_runner: IngestionRunner = run_daily_ingestion,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
         poll_interval: float = 1.0,
@@ -125,6 +130,7 @@ class ConsoleService:
             raise ValueError("validation repository and runner must be configured together")
         self._validations = validation_repository
         self._validation_runner = validation_runner
+        self._risk = risk_repository
         self._ingestion_runner = ingestion_runner
         self._now = now
         self._poll_interval = poll_interval
@@ -181,6 +187,8 @@ class ConsoleService:
                 pass
         if self._validations is not None:
             await self._validations.close()
+        if self._risk is not None:
+            await self._risk.close()
         await self._operators.close()
         await self._control.close()
         await self._market.client.close()
@@ -337,6 +345,40 @@ class ConsoleService:
     ) -> ValidationExperimentDetail:
         repository, _ = self._require_validations()
         return await repository.detail(experiment_id)
+
+    async def risk_status(self) -> RiskControlStatus:
+        if self._risk is None:
+            return RiskControlStatus(
+                status="locked",
+                live_trading_locked=True,
+                paper_gateway_available=False,
+                decision_count=0,
+                recent_decisions=(),
+                remaining_gates=(
+                    "risk_audit_store",
+                    "paper_account_state",
+                    "quote_gateway",
+                    "reconciliation_loop",
+                    "kill_switch_drill",
+                    "qmt_gateway",
+                ),
+            )
+        count = await self._risk.count()
+        recent = await self._risk.list_recent(limit=20)
+        return RiskControlStatus(
+            status="locked",
+            live_trading_locked=True,
+            paper_gateway_available=False,
+            decision_count=count,
+            recent_decisions=recent,
+            remaining_gates=(
+                "paper_account_state",
+                "quote_gateway",
+                "reconciliation_loop",
+                "kill_switch_drill",
+                "qmt_gateway",
+            ),
+        )
 
     async def bars(
         self,

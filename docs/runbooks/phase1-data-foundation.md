@@ -24,6 +24,7 @@ Apply `migrations/postgres/001_phase1.sql`,
 `migrations/postgres/004_backtest_runs.sql`, then
 `migrations/postgres/005_walk_forward_validation.sql`, then
 `migrations/postgres/006_validation_benchmark.sql`, then
+`migrations/postgres/007_risk_decisions.sql`, then
 `migrations/clickhouse/001_phase1.sql` and
 `migrations/clickhouse/002_tushare_daily.sql` and
 `migrations/clickhouse/003_daily_coverage.sql` in order, only to explicitly authorized
@@ -110,6 +111,12 @@ ingestion jobs, and `/research`. The research page can only run the built-in
 uploaded code. Select a manifest, verify its instrument and assumptions, create the run, then
 inspect its daily equity, fills/rejections, fees, and stable failure code. The trading view
 intentionally has no order action.
+
+The trading page and `GET /api/v1/risk` also report the fail-closed pre-trade risk status and
+the count of hash-verified, immutable risk decisions. This is observability only. A risk
+decision marked `accepted` authorizes neither broker submission nor live trading; the paper
+account, quote adapter, reconciliation loop, failure drills, and QMT gateway must be completed
+as separate gates.
 
 ## Research execution boundary
 
