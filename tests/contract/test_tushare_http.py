@@ -110,6 +110,33 @@ async def test_response_mapping_uses_returned_field_names_and_preserves_empty_it
 
 @pytest.mark.asyncio
 @respx.mock
+async def test_evidence_identity_includes_credential_free_request_contract() -> None:
+    respx.post(API_URL).mock(
+        side_effect=[
+            success_response(fields=["ts_code"], items=[]),
+            success_response(fields=["ts_code"], items=[]),
+        ]
+    )
+    client = make_client()
+    try:
+        listed = await client.post(
+            "stock_basic", params={"list_status": "L"}, fields=("ts_code",)
+        )
+        delisted = await client.post(
+            "stock_basic", params={"list_status": "D"}, fields=("ts_code",)
+        )
+    finally:
+        await client.close()
+
+    assert listed.evidence.response_hash != delisted.evidence.response_hash
+    assert b'"list_status":"L"' in listed.evidence.response_body
+    assert b'"list_status":"D"' in delisted.evidence.response_body
+    assert FAKE_TOKEN.encode() not in listed.evidence.response_body
+    assert FAKE_TOKEN.encode() not in delisted.evidence.response_body
+
+
+@pytest.mark.asyncio
+@respx.mock
 @pytest.mark.parametrize(
     "payload",
     [
