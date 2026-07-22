@@ -8,18 +8,28 @@ from uuid import UUID
 
 from autoquant.adapters.clickhouse_daily import ClickHouseDailyRepository
 from autoquant.adapters.postgres import PostgresControlRepository
+from autoquant.backtest.models import BacktestResult
 from autoquant.config import AppSettings
 from autoquant.errors import AutoQuantError, PersistenceUnavailableError
 from autoquant.operations import run_daily_ingestion
+from autoquant.web.backtest_store import PostgresBacktestRepository
 from autoquant.web.models import (
+    BacktestRun,
+    BacktestRunDetail,
+    BacktestRunRequest,
     DailyIngestionJobRequest,
     DataCoverage,
     OperatorJob,
     OperatorOverview,
+    ResearchManifest,
 )
 from autoquant.web.store import PostgresOperatorRepository
 
 IngestionRunner = Callable[[AppSettings, tuple[str, ...], date, date], Awaitable[dict[str, object]]]
+
+
+class BacktestRunnerPort(Protocol):
+    async def run(self, request: BacktestRunRequest) -> BacktestResult: ...
 
 
 class ConsoleServicePort(Protocol):
@@ -34,6 +44,18 @@ class ConsoleServicePort(Protocol):
     async def create_daily_job(
         self, request: DailyIngestionJobRequest, *, requested_by: str
     ) -> OperatorJob: ...
+
+    async def list_backtests(self, *, limit: int = 50) -> tuple[BacktestRun, ...]: ...
+
+    async def list_research_manifests(
+        self, *, limit: int = 100
+    ) -> tuple[ResearchManifest, ...]: ...
+
+    async def create_backtest(
+        self, request: BacktestRunRequest, *, requested_by: str
+    ) -> BacktestRun: ...
+
+    async def backtest_detail(self, run_id: UUID) -> BacktestRunDetail: ...
 
     async def bars(
         self,
@@ -53,6 +75,8 @@ class ConsoleService:
         operator_repository: PostgresOperatorRepository,
         control_repository: PostgresControlRepository,
         market_repository: ClickHouseDailyRepository,
+        backtest_repository: PostgresBacktestRepository | None = None,
+        backtest_runner: BacktestRunnerPort | None = None,
         ingestion_runner: IngestionRunner = run_daily_ingestion,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
         poll_interval: float = 1.0,
@@ -61,16 +85,28 @@ class ConsoleService:
         self._operators = operator_repository
         self._control = control_repository
         self._market = market_repository
+        if (backtest_repository is None) != (backtest_runner is None):
+            raise ValueError("backtest repository and runner must be configured together")
+        self._backtests = backtest_repository
+        self._backtest_runner = backtest_runner
         self._ingestion_runner = ingestion_runner
         self._now = now
         self._poll_interval = poll_interval
         self._wake = asyncio.Event()
         self._worker: asyncio.Task[None] | None = None
+        self._backtest_wake = asyncio.Event()
+        self._backtest_worker: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
         await self._operators.interrupt_running_jobs(now=self._now())
         if self._worker is None:
             self._worker = asyncio.create_task(self._work_loop(), name="operator-job-worker")
+        if self._backtests is not None:
+            await self._backtests.interrupt_running_runs(now=self._now())
+            if self._backtest_worker is None:
+                self._backtest_worker = asyncio.create_task(
+                    self._backtest_work_loop(), name="backtest-run-worker"
+                )
 
     async def stop(self) -> None:
         worker = self._worker
@@ -81,6 +117,16 @@ class ConsoleService:
                 await worker
             except asyncio.CancelledError:
                 pass
+        backtest_worker = self._backtest_worker
+        self._backtest_worker = None
+        if backtest_worker is not None:
+            backtest_worker.cancel()
+            try:
+                await backtest_worker
+            except asyncio.CancelledError:
+                pass
+        if self._backtests is not None:
+            await self._backtests.close()
         await self._operators.close()
         await self._control.close()
         await self._market.client.close()
@@ -143,6 +189,54 @@ class ConsoleService:
             raise PersistenceUnavailableError("Operator audit is unavailable") from None
         self._wake.set()
         return job
+
+    async def list_backtests(self, *, limit: int = 50) -> tuple[BacktestRun, ...]:
+        repository, _ = self._require_backtests()
+        return await repository.list_runs(limit=limit)
+
+    async def list_research_manifests(
+        self, *, limit: int = 100
+    ) -> tuple[ResearchManifest, ...]:
+        repository, _ = self._require_backtests()
+        return await repository.list_manifests(limit=limit)
+
+    async def create_backtest(
+        self, request: BacktestRunRequest, *, requested_by: str
+    ) -> BacktestRun:
+        repository, _ = self._require_backtests()
+        manifest = await self._control.read_manifest(request.manifest_hash)
+        if not manifest.production_complete:
+            raise ValueError("backtests require a production-complete manifest")
+        if request.instrument not in manifest.instruments:
+            raise ValueError("instrument is not present in the selected manifest")
+        run = await repository.create_run(
+            request, requested_by=requested_by, now=self._now()
+        )
+        try:
+            await self._audit(
+                "operator.backtest.requested",
+                run.run_id,
+                {
+                    "manifest_hash": request.manifest_hash,
+                    "instrument": request.instrument,
+                    "strategy_id": run.strategy_id,
+                    "requested_by": requested_by,
+                },
+            )
+        except AutoQuantError:
+            await repository.fail_run(
+                run.run_id,
+                error_code="audit_unavailable",
+                now=self._now(),
+                queued=True,
+            )
+            raise PersistenceUnavailableError("Operator audit is unavailable") from None
+        self._backtest_wake.set()
+        return run
+
+    async def backtest_detail(self, run_id: UUID) -> BacktestRunDetail:
+        repository, _ = self._require_backtests()
+        return await repository.detail(run_id)
 
     async def bars(
         self,
@@ -208,6 +302,64 @@ class ConsoleService:
                 continue
             await self._run_job(job)
 
+    async def _backtest_work_loop(self) -> None:
+        repository, _ = self._require_backtests()
+        while True:
+            try:
+                run = await repository.claim_next_run(now=self._now())
+            except AutoQuantError:
+                await asyncio.sleep(self._poll_interval)
+                continue
+            if run is None:
+                self._backtest_wake.clear()
+                try:
+                    await asyncio.wait_for(
+                        self._backtest_wake.wait(), timeout=self._poll_interval
+                    )
+                except TimeoutError:
+                    pass
+                continue
+            await self._run_backtest(run)
+
+    async def _run_backtest(self, run: BacktestRun) -> None:
+        repository, runner = self._require_backtests()
+        try:
+            await self._audit("operator.backtest.started", run.run_id, {})
+            result = await runner.run(run.request)
+            await repository.complete_run(run.run_id, result=result, now=self._now())
+        except ValueError:
+            await repository.fail_run(
+                run.run_id, error_code="invalid_backtest_input", now=self._now()
+            )
+            await self._best_effort_backtest_failure_audit(
+                run.run_id, "invalid_backtest_input"
+            )
+        except AutoQuantError:
+            await repository.fail_run(
+                run.run_id, error_code="backtest_dependency_failed", now=self._now()
+            )
+            await self._best_effort_backtest_failure_audit(
+                run.run_id, "backtest_dependency_failed"
+            )
+        except Exception:
+            await repository.fail_run(
+                run.run_id, error_code="internal_error", now=self._now()
+            )
+            await self._best_effort_backtest_failure_audit(run.run_id, "internal_error")
+        else:
+            try:
+                await self._audit(
+                    "operator.backtest.completed",
+                    run.run_id,
+                    {
+                        "result_hash": result.result_hash,
+                        "ledger_hash": result.ledger_hash,
+                        "manifest_hash": result.manifest_hash,
+                    },
+                )
+            except AutoQuantError:
+                pass
+
     async def _run_job(self, job: OperatorJob) -> None:
         try:
             await self._audit("operator.daily_ingestion.started", job.job_id, {})
@@ -243,6 +395,23 @@ class ConsoleService:
             await self._audit("operator.daily_ingestion.failed", job_id, {"error_code": error_code})
         except AutoQuantError:
             pass
+
+    async def _best_effort_backtest_failure_audit(
+        self, run_id: UUID, error_code: str
+    ) -> None:
+        try:
+            await self._audit(
+                "operator.backtest.failed", run_id, {"error_code": error_code}
+            )
+        except AutoQuantError:
+            pass
+
+    def _require_backtests(
+        self,
+    ) -> tuple[PostgresBacktestRepository, BacktestRunnerPort]:
+        if self._backtests is None or self._backtest_runner is None:
+            raise PersistenceUnavailableError("Backtest service is unavailable")
+        return self._backtests, self._backtest_runner
 
     async def _audit(self, event_type: str, job_id: UUID, payload: Mapping[str, object]) -> None:
         normalized = {"job_id": str(job_id), **dict(payload)}

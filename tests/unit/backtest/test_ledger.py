@@ -10,7 +10,7 @@ from autoquant.backtest.models import (
     RejectionCode,
 )
 from autoquant.backtest.rules import AshareRuleBook, FeeSchedule, SecurityStatus
-from autoquant.data.daily_models import DailyBarRevision
+from autoquant.data.daily_models import DailyBarRevision, DailyPriceLimit
 
 DAY = date(2026, 7, 22)
 INSTRUMENT = "000001.XSHE"
@@ -172,6 +172,38 @@ def test_suspension_and_locked_limits_are_rejected() -> None:
 
     assert suspended.rejection_code is RejectionCode.SUSPENDED
     assert locked.rejection_code is RejectionCode.LIMIT_UP_LOCKED
+
+
+def test_exact_daily_limit_overrides_generic_board_rate() -> None:
+    state = market(
+        open_price="10.5",
+        high_price="10.5",
+        low_price="10.5",
+        close_price="10.5",
+        pre_close="10",
+    )
+    exact = DailyPriceLimit(
+        source="tushare",
+        instrument=INSTRUMENT,
+        session_date=DAY,
+        pre_close=Decimal("10"),
+        up_limit=Decimal("10.5"),
+        down_limit=Decimal("9"),
+        available_at=datetime(2026, 7, 23, tzinfo=UTC),
+        response_hash="e" * 64,
+    )
+    exact_state = MarketState(
+        bar=state.bar,
+        rules=state.rules,
+        suspended=False,
+        daily_price_limit=exact,
+    )
+    account = ledger()
+    account.start_session(DAY)
+
+    report = account.execute(order("exact-limit", OrderSide.BUY), exact_state)
+
+    assert report.rejection_code is RejectionCode.LIMIT_UP_LOCKED
 
 
 def test_order_replay_is_idempotent_and_hash_chain_is_linked() -> None:

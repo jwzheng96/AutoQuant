@@ -6,7 +6,7 @@ from decimal import Decimal
 from enum import StrEnum
 
 from autoquant.clock import to_utc
-from autoquant.data.daily_models import DailyBarRevision
+from autoquant.data.daily_models import DailyBarRevision, DailyPriceLimit
 from autoquant.data.models import (
     _canonical_hash,
     _decimal_text,
@@ -105,6 +105,7 @@ class MarketState:
     bar: DailyBarRevision
     rules: InstrumentRules
     suspended: bool
+    daily_price_limit: DailyPriceLimit | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.bar, DailyBarRevision):
@@ -117,6 +118,16 @@ class MarketState:
             raise ValueError("rules are not effective for the bar session")
         if type(self.suspended) is not bool:
             raise TypeError("suspended must be a bool")
+        if self.daily_price_limit is not None:
+            if not isinstance(self.daily_price_limit, DailyPriceLimit):
+                raise TypeError("daily_price_limit must be DailyPriceLimit")
+            if (
+                self.daily_price_limit.instrument != self.bar.instrument
+                or self.daily_price_limit.session_date != self.bar.session_date
+            ):
+                raise ValueError("daily price limit must match the market bar")
+            if self.daily_price_limit.pre_close != self.bar.pre_close:
+                raise ValueError("daily price limit pre_close must match the market bar")
 
 
 @dataclass(frozen=True, slots=True)
@@ -281,6 +292,7 @@ class BacktestResult:
     total_fees: Decimal
     reports: tuple[ExecutionReport, ...]
     snapshots: tuple[AccountSnapshot, ...]
+    events: tuple[LedgerEvent, ...]
     rule_versions: tuple[str, ...]
     fee_version: str
     execution_version: str
@@ -292,6 +304,12 @@ class BacktestResult:
         _require_lowercase_sha256(self.manifest_hash, name="manifest_hash")
         _require_lowercase_sha256(self.ledger_hash, name="ledger_hash")
         object.__setattr__(self, "as_of", to_utc(self.as_of, name="as_of"))
+        object.__setattr__(self, "reports", tuple(self.reports))
+        object.__setattr__(self, "snapshots", tuple(self.snapshots))
+        object.__setattr__(self, "events", tuple(self.events))
+        object.__setattr__(self, "rule_versions", tuple(self.rule_versions))
+        if self.events and self.events[-1].event_hash != self.ledger_hash:
+            raise ValueError("ledger_hash must match the final event")
         payload = {
             "as_of": self.as_of.isoformat(timespec="microseconds"),
             "ending_equity": _decimal_text(self.ending_equity),
@@ -308,3 +326,74 @@ class BacktestResult:
             "turnover": _decimal_text(self.turnover),
         }
         object.__setattr__(self, "result_hash", _canonical_hash(payload))
+
+
+def backtest_artifact_hash(result: BacktestResult) -> str:
+    """Commit every persisted result row without changing semantic result identity."""
+    return _canonical_hash(
+        {
+            "events": [
+                {
+                    "client_order_id": event.client_order_id,
+                    "event_hash": event.event_hash,
+                    "event_type": event.event_type,
+                    "payload": dict(event.payload),
+                    "previous_hash": event.previous_hash,
+                    "sequence": event.sequence,
+                    "session_date": event.session_date.isoformat(),
+                }
+                for event in result.events
+            ],
+            "reports": [
+                {
+                    "client_order_id": report.client_order_id,
+                    "commission": _decimal_text(report.fees.commission),
+                    "fill_price": (
+                        None
+                        if report.fill_price is None
+                        else _decimal_text(report.fill_price)
+                    ),
+                    "filled_quantity": report.filled_quantity,
+                    "gross_amount": _decimal_text(report.gross_amount),
+                    "instrument": report.instrument,
+                    "ledger_hash": report.ledger_hash,
+                    "rejection_code": (
+                        None
+                        if report.rejection_code is None
+                        else report.rejection_code.value
+                    ),
+                    "requested_quantity": report.requested_quantity,
+                    "session_date": report.session_date.isoformat(),
+                    "side": report.side.value,
+                    "stamp_duty": _decimal_text(report.fees.stamp_duty),
+                    "state": report.state.value,
+                    "transfer_fee": _decimal_text(report.fees.transfer_fee),
+                }
+                for report in result.reports
+            ],
+            "result_hash": result.result_hash,
+            "snapshots": [
+                {
+                    "cash": _decimal_text(snapshot.cash),
+                    "equity": _decimal_text(snapshot.equity),
+                    "ledger_hash": snapshot.ledger_hash,
+                    "market_value": _decimal_text(snapshot.market_value),
+                    "positions": [
+                        {
+                            "average_cost": _decimal_text(position.average_cost),
+                            "instrument": position.instrument,
+                            "market_price": _decimal_text(position.market_price),
+                            "market_value": _decimal_text(position.market_value),
+                            "sellable_quantity": position.sellable_quantity,
+                            "total_quantity": position.total_quantity,
+                            "unrealized_pnl": _decimal_text(position.unrealized_pnl),
+                        }
+                        for position in snapshot.positions
+                    ],
+                    "session_date": snapshot.session_date.isoformat(),
+                }
+                for snapshot in result.snapshots
+            ],
+            "version": "backtest-artifacts-v1",
+        }
+    )

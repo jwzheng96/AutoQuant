@@ -37,6 +37,14 @@ def test_historical_risk_warning_and_listing_rules_are_versioned() -> None:
     assert newly_listed.price_limit.rate is None
     assert newly_listed.price_limit.reason == "first_five_listing_sessions"
 
+    legacy = rulebook.resolve(
+        "000001.XSHE",
+        date(2020, 1, 2),
+        SecurityStatus(risk_warning=False, listing_session_number=500),
+    )
+    assert legacy.effective_from == date(1990, 12, 19)
+    assert legacy.rule_version == "sse-szse-cash-equity-legacy-v1"
+
 
 def test_star_market_uses_200_share_minimum_with_one_share_step() -> None:
     rules = AshareRuleBook().resolve(
@@ -75,3 +83,21 @@ def test_fee_schedule_charges_sell_tax_and_bilateral_transfer_fee() -> None:
     assert sell.commission == Decimal("5.00")
     assert sell.stamp_duty == Decimal("5.00")
     assert sell.transfer_fee == Decimal("0.10")
+
+
+def test_fee_schedule_uses_historical_stamp_and_transfer_rates() -> None:
+    schedule = FeeSchedule()
+
+    buy = schedule.calculate(
+        side=OrderSide.BUY,
+        gross_amount=Decimal("100000"),
+        session_date=date(2020, 1, 2),
+    )
+    sell = schedule.calculate(
+        side=OrderSide.SELL,
+        gross_amount=Decimal("100000"),
+        session_date=date(2020, 1, 2),
+    )
+
+    assert buy.transfer_fee == Decimal("2.00")
+    assert sell.stamp_duty == Decimal("100.00")

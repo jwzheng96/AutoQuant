@@ -21,6 +21,7 @@ matrix for the Tushare daily endpoints.
 Apply `migrations/postgres/001_phase1.sql`,
 `migrations/postgres/002_operator_console.sql`, then
 `migrations/postgres/003_revision_checkpoints.sql`, then
+`migrations/postgres/004_backtest_runs.sql`, then
 `migrations/clickhouse/001_phase1.sql` and
 `migrations/clickhouse/002_tushare_daily.sql` and
 `migrations/clickhouse/003_daily_coverage.sql` in order, only to explicitly authorized
@@ -101,15 +102,25 @@ use an SSH local port forward instead of changing the bind address:
 ssh -L 8000:127.0.0.1:8000 rlocal
 ```
 
-The console exposes health, data coverage, point-in-time daily queries, and bounded audited
-ingestion jobs. The trading view intentionally has no order action and no synthetic PnL.
+The console exposes health, data coverage, point-in-time daily queries, bounded audited
+ingestion jobs, and `/research`. The research page can only run the built-in
+`manifest_buy_hold_v1` baseline against a production-complete manifest; it does not execute
+uploaded code. Select a manifest, verify its instrument and assumptions, create the run, then
+inspect its daily equity, fills/rejections, fees, and stable failure code. The trading view
+intentionally has no order action.
 
 ## Research execution boundary
 
-`autoquant.backtest` provides the deterministic cash-account ledger used by the next research
-phase. Its default fee model is a reference assumption, not a statement of the user's actual
+`autoquant.backtest` provides the deterministic cash-account ledger used by the research
+phase. Its default fee model versions the 2022 transfer-fee and 2023 stamp-duty changes, but
+the commission remains a reference assumption rather than a statement of the user's actual
 broker tariff. Before comparing performance, configure the real commission schedule and keep
 the rule, fee, execution-model, data-manifest and `as_of` versions with every result.
+
+The current baseline fails closed when an adjustment factor changes because corporate-action
+position and cash accounting is not implemented yet. A one-day positive baseline return proves
+only that the pipeline works; it is not strategy evidence. Use multi-year walk-forward and
+out-of-sample tests only after corporate actions and a real strategy interface are implemented.
 
 Trading calendars, instrument lifecycles, suspension state and exact `stk_limit` boundaries are
 persisted as point-in-time revisions and included in new validated manifests. Only manifests

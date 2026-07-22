@@ -5,7 +5,8 @@ from uuid import uuid4
 
 from sqlalchemy.engine import RowMapping
 
-from autoquant.web.models import OperatorJobState
+from autoquant.web.backtest_store import PostgresBacktestRepository
+from autoquant.web.models import BacktestRunRequest, OperatorJobState
 from autoquant.web.store import PostgresOperatorRepository
 
 
@@ -47,3 +48,52 @@ def test_operator_console_migration_has_persistent_queue_constraints() -> None:
     assert "idempotency_key text NOT NULL UNIQUE" in migration
     assert "FOR UPDATE" not in migration
     assert "VALUES ('postgres', 2)" in migration
+
+
+def test_backtest_run_row_mapping_keeps_decimal_request_values() -> None:
+    run_id = uuid4()
+    row = cast(
+        RowMapping,
+        {
+            "run_id": run_id,
+            "state": "queued",
+            "strategy_id": "manifest_buy_hold_v1",
+            "request_payload": {
+                "manifest_hash": "a" * 64,
+                "instrument": "000001.XSHE",
+                "initial_cash": "1000000",
+                "allocation": "0.95",
+                "slippage_bps": "5",
+                "liquidate_at_end": True,
+                "idempotency_key": "backtest-row-mapping-0001",
+            },
+            "requested_by": "operator",
+            "created_at": datetime(2025, 1, 1, tzinfo=UTC),
+            "started_at": None,
+            "completed_at": None,
+            "as_of": None,
+            "result_hash": None,
+            "ledger_hash": None,
+            "metrics_payload": None,
+            "error_code": None,
+        },
+    )
+
+    run = PostgresBacktestRepository._run_from_row(row)
+
+    assert run.run_id == run_id
+    assert run.request == BacktestRunRequest.model_validate(row["request_payload"])
+    assert run.state is OperatorJobState.QUEUED
+
+
+def test_backtest_migration_has_atomic_result_tables_and_schema_version() -> None:
+    migration = Path("migrations/postgres/004_backtest_runs.sql").read_text(
+        encoding="utf-8"
+    )
+
+    assert "CREATE TABLE IF NOT EXISTS backtest_runs" in migration
+    assert "CREATE TABLE IF NOT EXISTS backtest_executions" in migration
+    assert "CREATE TABLE IF NOT EXISTS backtest_snapshots" in migration
+    assert "CREATE TABLE IF NOT EXISTS backtest_events" in migration
+    assert "idempotency_key text NOT NULL UNIQUE" in migration
+    assert "VALUES ('postgres', 4)" in migration

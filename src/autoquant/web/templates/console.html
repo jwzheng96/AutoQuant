@@ -18,6 +18,7 @@
           <a href="/" {% if active_path == '/' %}aria-current="page"{% endif %}>系统总览</a>
           <a href="/data" {% if active_path == '/data' %}aria-current="page"{% endif %}>行情数据</a>
           <a href="/ingestion" {% if active_path == '/ingestion' %}aria-current="page"{% endif %}>采集任务</a>
+          <a href="/research" {% if active_path == '/research' %}aria-current="page"{% endif %}>回测研究</a>
           <a href="/trading" {% if active_path == '/trading' %}aria-current="page"{% endif %}>交易中心</a>
         </nav>
         <div class="safety-note">
@@ -60,7 +61,7 @@
             <article class="panel accent-panel">
               <p class="eyebrow">SAFETY BOUNDARY</p>
               <h3>数据可用不等于策略盈利</h3>
-              <p>当前控制台只运营可信数据。策略、回测账本、风控和 QMT 执行必须分别通过样本外和安全验收。</p>
+              <p>当前控制台开放固定基准回测。策略、风控和 QMT 执行仍须分别通过样本外和安全验收。</p>
               <a class="text-link" href="/trading">查看交易能力边界 →</a>
             </article>
           </div>
@@ -99,6 +100,42 @@
             <div class="table-wrap"><table><thead><tr><th>创建时间</th><th>证券</th><th>区间</th><th>状态</th><th>结果</th></tr></thead><tbody id="jobs-table"></tbody></table></div>
           </article>
         </section>
+        {% elif active_path == '/research' %}
+        <section class="page" aria-labelledby="research-title">
+          <div class="section-heading"><div><p class="eyebrow">AUDITED RESEARCH</p><h2 id="research-title">可审计基准回测</h2></div><button id="refresh-backtests" class="secondary-button" type="button">刷新运行</button></div>
+          <article class="panel">
+            <form id="backtest-form" class="research-form">
+              <label>生产数据清单<select id="backtest-manifest" required><option value="">正在读取…</option></select></label>
+              <label>证券代码<input id="backtest-instrument" value="000001.XSHE" pattern="[0-9]{6}\.(XSHG|XSHE)" required></label>
+              <label>初始资金<input id="backtest-cash" type="number" min="10000" max="1000000000" step="1000" value="1000000" required></label>
+              <label>资金比例<input id="backtest-allocation" type="number" min="0.01" max="1" step="0.01" value="0.95" required></label>
+              <label>滑点（bp）<input id="backtest-slippage" type="number" min="0" max="100" step="0.1" value="5" required></label>
+              <label class="check-label"><input id="backtest-liquidate" type="checkbox" checked>末日平仓</label>
+              <button class="primary-button" type="submit">创建基准回测</button>
+            </form>
+            <p class="form-help">仅运行 manifest_buy_hold_v1，用于验证数据、成交、费用与账本管线，不代表策略盈利能力。</p>
+          </article>
+          <article class="panel">
+            <div class="panel-title"><div><p class="eyebrow">RECENT RUNS</p><h3>最近运行</h3></div></div>
+            <div class="table-wrap"><table><thead><tr><th>创建时间</th><th>证券</th><th>数据区间</th><th>状态</th><th>总收益</th><th>最大回撤</th></tr></thead><tbody id="backtests-table"></tbody></table></div>
+          </article>
+          <section id="backtest-detail" class="research-detail" hidden>
+            <div class="metric-grid">
+              <article class="metric"><span>期末权益</span><strong id="bt-ending-equity">—</strong><small>含现金与持仓市值</small></article>
+              <article class="metric"><span>总收益</span><strong id="bt-total-return">—</strong><small>扣除模型费用</small></article>
+              <article class="metric"><span>最大回撤</span><strong id="bt-max-drawdown">—</strong><small>日度权益序列</small></article>
+              <article class="metric"><span>总费用</span><strong id="bt-total-fees">—</strong><small>佣金、印花税、过户费</small></article>
+            </div>
+            <article class="panel chart-panel">
+              <div class="panel-title"><div><p class="eyebrow">EQUITY CURVE</p><h3 id="equity-title">日净值</h3></div><span id="snapshot-count" class="pill neutral">0 日</span></div>
+              <div id="equity-chart" class="chart" role="img" aria-label="回测权益曲线"></div>
+            </article>
+            <article class="panel">
+              <div class="panel-title"><div><p class="eyebrow">EXECUTIONS</p><h3>成交与拒单</h3></div></div>
+              <div class="table-wrap"><table><thead><tr><th>交易日</th><th>方向</th><th>状态</th><th>数量</th><th>成交价</th><th>费用</th><th>拒单原因</th></tr></thead><tbody id="executions-table"></tbody></table></div>
+            </article>
+          </section>
+        </section>
         {% else %}
         <section class="page" aria-labelledby="trading-title">
           <div class="section-heading"><div><p class="eyebrow">EXECUTION CONTROL</p><h2 id="trading-title">交易中心</h2></div><span class="pill warning">未启用</span></div>
@@ -107,7 +144,7 @@
             <h3>真实交易链路尚未接入</h3>
             <p id="trading-reason">正在读取能力状态…</p>
             <div class="gate-grid">
-              <div><span>01</span><strong>回测账本</strong><small>现金、持仓、费用与 T+1</small></div>
+              <div><span>01</span><strong>回测账本</strong><small>已接入，等待策略验证</small></div>
               <div><span>02</span><strong>风险引擎</strong><small>仓位、回撤和流动性硬限制</small></div>
               <div><span>03</span><strong>QMT 网关</strong><small>幂等订单、对账与紧急停机</small></div>
               <div><span>04</span><strong>模拟盘放行</strong><small>统计证据和故障演练</small></div>

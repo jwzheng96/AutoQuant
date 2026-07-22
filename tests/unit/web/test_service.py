@@ -6,7 +6,13 @@ import pytest
 
 from autoquant.config import AppSettings
 from autoquant.errors import PersistenceUnavailableError
-from autoquant.web.models import DailyIngestionJobRequest, OperatorJob, OperatorJobState
+from autoquant.web.models import (
+    BacktestRun,
+    BacktestRunRequest,
+    DailyIngestionJobRequest,
+    OperatorJob,
+    OperatorJobState,
+)
 from autoquant.web.service import ConsoleService
 
 NOW = datetime(2025, 1, 3, tzinfo=UTC)
@@ -32,7 +38,12 @@ def _job(state: OperatorJobState = OperatorJobState.RUNNING) -> OperatorJob:
 
 
 def _service(
-    *, operator: MagicMock, control: MagicMock, runner: AsyncMock
+    *,
+    operator: MagicMock,
+    control: MagicMock,
+    runner: AsyncMock,
+    backtests: MagicMock | None = None,
+    backtest_runner: MagicMock | None = None,
 ) -> ConsoleService:
     market = MagicMock()
     market.client = MagicMock()
@@ -42,8 +53,30 @@ def _service(
         control_repository=control,
         market_repository=market,
         ingestion_runner=runner,
+        backtest_repository=backtests,
+        backtest_runner=backtest_runner,
         now=lambda: NOW,
         poll_interval=0.01,
+    )
+
+
+def _backtest_request() -> BacktestRunRequest:
+    return BacktestRunRequest(
+        manifest_hash="a" * 64,
+        instrument="000001.XSHE",
+        idempotency_key="service-backtest-request-0001",
+    )
+
+
+def _backtest_run() -> BacktestRun:
+    return BacktestRun(
+        run_id=uuid4(),
+        state=OperatorJobState.RUNNING,
+        strategy_id="manifest_buy_hold_v1",
+        request=_backtest_request(),
+        requested_by="operator",
+        created_at=NOW,
+        started_at=NOW,
     )
 
 
@@ -115,3 +148,62 @@ async def test_job_creation_rejects_queue_when_audit_is_unavailable() -> None:
         error_code="audit_unavailable",
         now=NOW,
     )
+
+
+@pytest.mark.asyncio
+async def test_backtest_worker_commits_result_and_audits_only_hashes() -> None:
+    backtests = MagicMock()
+    backtests.complete_run = AsyncMock()
+    backtests.fail_run = AsyncMock()
+    result = MagicMock()
+    result.result_hash = "b" * 64
+    result.ledger_hash = "c" * 64
+    result.manifest_hash = "a" * 64
+    runner = MagicMock()
+    runner.run = AsyncMock(return_value=result)
+    control = MagicMock()
+    control.append_audit_event = AsyncMock(return_value="d" * 64)
+    service = _service(
+        operator=MagicMock(),
+        control=control,
+        runner=AsyncMock(),
+        backtests=backtests,
+        backtest_runner=runner,
+    )
+    run = _backtest_run()
+
+    await service._run_backtest(run)
+
+    backtests.complete_run.assert_awaited_once_with(run.run_id, result=result, now=NOW)
+    backtests.fail_run.assert_not_awaited()
+    audit = control.append_audit_event.await_args_list[-1].args[2]
+    assert audit["result_hash"] == "b" * 64
+    assert set(audit) == {"job_id", "result_hash", "ledger_hash", "manifest_hash"}
+
+
+@pytest.mark.asyncio
+async def test_backtest_worker_exposes_stable_failure_code_not_exception_detail() -> None:
+    backtests = MagicMock()
+    backtests.complete_run = AsyncMock()
+    backtests.fail_run = AsyncMock()
+    runner = MagicMock()
+    runner.run = AsyncMock(side_effect=ValueError("sensitive research detail"))
+    control = MagicMock()
+    control.append_audit_event = AsyncMock(return_value="d" * 64)
+    service = _service(
+        operator=MagicMock(),
+        control=control,
+        runner=AsyncMock(),
+        backtests=backtests,
+        backtest_runner=runner,
+    )
+    run = _backtest_run()
+
+    await service._run_backtest(run)
+
+    backtests.complete_run.assert_not_awaited()
+    backtests.fail_run.assert_awaited_once_with(
+        run.run_id, error_code="invalid_backtest_input", now=NOW
+    )
+    audit = control.append_audit_event.await_args_list[-1].args[2]
+    assert "sensitive research detail" not in str(audit)

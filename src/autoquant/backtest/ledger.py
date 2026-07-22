@@ -274,6 +274,17 @@ class PortfolioLedger:
 
     @staticmethod
     def _locked_at_limit(side: OrderSide, market: MarketState) -> bool:
+        exact = market.daily_price_limit
+        if exact is not None:
+            if side is OrderSide.BUY:
+                return (
+                    market.bar.open_price >= exact.up_limit
+                    and market.bar.low_price >= exact.up_limit
+                )
+            return (
+                market.bar.open_price <= exact.down_limit
+                and market.bar.high_price <= exact.down_limit
+            )
         rate = market.rules.price_limit.rate
         if rate is None:
             return False

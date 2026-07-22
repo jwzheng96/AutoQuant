@@ -5,10 +5,12 @@ import pytest
 
 from autoquant.backtest.engine import BacktestEngine
 from autoquant.backtest.models import (
+    AccountSnapshot,
     BacktestSession,
     MarketState,
     OrderIntent,
     OrderSide,
+    backtest_artifact_hash,
 )
 from autoquant.backtest.rules import AshareRuleBook, SecurityStatus
 from autoquant.data.daily_models import DailyBarRevision
@@ -128,3 +130,43 @@ def test_backtest_rejects_data_not_visible_at_as_of() -> None:
             initial_cash=Decimal("10000"),
             sessions=sessions(),
         )
+
+
+def test_artifact_hash_commits_daily_snapshots_beyond_semantic_result_hash() -> None:
+    result = BacktestEngine().run(
+        strategy_id="scheduled-orders-v1",
+        manifest_hash="a" * 64,
+        as_of=datetime(2026, 7, 24, tzinfo=UTC),
+        initial_cash=Decimal("10000"),
+        sessions=sessions(),
+    )
+    original = result.snapshots[0]
+    changed = AccountSnapshot(
+        session_date=original.session_date,
+        cash=original.cash,
+        market_value=original.market_value,
+        equity=original.equity + Decimal("1"),
+        positions=original.positions,
+        ledger_hash=original.ledger_hash,
+    )
+    altered = type(result)(
+        strategy_id=result.strategy_id,
+        manifest_hash=result.manifest_hash,
+        as_of=result.as_of,
+        initial_cash=result.initial_cash,
+        ending_equity=result.ending_equity,
+        total_return=result.total_return,
+        max_drawdown=result.max_drawdown,
+        turnover=result.turnover,
+        total_fees=result.total_fees,
+        reports=result.reports,
+        snapshots=(changed, *result.snapshots[1:]),
+        events=result.events,
+        rule_versions=result.rule_versions,
+        fee_version=result.fee_version,
+        execution_version=result.execution_version,
+        ledger_hash=result.ledger_hash,
+    )
+
+    assert altered.result_hash == result.result_hash
+    assert backtest_artifact_hash(altered) != backtest_artifact_hash(result)

@@ -96,6 +96,7 @@ class BacktestEngine:
             total_fees=ledger.total_fees,
             reports=tuple(reports),
             snapshots=tuple(snapshots),
+            events=ledger.events,
             rule_versions=tuple(sorted(rule_versions)),
             fee_version=self._fees.version,
             execution_version=self._execution.version,

@@ -108,6 +108,36 @@ function renderChart(items) {
   host.append(svg);
 }
 
+function renderEquityChart(items) {
+  const host = document.getElementById("equity-chart");
+  host.replaceChildren();
+  if (!items.length) {
+    const empty = document.createElement("div");
+    empty.className = "chart-empty";
+    empty.textContent = "运行完成后显示日度权益";
+    host.append(empty);
+    return;
+  }
+  const values = items.map(item => Number(item.equity));
+  const low = Math.min(...values);
+  const high = Math.max(...values);
+  const range = high - low || 1;
+  const points = values.map((value, index) => {
+    const x = items.length === 1 ? 50 : (index / (items.length - 1)) * 100;
+    const y = 92 - ((value - low) / range) * 78;
+    return `${x.toFixed(2)},${y.toFixed(2)}`;
+  }).join(" ");
+  const ns = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("viewBox", "0 0 100 100");
+  svg.setAttribute("preserveAspectRatio", "none");
+  const line = document.createElementNS(ns, "polyline");
+  line.setAttribute("points", points);
+  line.setAttribute("class", "line");
+  svg.append(line);
+  host.append(svg);
+}
+
 function renderBars(items) {
   const table = document.getElementById("bars-table");
   table.replaceChildren();
@@ -172,6 +202,128 @@ async function loadTrading() {
   catch (error) { showToast(`能力读取失败：${error.message}`); }
 }
 
+const researchManifests = new Map();
+
+async function loadResearchManifests() {
+  const select = document.getElementById("backtest-manifest");
+  try {
+    const data = await requestJson("/api/v1/research/manifests?limit=100");
+    select.replaceChildren();
+    researchManifests.clear();
+    data.items.forEach(item => {
+      researchManifests.set(item.manifest_hash, item);
+      const option = document.createElement("option");
+      option.value = item.manifest_hash;
+      option.textContent = `${item.instruments.join(", ")} · ${item.start_time.slice(0, 10)} — ${item.end_time.slice(0, 10)} · ${item.manifest_hash.slice(0, 10)}`;
+      select.append(option);
+    });
+    if (!data.items.length) {
+      const option = document.createElement("option");
+      option.value = "";
+      option.textContent = "暂无生产完整的数据清单";
+      select.append(option);
+    }
+    syncManifestInstrument();
+  } catch (error) {
+    select.replaceChildren();
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = "数据清单读取失败";
+    select.append(option);
+    showToast(`数据清单读取失败：${error.message}`);
+  }
+}
+
+function syncManifestInstrument() {
+  const selected = researchManifests.get(document.getElementById("backtest-manifest").value);
+  if (selected?.instruments?.length) document.getElementById("backtest-instrument").value = selected.instruments[0];
+}
+
+function formatPercent(value) {
+  if (value === null || value === undefined) return "—";
+  return `${(Number(value) * 100).toFixed(2)}%`;
+}
+
+async function loadBacktestDetail(runId) {
+  try {
+    const detail = await requestJson(`/api/v1/backtests/${runId}`);
+    const host = document.getElementById("backtest-detail");
+    host.hidden = false;
+    const metrics = detail.run.metrics;
+    setText("bt-ending-equity", metrics ? Number(metrics.ending_equity).toLocaleString(undefined, { maximumFractionDigits: 2 }) : "—");
+    setText("bt-total-return", formatPercent(metrics?.total_return));
+    setText("bt-max-drawdown", formatPercent(metrics?.max_drawdown));
+    setText("bt-total-fees", metrics ? Number(metrics.total_fees).toLocaleString(undefined, { maximumFractionDigits: 2 }) : "—");
+    setText("equity-title", `${detail.run.request.instrument} · ${detail.run.state}`);
+    setText("snapshot-count", `${detail.snapshots.length} 日`);
+    renderEquityChart(detail.snapshots);
+    const table = document.getElementById("executions-table");
+    table.replaceChildren();
+    detail.executions.forEach(execution => {
+      const row = document.createElement("tr");
+      const fee = Number(execution.commission) + Number(execution.stamp_duty) + Number(execution.transfer_fee);
+      [execution.session_date, execution.side, execution.state, execution.requested_quantity.toLocaleString(), execution.fill_price ?? "—", fee.toFixed(2), execution.rejection_code ?? "—"].forEach(value => {
+        const cell = document.createElement("td");
+        cell.textContent = value;
+        row.append(cell);
+      });
+      table.append(row);
+    });
+  } catch (error) { showToast(`回测明细读取失败：${error.message}`); }
+}
+
+async function loadBacktests() {
+  try {
+    const data = await requestJson("/api/v1/backtests?limit=50");
+    const table = document.getElementById("backtests-table");
+    table.replaceChildren();
+    data.items.forEach(run => {
+      const row = document.createElement("tr");
+      row.className = "selectable-row";
+      row.tabIndex = 0;
+      const manifest = researchManifests.get(run.request.manifest_hash);
+      const interval = manifest ? `${manifest.start_time.slice(0, 10)} — ${manifest.end_time.slice(0, 10)}` : run.request.manifest_hash.slice(0, 10);
+      [new Date(run.created_at).toLocaleString(), run.request.instrument, interval].forEach(value => {
+        const cell = document.createElement("td"); cell.textContent = value; row.append(cell);
+      });
+      const stateCell = document.createElement("td");
+      const badge = document.createElement("span"); statusPill(badge, run.state); stateCell.append(badge); row.append(stateCell);
+      [formatPercent(run.metrics?.total_return), formatPercent(run.metrics?.max_drawdown)].forEach(value => {
+        const cell = document.createElement("td"); cell.textContent = value; row.append(cell);
+      });
+      const open = () => loadBacktestDetail(run.run_id);
+      row.addEventListener("click", open);
+      row.addEventListener("keydown", event => { if (event.key === "Enter" || event.key === " ") open(); });
+      table.append(row);
+    });
+    if (data.items.length) await loadBacktestDetail(data.items[0].run_id);
+  } catch (error) { showToast(`回测运行读取失败：${error.message}`); }
+}
+
+async function createBacktest(event) {
+  event.preventDefault();
+  const payload = {
+    manifest_hash: document.getElementById("backtest-manifest").value,
+    instrument: document.getElementById("backtest-instrument").value.trim().toUpperCase(),
+    initial_cash: document.getElementById("backtest-cash").value,
+    allocation: document.getElementById("backtest-allocation").value,
+    slippage_bps: document.getElementById("backtest-slippage").value,
+    liquidate_at_end: document.getElementById("backtest-liquidate").checked,
+    idempotency_key: `web-backtest-${crypto.randomUUID()}`,
+  };
+  try {
+    const run = await requestJson("/api/v1/backtests", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-AutoQuant-CSRF": csrf },
+      body: JSON.stringify(payload),
+    });
+    showToast("回测已进入持久化队列");
+    await loadBacktests();
+    window.setTimeout(loadBacktests, 1200);
+    await loadBacktestDetail(run.run_id);
+  } catch (error) { showToast(`回测创建失败：${error.message}`); }
+}
+
 if (page === "/") {
   document.getElementById("page-title").textContent = "系统总览";
   document.getElementById("refresh-overview").addEventListener("click", loadOverview);
@@ -189,6 +341,14 @@ if (page === "/") {
   document.getElementById("ingestion-form").addEventListener("submit", createJob);
   document.getElementById("refresh-jobs").addEventListener("click", loadJobs);
   loadJobs();
+} else if (page === "/research") {
+  statusPill(document.getElementById("global-status"), "研究模式");
+  document.getElementById("page-title").textContent = "回测研究";
+  document.getElementById("backtest-form").addEventListener("submit", createBacktest);
+  document.getElementById("backtest-manifest").addEventListener("change", syncManifestInstrument);
+  document.getElementById("refresh-backtests").addEventListener("click", loadBacktests);
+  renderEquityChart([]);
+  loadResearchManifests().then(loadBacktests);
 } else {
   statusPill(document.getElementById("global-status"), "研究模式");
   document.getElementById("page-title").textContent = "交易中心";

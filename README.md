@@ -5,15 +5,16 @@ AutoQuant is an A-share research data foundation.
 Phase 1 provides fail-closed Tushare daily ingestion and retained RQData minute support,
 point-in-time records, deterministic quality gates, append-only ClickHouse revisions,
 PostgreSQL manifests/checkpoints/audit events, a JSON operator CLI, and an authenticated
-local Web operator console. It does not place orders, run strategies, promise profitability,
-or enable live trading.
+local Web operator console, and an audited fixed-strategy backtest queue. It does not place
+orders, promise profitability, or enable live trading.
 
 The repository also contains a deterministic A-share research ledger with versioned board
 rules, T+1 sellability, lot-size validation, conservative daily-open fills, liquidity caps,
 configurable commission/slippage, sell-side stamp duty, bilateral transfer fees, and a
-hash-chained execution journal. It is a tested domain core, not yet a Web backtest endpoint:
-new schema-v3 manifests now include point-in-time calendars, lifecycles, suspension revisions,
-and exact daily price limits. Backtest result persistence and the audited UI job remain gated.
+hash-chained execution journal. Schema-v3 manifests include point-in-time calendars,
+lifecycles, suspension revisions, and exact daily price limits. PostgreSQL schema v4 persists
+bounded baseline runs, executions, daily snapshots, and event chains atomically; `/research`
+shows those results and verifies stored hashes when they are read.
 
 All dependency, test, lint, type-check, migration, and Git mutation commands for this
 checkout must run on `rlocal`; see [the phase-1 runbook](docs/runbooks/phase1-data-foundation.md).
@@ -39,8 +40,9 @@ scripts/local-db.sh migrate
 
 The console binds only to `127.0.0.1` and requires `AQ_WEB_USERNAME` plus a password of at
 least 16 characters in the untracked root `.env`. It can inspect trusted daily data and
-submit bounded, audited ingestion jobs. Its trading page remains explicitly locked until a
-ledger, risk engine, QMT gateway, and simulation evidence exist.
+submit bounded ingestion and fixed baseline backtest jobs. Its trading page remains explicitly
+locked until sample-out strategy evidence, a portfolio risk engine, QMT gateway, reconciliation,
+and simulation evidence exist.
 
 Copy `.env.example` to an untracked `.env` and supply credentials/DSNs only on the trusted
 runtime host. The Tushare Token previously shared in chat must be rotated before use; set
