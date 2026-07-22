@@ -26,7 +26,7 @@ pytestmark = [
 
 @pytest_asyncio.fixture
 async def repository() -> AsyncIterator[ClickHouseMinuteBarRepository]:
-    table = f"oq_test_minute_bar_revisions_{uuid4().hex}"
+    table = f"autoquant_test_minute_bar_revisions_{uuid4().hex}"
     repo = await ClickHouseMinuteBarRepository.connect(
         dsn=CLICKHOUSE_DSN,
         source=f"integration-{uuid4().hex}",

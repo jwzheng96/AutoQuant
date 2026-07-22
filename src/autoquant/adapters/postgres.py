@@ -520,7 +520,7 @@ class PostgresControlRepository:
             raise PersistenceUnavailableError("PostgreSQL migration failed") from None
 
     async def drop_test_schema(self) -> None:
-        if not self._schema.startswith("oq_test_"):
+        if not self._schema.startswith("autoquant_test_"):
             raise ValueError("only isolated test schemas may be dropped")
         try:
             async with self._engine.begin() as connection:

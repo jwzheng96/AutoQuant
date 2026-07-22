@@ -52,3 +52,4 @@ def test_active_configuration_and_sql_use_autoquant_identity() -> None:
         if path.name != "test_project_identity.py"
     )
     assert "OpenQuant" not in active_python
+    assert "oq_test_" not in active_python

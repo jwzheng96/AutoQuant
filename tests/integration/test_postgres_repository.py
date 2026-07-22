@@ -26,7 +26,7 @@ pytestmark = [
 
 @pytest_asyncio.fixture
 async def repository() -> AsyncIterator[PostgresControlRepository]:
-    schema = f"oq_test_{uuid4().hex}"
+    schema = f"autoquant_test_{uuid4().hex}"
     repo = PostgresControlRepository.connect(dsn=POSTGRES_DSN, schema=schema)
     migration = Path("migrations/postgres/001_phase1.sql").read_text(encoding="utf-8")
     try:
