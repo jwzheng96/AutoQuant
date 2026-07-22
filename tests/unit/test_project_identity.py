@@ -53,3 +53,31 @@ def test_active_configuration_and_sql_use_autoquant_identity() -> None:
     )
     assert "OpenQuant" not in active_python
     assert "oq_test_" not in active_python
+
+
+def test_current_documentation_uses_autoquant_commands_and_repository() -> None:
+    current_docs = (
+        (ROOT / "README.md").read_text(encoding="utf-8"),
+        (ROOT / "docs/runbooks/phase1-data-foundation.md").read_text(encoding="utf-8"),
+    )
+    combined = "\n".join(current_docs)
+
+    assert "# AutoQuant" in current_docs[0]
+    assert "https://github.com/jwzheng96/AutoQuant" in combined
+    assert "/AutoQuant" in combined
+    assert "uv run autoquant config-check" in combined
+    assert "AQ_RUN_RQDATA_LIVE=1" in combined
+    assert "open-quant" not in combined
+    assert "OQ_" not in combined
+
+
+def test_historical_documents_are_marked_as_superseded() -> None:
+    historical = (
+        ROOT / "docs/superpowers/specs/2026-07-21-a-share-quant-system-design.md",
+        ROOT / "docs/superpowers/plans/2026-07-21-trusted-data-foundation.md",
+    )
+    for path in historical:
+        first_lines = path.read_text(encoding="utf-8").splitlines()[:6]
+        header = "\n".join(first_lines)
+        assert "Historical naming record" in header
+        assert "AutoQuant" in header

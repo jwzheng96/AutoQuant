@@ -1,5 +1,9 @@
 # Trusted A-Share Data Foundation Implementation Plan
 
+> **Historical naming record:** This document uses the former Open Quant identifiers.
+> The current project name and supported interfaces are AutoQuant; see
+> `docs/superpowers/specs/2026-07-22-autoquant-rename-design.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build phase 1 of the approved system: safe configuration, point-in-time minute-bar contracts, a real RQData HTTP adapter, quality gates, ClickHouse/PostgreSQL persistence, and an auditable ingestion CLI.
