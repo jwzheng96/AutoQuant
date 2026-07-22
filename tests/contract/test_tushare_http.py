@@ -33,6 +33,7 @@ def make_client(
         credentials=TushareCredentials(token=SecretStr(FAKE_TOKEN)),
         api_url=API_URL,
         retry_delays=(0.0, 0.0),
+        min_request_interval=0.0,
         sleep=sleep,
     )
 
@@ -307,3 +308,37 @@ def test_client_requires_https_and_repr_hides_token() -> None:
     finally:
         # No request has been made; closing is covered by async tests.
         pass
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_default_safe_rate_can_be_enforced_with_monotonic_clock() -> None:
+    current = 10.0
+    delays: list[float] = []
+
+    def monotonic() -> float:
+        return current
+
+    async def advance(delay: float) -> None:
+        nonlocal current
+        delays.append(delay)
+        current += delay
+
+    respx.post(API_URL).mock(
+        side_effect=[success_response(), success_response()]
+    )
+    client = TushareHttpClient(
+        credentials=TushareCredentials(token=SecretStr(FAKE_TOKEN)),
+        api_url=API_URL,
+        retry_delays=(),
+        min_request_interval=1.25,
+        monotonic=monotonic,
+        sleep=advance,
+    )
+    try:
+        await client.post("daily", params={}, fields=())
+        await client.post("daily", params={}, fields=())
+    finally:
+        await client.close()
+
+    assert delays == [1.25]

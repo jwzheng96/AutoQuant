@@ -8,6 +8,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal, InvalidOperation
+from time import monotonic as monotonic_clock
 from typing import Protocol
 from urllib.parse import urlsplit
 
@@ -41,6 +42,7 @@ _CANONICAL_CODE = re.compile(r"^(?P<symbol>\d{6})\.(?P<exchange>XSHE|XSHG)$")
 _TUSHARE_CODE = re.compile(r"^(?P<symbol>\d{6})\.(?P<exchange>SZ|SH)$")
 
 Sleep = Callable[[float], Awaitable[None]]
+Monotonic = Callable[[], float]
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +87,8 @@ class TushareHttpClient:
         api_url: str,
         timeout: float = 15.0,
         retry_delays: tuple[float, ...] = _DEFAULT_RETRY_DELAYS,
+        min_request_interval: float = 1.25,
+        monotonic: Monotonic = monotonic_clock,
         sleep: Sleep = asyncio.sleep,
         client: httpx.AsyncClient | None = None,
     ) -> None:
@@ -102,10 +106,16 @@ class TushareHttpClient:
             raise ValueError("timeout must be positive")
         if any(delay < 0 for delay in retry_delays):
             raise ValueError("retry delays cannot be negative")
+        if min_request_interval < 0:
+            raise ValueError("minimum request interval cannot be negative")
         self._credentials = credentials
         self._api_url = api_url.rstrip("/")
         self._retry_delays = tuple(retry_delays)
+        self._min_request_interval = min_request_interval
+        self._monotonic = monotonic
         self._sleep = sleep
+        self._last_request_started: float | None = None
+        self._rate_lock = asyncio.Lock()
         self._client = client or httpx.AsyncClient(timeout=timeout, follow_redirects=False)
 
     def __repr__(self) -> str:
@@ -163,6 +173,7 @@ class TushareHttpClient:
         attempts = len(self._retry_delays) + 1
         for attempt in range(attempts):
             try:
+                await self._wait_for_rate_limit()
                 response = await self._client.post(self._api_url, json=payload)
             except httpx.TransportError:
                 if attempt == attempts - 1:
@@ -198,6 +209,17 @@ class TushareHttpClient:
                 )
             return response
         raise AssertionError("retry loop exhausted without a result")
+
+    async def _wait_for_rate_limit(self) -> None:
+        async with self._rate_lock:
+            now = self._monotonic()
+            previous = self._last_request_started
+            if previous is not None:
+                remaining = self._min_request_interval - (now - previous)
+                if remaining > 0:
+                    await self._sleep(remaining)
+                    now = self._monotonic()
+            self._last_request_started = now
 
     @staticmethod
     def _parse_json(response: httpx.Response, *, api_name: str) -> dict[str, object]:
