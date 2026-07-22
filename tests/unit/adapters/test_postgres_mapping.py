@@ -9,6 +9,7 @@ import pytest
 
 from autoquant.adapters.postgres import (
     audit_event_hash,
+    source_evidence_content_matches,
     source_evidence_parameters,
 )
 from autoquant.data.models import SourceEvidence
@@ -134,6 +135,34 @@ def test_source_evidence_maps_exact_verified_body_without_auth_material() -> Non
         "requested_at": OCCURRED_AT,
         "response_body": body,
     }
+
+
+def test_source_evidence_idempotency_ignores_retrieval_time_only() -> None:
+    body = b'{"api_name":"daily","response":{"code":0}}'
+    first = SourceEvidence(
+        source="tushare",
+        method="daily",
+        requested_at=OCCURRED_AT,
+        response_body=body,
+        response_hash=hashlib.sha256(body).hexdigest(),
+    )
+    repeated = SourceEvidence(
+        source="tushare",
+        method="daily",
+        requested_at=OCCURRED_AT + timedelta(hours=1),
+        response_body=body,
+        response_hash=first.response_hash,
+    )
+    different_method = SourceEvidence(
+        source="tushare",
+        method="adj_factor",
+        requested_at=repeated.requested_at,
+        response_body=body,
+        response_hash=first.response_hash,
+    )
+
+    assert source_evidence_content_matches(first, repeated) is True
+    assert source_evidence_content_matches(first, different_method) is False
 
 
 @pytest.mark.parametrize(

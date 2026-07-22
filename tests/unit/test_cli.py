@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 from typer.testing import CliRunner
 
@@ -31,6 +32,7 @@ def test_config_check_reports_missing_capabilities_without_secret() -> None:
         "live_trading_enabled": False,
         "postgres": "missing",
         "rqdata": "missing",
+        "tushare": "missing",
     }
     assert "password" not in result.stdout.lower()
     assert "dsn" not in result.stdout.lower()
@@ -43,6 +45,7 @@ def test_config_check_reports_only_capability_presence() -> None:
         env={
             "AQ_RQDATA_USERNAME": "configured-user",
             "AQ_RQDATA_PASSWORD": "configured-password",
+            "AQ_TUSHARE_TOKEN": "configured-token",
             "AQ_POSTGRES_DSN": "postgresql+asyncpg://configured-secret",
             "AQ_CLICKHOUSE_DSN": "https://configured-secret",
         },
@@ -52,6 +55,7 @@ def test_config_check_reports_only_capability_presence() -> None:
     assert set(json.loads(result.stdout).values()) >= {"configured"}
     assert "configured-user" not in result.stdout
     assert "configured-password" not in result.stdout
+    assert "configured-token" not in result.stdout
     assert "configured-secret" not in result.stdout
 
 
@@ -92,3 +96,125 @@ def test_ingestion_requires_timezone_aware_bounds() -> None:
 
     assert result.exit_code == 2
     assert "timezone-aware" in result.stdout
+
+
+def test_tushare_check_requires_token_without_leaking_configuration() -> None:
+    result = runner.invoke(app, ["tushare-check"], env={})
+
+    assert result.exit_code == 2
+    assert "Tushare capability check failed" in result.stdout
+    assert "token" not in result.stdout.lower()
+
+
+def test_tushare_check_reports_sorted_capability_matrix_and_incomplete_exit() -> None:
+    statuses = {
+        "trade_cal": "available",
+        "daily": "available",
+        "stock_basic": "error",
+        "adj_factor": "permission_denied",
+        "suspend_d": "available",
+    }
+    with patch(
+        "autoquant.cli._tushare_capabilities",
+        new=AsyncMock(return_value=statuses),
+    ):
+        result = runner.invoke(
+            app,
+            ["tushare-check", "--instrument", "000001.XSHE", "--date", "2026-07-20"],
+            env={"AQ_TUSHARE_TOKEN": "configured-test-token"},
+        )
+
+    assert result.exit_code == 2
+    assert json.loads(result.stdout) == {
+        "capabilities": dict(sorted(statuses.items())),
+        "status": "incomplete",
+    }
+    assert "configured-test-token" not in result.stdout
+
+
+def test_tushare_check_succeeds_only_when_all_required_endpoints_are_available() -> None:
+    statuses = {
+        method: "available"
+        for method in ("daily", "adj_factor", "trade_cal", "stock_basic", "suspend_d")
+    }
+    with patch(
+        "autoquant.cli._tushare_capabilities",
+        new=AsyncMock(return_value=statuses),
+    ):
+        result = runner.invoke(
+            app,
+            ["tushare-check"],
+            env={"AQ_TUSHARE_TOKEN": "configured-test-token"},
+        )
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout)["status"] == "ok"
+
+
+def test_daily_ingestion_rejects_bad_dates_before_capability_checks() -> None:
+    result = runner.invoke(
+        app,
+        [
+            "ingest-daily",
+            "--instrument",
+            "000001.XSHE",
+            "--start",
+            "2026-07-20T00:00:00",
+            "--end",
+            "2026-07-20",
+        ],
+        env={},
+    )
+
+    assert result.exit_code == 2
+    assert "invalid date" in result.stdout
+
+
+def test_daily_ingestion_refuses_trading_enablement() -> None:
+    result = runner.invoke(
+        app,
+        [
+            "ingest-daily",
+            "--instrument",
+            "000001.XSHE",
+            "--start",
+            "2026-07-20",
+            "--end",
+            "2026-07-20",
+        ],
+        env={"AQ_ENVIRONMENT": "live", "AQ_LIVE_TRADING_ENABLED": "true"},
+    )
+
+    assert result.exit_code == 2
+    assert "ingestion does not enable trading" in result.stdout
+
+
+def test_daily_ingestion_emits_completed_result_from_async_wiring() -> None:
+    payload = {
+        "fetched_bars": 1,
+        "fetched_factors": 1,
+        "manifest_hash": "a" * 64,
+        "persisted_bars": 1,
+        "persisted_factors": 1,
+        "quality_hash": "b" * 64,
+        "status": "completed",
+    }
+    ingestion = AsyncMock(return_value=payload)
+    with patch("autoquant.cli._ingest_daily", new=ingestion):
+        result = runner.invoke(
+            app,
+            [
+                "ingest-daily",
+                "--instrument",
+                "000001.XSHE",
+                "--start",
+                "2026-07-20",
+                "--end",
+                "2026-07-20",
+            ],
+            env={},
+        )
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == payload
+    ingestion.assert_awaited_once()

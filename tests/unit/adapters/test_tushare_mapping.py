@@ -1,0 +1,315 @@
+from __future__ import annotations
+
+import hashlib
+import json
+from collections import defaultdict
+from collections.abc import Mapping
+from datetime import UTC, date, datetime
+from decimal import Decimal
+from itertools import pairwise
+
+import pytest
+
+from autoquant.adapters.tushare import (
+    TushareApiResult,
+    TushareDailySource,
+    from_tushare_code,
+    to_tushare_code,
+)
+from autoquant.data.models import SourceEvidence
+from autoquant.errors import VendorPermissionError, VendorResponseError
+
+NOW = datetime(2026, 7, 22, 8, 0, tzinfo=UTC)
+
+
+class FakeClient:
+    def __init__(self, responses: Mapping[str, list[object]]) -> None:
+        self.responses = {key: list(values) for key, values in responses.items()}
+        self.calls: list[tuple[str, dict[str, object], tuple[str, ...]]] = []
+        self.counts: defaultdict[str, int] = defaultdict(int)
+
+    async def post(
+        self,
+        api_name: str,
+        *,
+        params: Mapping[str, object],
+        fields: tuple[str, ...],
+    ) -> TushareApiResult:
+        self.calls.append((api_name, dict(params), fields))
+        if not self.responses.get(api_name):
+            raise AssertionError(f"unexpected {api_name} call")
+        value = self.responses[api_name].pop(0)
+        if isinstance(value, Exception):
+            raise value
+        if not isinstance(value, list):
+            raise AssertionError("fake rows must be a list")
+        self.counts[api_name] += 1
+        body = json.dumps(
+            {"api_name": api_name, "call": self.counts[api_name], "rows": value},
+            sort_keys=True,
+            default=str,
+        ).encode()
+        evidence = SourceEvidence(
+            source="tushare",
+            method=api_name,
+            requested_at=NOW,
+            response_body=body,
+            response_hash=hashlib.sha256(body).hexdigest(),
+        )
+        return TushareApiResult(rows=tuple(value), evidence=evidence)
+
+    async def close(self) -> None:
+        return None
+
+
+def base_responses(
+    *,
+    daily: list[dict[str, object]] | None = None,
+    factors: list[dict[str, object]] | None = None,
+    suspend: list[dict[str, object]] | None = None,
+) -> dict[str, list[object]]:
+    return {
+        "trade_cal": [
+            [
+                {"exchange": "SSE", "cal_date": "20260720", "is_open": "1"},
+                {"exchange": "SSE", "cal_date": "20260721", "is_open": "1"},
+            ]
+        ],
+        "stock_basic": [
+            [
+                {
+                    "ts_code": "000001.SZ",
+                    "list_status": "L",
+                    "list_date": "19910403",
+                    "delist_date": None,
+                }
+            ],
+            [],
+            [],
+        ],
+        "daily": [
+            daily
+            if daily is not None
+            else [
+                {
+                    "ts_code": "000001.SZ",
+                    "trade_date": "20260720",
+                    "open": 10,
+                    "high": "10.20",
+                    "low": "9.90",
+                    "close": "10.10",
+                    "pre_close": "9.95",
+                    "vol": "123.45",
+                    "amount": "100.125",
+                }
+            ]
+        ],
+        "adj_factor": [
+            factors
+            if factors is not None
+            else [
+                {
+                    "ts_code": "000001.SZ",
+                    "trade_date": "20260720",
+                    "adj_factor": "123.456",
+                }
+            ]
+        ],
+        "suspend_d": [suspend if suspend is not None else []],
+    }
+
+
+def source(client: FakeClient) -> TushareDailySource:
+    return TushareDailySource(client=client, now=lambda: NOW)
+
+
+@pytest.mark.parametrize(
+    ("canonical", "vendor"),
+    [
+        ("000001.XSHE", "000001.SZ"),
+        ("300001.XSHE", "300001.SZ"),
+        ("600000.XSHG", "600000.SH"),
+        ("688001.XSHG", "688001.SH"),
+    ],
+)
+def test_symbol_mapping_is_bidirectional(canonical: str, vendor: str) -> None:
+    assert to_tushare_code(canonical) == vendor
+    assert from_tushare_code(vendor) == canonical
+
+
+@pytest.mark.parametrize("value", ["000001", "000001.BJ", "000001.XBSE", "bad.SZ"])
+def test_symbol_mapping_rejects_unsupported_or_malformed_values(value: str) -> None:
+    with pytest.raises(ValueError, match=r"Tushare|AutoQuant"):
+        if value.endswith((".SZ", ".SH", ".BJ")):
+            from_tushare_code(value)
+        else:
+            to_tushare_code(value)
+
+
+@pytest.mark.asyncio
+async def test_fetch_maps_daily_units_factor_coverage_and_next_open_visibility() -> None:
+    client = FakeClient(base_responses())
+
+    batch = await source(client).fetch_daily_dataset(
+        ("000001.XSHE",), date(2026, 7, 20), date(2026, 7, 20)
+    )
+
+    assert [call[0] for call in client.calls] == [
+        "trade_cal",
+        "stock_basic",
+        "stock_basic",
+        "stock_basic",
+        "daily",
+        "adj_factor",
+        "suspend_d",
+    ]
+    assert [call[1]["list_status"] for call in client.calls[1:4]] == ["L", "D", "P"]
+    bar = batch.bars[0]
+    assert bar.instrument == "000001.XSHE"
+    assert bar.event_time == datetime(2026, 7, 20, 7, 0, tzinfo=UTC)
+    assert bar.available_at == datetime(2026, 7, 21, 1, 30, tzinfo=UTC)
+    assert bar.volume == 12345
+    assert bar.turnover == Decimal("100125.000")
+    assert batch.factors[0].factor == Decimal("123.456")
+    assert batch.coverage.sessions[0].session_date == date(2026, 7, 20)
+    assert batch.coverage.lifecycles[0].list_date == date(1991, 4, 3)
+    assert batch.coverage.suspensions[0].suspended is False
+    assert {value.method for value in batch.source_evidence} == {
+        "daily",
+        "adj_factor",
+        "trade_cal",
+        "stock_basic",
+        "suspend_d",
+    }
+
+
+@pytest.mark.asyncio
+async def test_fetch_sorts_descending_vendor_rows_and_tracks_suspension_interval() -> None:
+    responses = base_responses(
+        daily=[
+            {
+                "ts_code": "000001.SZ",
+                "trade_date": "20260721",
+                "open": "10",
+                "high": "10",
+                "low": "10",
+                "close": "10",
+                "pre_close": "10",
+                "vol": "1",
+                "amount": "1",
+            }
+        ],
+        factors=[
+            {"ts_code": "000001.SZ", "trade_date": "20260721", "adj_factor": "1"}
+        ],
+        suspend=[
+            {
+                "ts_code": "000001.SZ",
+                "trade_date": "20260719",
+                "suspend_type": "S",
+                "suspend_timing": None,
+            },
+            {
+                "ts_code": "000001.SZ",
+                "trade_date": "20260721",
+                "suspend_type": "R",
+                "suspend_timing": None,
+            },
+        ],
+    )
+    responses["trade_cal"] = [
+        [
+            {"exchange": "SSE", "cal_date": "20260722", "is_open": 1},
+            {"exchange": "SSE", "cal_date": "20260721", "is_open": 1},
+            {"exchange": "SSE", "cal_date": "20260720", "is_open": 1},
+        ]
+    ]
+    client = FakeClient(responses)
+
+    batch = await source(client).fetch_daily_dataset(
+        ("000001.XSHE",), date(2026, 7, 20), date(2026, 7, 21)
+    )
+
+    assert [value.session_date for value in batch.bars] == [date(2026, 7, 21)]
+    assert [(value.session_date, value.suspended) for value in batch.coverage.suspensions] == [
+        (date(2026, 7, 20), True),
+        (date(2026, 7, 21), False),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_fractional_normalized_shares_are_rejected_instead_of_rounded() -> None:
+    responses = base_responses()
+    daily = responses["daily"][0]
+    assert isinstance(daily, list)
+    daily[0]["vol"] = "0.001"
+
+    with pytest.raises(VendorResponseError, match="whole shares"):
+        await source(FakeClient(responses)).fetch_daily_dataset(
+            ("000001.XSHE",), date(2026, 7, 20), date(2026, 7, 20)
+        )
+
+
+@pytest.mark.asyncio
+async def test_rows_outside_request_are_rejected() -> None:
+    responses = base_responses()
+    daily = responses["daily"][0]
+    assert isinstance(daily, list)
+    daily[0]["ts_code"] = "600000.SH"
+
+    with pytest.raises(VendorResponseError, match="outside request"):
+        await source(FakeClient(responses)).fetch_daily_dataset(
+            ("000001.XSHE",), date(2026, 7, 20), date(2026, 7, 20)
+        )
+
+
+@pytest.mark.asyncio
+async def test_missing_next_open_session_fails_closed() -> None:
+    responses = base_responses()
+    responses["trade_cal"] = [
+        [{"exchange": "SSE", "cal_date": "20260720", "is_open": "1"}]
+    ]
+
+    with pytest.raises(VendorResponseError, match="next open session"):
+        await source(FakeClient(responses)).fetch_daily_dataset(
+            ("000001.XSHE",), date(2026, 7, 20), date(2026, 7, 20)
+        )
+
+
+@pytest.mark.asyncio
+async def test_capability_probe_reports_each_endpoint_without_short_circuiting() -> None:
+    client = FakeClient(
+        {
+            "daily": [[]],
+            "adj_factor": [VendorPermissionError("denied")],
+            "trade_cal": [[]],
+            "stock_basic": [VendorResponseError("bad response")],
+            "suspend_d": [[]],
+        }
+    )
+
+    statuses = await source(client).probe_capabilities(
+        instrument="000001.XSHE", session_date=date(2026, 7, 20)
+    )
+
+    assert statuses == {
+        "adj_factor": "permission_denied",
+        "daily": "available",
+        "stock_basic": "error",
+        "suspend_d": "available",
+        "trade_cal": "available",
+    }
+
+
+def test_date_windows_are_contiguous_and_bounded() -> None:
+    windows = TushareDailySource.date_windows(
+        date(2010, 1, 1), date(2026, 7, 20), max_days=3650
+    )
+
+    assert windows[0][0] == date(2010, 1, 1)
+    assert windows[-1][1] == date(2026, 7, 20)
+    assert all((end - start).days < 3650 for start, end in windows)
+    assert all(
+        current[1].toordinal() + 1 == following[0].toordinal()
+        for current, following in pairwise(windows)
+    )

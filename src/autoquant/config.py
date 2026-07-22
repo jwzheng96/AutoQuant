@@ -1,6 +1,7 @@
 from enum import StrEnum
+from urllib.parse import urlsplit
 
-from pydantic import BaseModel, Field, SecretStr, model_validator
+from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from autoquant.errors import MissingCapabilityError
@@ -18,6 +19,10 @@ class RqdataCredentials(BaseModel):
     password: SecretStr = Field(repr=False)
 
 
+class TushareCredentials(BaseModel):
+    token: SecretStr = Field(repr=False)
+
+
 class AppSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="AQ_", env_file=".env", extra="forbid")
 
@@ -27,8 +32,18 @@ class AppSettings(BaseSettings):
     rqdata_password: SecretStr | None = None
     rqdata_auth_url: str = "https://rqdata.ricequant.com/auth"
     rqdata_api_url: str = "https://rqdata.ricequant.com/api"
+    tushare_token: SecretStr | None = None
+    tushare_api_url: str = "https://api.tushare.pro"
     postgres_dsn: SecretStr | None = None
     clickhouse_dsn: SecretStr | None = None
+
+    @field_validator("tushare_api_url")
+    @classmethod
+    def require_tushare_https(cls, value: str) -> str:
+        parsed = urlsplit(value)
+        if parsed.scheme != "https" or not parsed.netloc:
+            raise ValueError("Tushare API URL must use HTTPS")
+        return value.rstrip("/")
 
     @model_validator(mode="after")
     def reject_unsafe_live_flag(self) -> "AppSettings":
@@ -46,3 +61,9 @@ class AppSettings(BaseSettings):
         ):
             raise MissingCapabilityError("RQData credentials are not configured")
         return RqdataCredentials(username=self.rqdata_username, password=password)
+
+    def require_tushare(self) -> TushareCredentials:
+        token = self.tushare_token
+        if token is None or not token.get_secret_value().strip():
+            raise MissingCapabilityError("Tushare token is not configured")
+        return TushareCredentials(token=token)

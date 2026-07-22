@@ -433,3 +433,13 @@ def test_repository_rejects_unsafe_table_identifier() -> None:
             source="rqdata",
             table="minute_bar_revisions; DROP TABLE minute_bar_revisions",
         )
+
+
+@pytest.mark.asyncio
+async def test_phase1_repository_accepts_forward_compatible_schema_version() -> None:
+    client = RecordingClient()
+    client.command = AsyncMock(side_effect=[1, 1, 2])
+
+    await repository(client).check_connection()
+
+    assert client.command.await_count == 3
