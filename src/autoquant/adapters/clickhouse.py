@@ -102,7 +102,11 @@ class ClickHouseMinuteBarRepository:
             raise PersistenceUnavailableError("ClickHouse connection check failed") from None
         if exists not in (1, "1", True):
             raise PersistenceUnavailableError("ClickHouse phase-1 schema is unavailable")
-        if schema_version != 1:
+        if (
+            not isinstance(schema_version, int)
+            or isinstance(schema_version, bool)
+            or schema_version < 1
+        ):
             raise PersistenceUnavailableError("ClickHouse phase-1 schema version is unavailable")
 
     async def append(self, records: tuple[MinuteBarRevision, ...]) -> int:
