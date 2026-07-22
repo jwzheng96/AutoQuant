@@ -248,13 +248,28 @@ class TradingSession:
     is_open: bool
     available_at: datetime
     response_hash: str
+    content_hash: str = field(init=False)
 
     def __post_init__(self) -> None:
         _require_nonblank(self.source, name="source")
         if not isinstance(self.is_open, bool):
             raise TypeError("is_open must be a bool")
-        object.__setattr__(self, "available_at", to_utc(self.available_at))
+        available_at = to_utc(self.available_at)
+        object.__setattr__(self, "available_at", available_at)
         _require_lowercase_sha256(self.response_hash)
+        object.__setattr__(
+            self,
+            "content_hash",
+            _canonical_hash(
+                {
+                    "available_at": _datetime_text(available_at),
+                    "is_open": self.is_open,
+                    "response_hash": self.response_hash,
+                    "session_date": self.session_date.isoformat(),
+                    "source": self.source,
+                }
+            ),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -265,14 +280,32 @@ class InstrumentLifecycle:
     delist_date: date | None
     available_at: datetime
     response_hash: str
+    content_hash: str = field(init=False)
 
     def __post_init__(self) -> None:
         _require_nonblank(self.source, name="source")
         _require_nonblank(self.instrument, name="instrument")
         if self.delist_date is not None and self.delist_date < self.list_date:
             raise ValueError("delist_date cannot precede list_date")
-        object.__setattr__(self, "available_at", to_utc(self.available_at))
+        available_at = to_utc(self.available_at)
+        object.__setattr__(self, "available_at", available_at)
         _require_lowercase_sha256(self.response_hash)
+        object.__setattr__(
+            self,
+            "content_hash",
+            _canonical_hash(
+                {
+                    "available_at": _datetime_text(available_at),
+                    "delist_date": (
+                        None if self.delist_date is None else self.delist_date.isoformat()
+                    ),
+                    "instrument": self.instrument,
+                    "list_date": self.list_date.isoformat(),
+                    "response_hash": self.response_hash,
+                    "source": self.source,
+                }
+            ),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -283,14 +316,30 @@ class DailySuspensionStatus:
     suspended: bool
     available_at: datetime
     response_hash: str
+    content_hash: str = field(init=False)
 
     def __post_init__(self) -> None:
         _require_nonblank(self.source, name="source")
         _require_nonblank(self.instrument, name="instrument")
         if not isinstance(self.suspended, bool):
             raise TypeError("suspended must be a bool")
-        object.__setattr__(self, "available_at", to_utc(self.available_at))
+        available_at = to_utc(self.available_at)
+        object.__setattr__(self, "available_at", available_at)
         _require_lowercase_sha256(self.response_hash)
+        object.__setattr__(
+            self,
+            "content_hash",
+            _canonical_hash(
+                {
+                    "available_at": _datetime_text(available_at),
+                    "instrument": self.instrument,
+                    "response_hash": self.response_hash,
+                    "session_date": self.session_date.isoformat(),
+                    "source": self.source,
+                    "suspended": self.suspended,
+                }
+            ),
+        )
 
 
 @dataclass(frozen=True, slots=True)

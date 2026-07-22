@@ -4,6 +4,7 @@ from typing import Protocol
 from autoquant.data.daily_models import (
     AdjustmentFactorRevision,
     DailyBarRevision,
+    DailyCoverageEvidence,
     DailyDatasetBatch,
 )
 
@@ -21,6 +22,8 @@ class DailyMarketRepository(Protocol):
         self, records: tuple[AdjustmentFactorRevision, ...]
     ) -> int: ...
 
+    async def append_coverage(self, coverage: DailyCoverageEvidence) -> int: ...
+
     async def query_bars_as_of(
         self,
         instruments: tuple[str, ...],
@@ -36,3 +39,11 @@ class DailyMarketRepository(Protocol):
         end: date,
         as_of: datetime,
     ) -> tuple[AdjustmentFactorRevision, ...]: ...
+
+    async def query_coverage_as_of(
+        self,
+        instruments: tuple[str, ...],
+        start: date,
+        end: date,
+        as_of: datetime,
+    ) -> DailyCoverageEvidence: ...

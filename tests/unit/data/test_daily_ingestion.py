@@ -147,6 +147,7 @@ class RecordingMarket:
         self.fail_factors = fail_factors
         self.bars: tuple[DailyBarRevision, ...] = ()
         self.factors: tuple[AdjustmentFactorRevision, ...] = ()
+        self.coverage = DailyCoverageEvidence((), (), ())
 
     async def append_bars(self, records: tuple[DailyBarRevision, ...]) -> int:
         self.calls.append("append_bars")
@@ -161,6 +162,19 @@ class RecordingMarket:
             raise PersistenceUnavailableError("factor append failed")
         self.factors = records
         return len(records)
+
+    async def append_coverage(self, coverage: DailyCoverageEvidence) -> int:
+        self.calls.append("append_coverage")
+        self.coverage = coverage
+        return sum(
+            len(values)
+            for values in (
+                coverage.sessions,
+                coverage.lifecycles,
+                coverage.suspensions,
+                coverage.price_limits,
+            )
+        )
 
     async def query_bars_as_of(
         self,
@@ -181,6 +195,16 @@ class RecordingMarket:
     ) -> tuple[AdjustmentFactorRevision, ...]:
         self.calls.append("query_factors")
         return self.factors
+
+    async def query_coverage_as_of(
+        self,
+        instruments: tuple[str, ...],
+        start: date,
+        end: date,
+        as_of: datetime,
+    ) -> DailyCoverageEvidence:
+        self.calls.append("query_coverage")
+        return self.coverage
 
 
 class RecordingControl:
@@ -277,6 +301,7 @@ async def test_complete_ingestion_finalizes_two_streams_atomically() -> None:
         "save_evidence",
         "append_bars",
         "append_factors",
+        "append_coverage",
         "begin",
         "save_report",
         "save_manifest",

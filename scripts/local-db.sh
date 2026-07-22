@@ -56,12 +56,18 @@ case "${1:-}" in
     "${compose[@]}" exec -T postgres sh -c \
       'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1' \
       < "$project_root/migrations/postgres/002_operator_console.sql"
+    "${compose[@]}" exec -T postgres sh -c \
+      'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1' \
+      < "$project_root/migrations/postgres/003_revision_checkpoints.sql"
     "${compose[@]}" exec -T clickhouse sh -c \
       'clickhouse-client --user "$CLICKHOUSE_USER" --password "$CLICKHOUSE_PASSWORD" --database "$CLICKHOUSE_DB" --multiquery' \
       < "$project_root/migrations/clickhouse/001_phase1.sql"
     "${compose[@]}" exec -T clickhouse sh -c \
       'clickhouse-client --user "$CLICKHOUSE_USER" --password "$CLICKHOUSE_PASSWORD" --database "$CLICKHOUSE_DB" --multiquery' \
       < "$project_root/migrations/clickhouse/002_tushare_daily.sql"
+    "${compose[@]}" exec -T clickhouse sh -c \
+      'clickhouse-client --user "$CLICKHOUSE_USER" --password "$CLICKHOUSE_PASSWORD" --database "$CLICKHOUSE_DB" --multiquery' \
+      < "$project_root/migrations/clickhouse/003_daily_coverage.sql"
     echo "Database migrations completed"
     ;;
   status)

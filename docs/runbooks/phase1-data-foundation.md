@@ -20,8 +20,10 @@ matrix for the Tushare daily endpoints.
 
 Apply `migrations/postgres/001_phase1.sql`,
 `migrations/postgres/002_operator_console.sql`, then
+`migrations/postgres/003_revision_checkpoints.sql`, then
 `migrations/clickhouse/001_phase1.sql` and
-`migrations/clickhouse/002_tushare_daily.sql` in order, only to explicitly authorized
+`migrations/clickhouse/002_tushare_daily.sql` and
+`migrations/clickhouse/003_daily_coverage.sql` in order, only to explicitly authorized
 phase-1 databases. Then run `autoquant db-check`.
 
 For the repository's loopback-only Docker setup, keep database bootstrap secrets in the
@@ -109,7 +111,8 @@ phase. Its default fee model is a reference assumption, not a statement of the u
 broker tariff. Before comparing performance, configure the real commission schedule and keep
 the rule, fee, execution-model, data-manifest and `as_of` versions with every result.
 
-Do not expose a Web backtest action until historical risk-warning state, listing-session age,
-trading calendar and suspension evidence are persisted as point-in-time revisions and included
-in the validated manifest. Daily OHLC also cannot reproduce limit-order queues; minute or tick
-replay and simulation evidence remain required before any execution gateway is considered.
+Trading calendars, instrument lifecycles, suspension state and exact `stk_limit` boundaries are
+persisted as point-in-time revisions and included in new validated manifests. Only manifests
+created after schema v3 contain those constraints; older manifests remain immutable and must not
+be silently upgraded. Daily OHLC still cannot reproduce limit-order queues; minute or tick replay
+and simulation evidence remain required before any execution gateway is considered.

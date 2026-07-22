@@ -12,16 +12,32 @@ from clickhouse_connect.driver.asyncclient import (  # type: ignore[import-untyp
 )
 
 from autoquant.clock import to_utc
-from autoquant.data.daily_models import AdjustmentFactorRevision, DailyBarRevision
+from autoquant.data.daily_models import (
+    AdjustmentFactorRevision,
+    DailyBarRevision,
+    DailyCoverageEvidence,
+    DailyPriceLimit,
+    DailySuspensionStatus,
+    InstrumentLifecycle,
+    TradingSession,
+)
 from autoquant.errors import PersistenceUnavailableError
 
 _BAR_TABLE = "daily_bar_revisions"
 _FACTOR_TABLE = "adjustment_factor_revisions"
+_SESSION_TABLE = "trading_session_revisions"
+_LIFECYCLE_TABLE = "instrument_lifecycle_revisions"
+_SUSPENSION_TABLE = "daily_suspension_revisions"
+_LIMIT_TABLE = "daily_price_limit_revisions"
 _TABLE_IDENTIFIER = re.compile(
     r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?\Z"
 )
 _BAR_NAMESPACE = UUID("59a27670-8f4f-4d69-a823-d3cc2406d8a5")
 _FACTOR_NAMESPACE = UUID("7fcb33c7-1470-4e80-a702-afcf797cc651")
+_SESSION_NAMESPACE = UUID("3773b145-b18c-468b-bc64-8092a0421687")
+_LIFECYCLE_NAMESPACE = UUID("39fdbe3d-9ed1-48f5-8e94-a88bf946f45d")
+_SUSPENSION_NAMESPACE = UUID("90957a0d-3a32-4b5d-92ee-b69db836572c")
+_LIMIT_NAMESPACE = UUID("07283e54-eb0f-4f98-95bd-c872e140aadb")
 
 _BAR_INSERT_COLUMNS = (
     "record_id",
@@ -57,6 +73,22 @@ _FACTOR_INSERT_COLUMNS = (
     "factor",
     "content_hash",
 )
+_SESSION_INSERT_COLUMNS = (
+    "record_id", "source", "session_date", "is_open", "available_at",
+    "response_hash", "content_hash",
+)
+_LIFECYCLE_INSERT_COLUMNS = (
+    "record_id", "source", "instrument", "list_date", "delist_date",
+    "available_at", "response_hash", "content_hash",
+)
+_SUSPENSION_INSERT_COLUMNS = (
+    "record_id", "source", "instrument", "session_date", "suspended",
+    "available_at", "response_hash", "content_hash",
+)
+_LIMIT_INSERT_COLUMNS = (
+    "record_id", "source", "instrument", "session_date", "pre_close", "up_limit",
+    "down_limit", "available_at", "response_hash", "content_hash",
+)
 
 
 class ClickHouseDailyRepository:
@@ -70,12 +102,23 @@ class ClickHouseDailyRepository:
         source: str,
         bar_table: str = _BAR_TABLE,
         factor_table: str = _FACTOR_TABLE,
+        session_table: str = _SESSION_TABLE,
+        lifecycle_table: str = _LIFECYCLE_TABLE,
+        suspension_table: str = _SUSPENSION_TABLE,
+        limit_table: str = _LIMIT_TABLE,
     ) -> None:
-        self._validate_identity(source, bar_table, factor_table)
+        self._validate_identity(
+            source, bar_table, factor_table, session_table, lifecycle_table,
+            suspension_table, limit_table,
+        )
         self._client = client
         self._source = source
         self._bar_table = bar_table
         self._factor_table = factor_table
+        self._session_table = session_table
+        self._lifecycle_table = lifecycle_table
+        self._suspension_table = suspension_table
+        self._limit_table = limit_table
 
     @classmethod
     async def connect(
@@ -85,10 +128,17 @@ class ClickHouseDailyRepository:
         source: str,
         bar_table: str = _BAR_TABLE,
         factor_table: str = _FACTOR_TABLE,
+        session_table: str = _SESSION_TABLE,
+        lifecycle_table: str = _LIFECYCLE_TABLE,
+        suspension_table: str = _SUSPENSION_TABLE,
+        limit_table: str = _LIMIT_TABLE,
     ) -> ClickHouseDailyRepository:
         if not isinstance(dsn, str) or not dsn.strip():
             raise ValueError("dsn cannot be empty")
-        cls._validate_identity(source, bar_table, factor_table)
+        cls._validate_identity(
+            source, bar_table, factor_table, session_table, lifecycle_table,
+            suspension_table, limit_table,
+        )
         try:
             client = await clickhouse_connect.get_async_client(dsn=dsn, tz_mode="aware")
         except Exception:
@@ -98,6 +148,10 @@ class ClickHouseDailyRepository:
             source=source,
             bar_table=bar_table,
             factor_table=factor_table,
+            session_table=session_table,
+            lifecycle_table=lifecycle_table,
+            suspension_table=suspension_table,
+            limit_table=limit_table,
         )
 
     @property
@@ -115,14 +169,27 @@ class ClickHouseDailyRepository:
             factor_exists = await self._client.command(
                 f"EXISTS TABLE {self._factor_table}"
             )
+            coverage_exists = [
+                await self._client.command(f"EXISTS TABLE {table}")
+                for table in (
+                    self._session_table,
+                    self._lifecycle_table,
+                    self._suspension_table,
+                    self._limit_table,
+                )
+            ]
             version = await self._client.command(
                 "SELECT max(version) FROM schema_versions WHERE component = 'clickhouse'"
             )
         except Exception:
             raise PersistenceUnavailableError("ClickHouse connection check failed") from None
-        if bar_exists not in (1, "1", True) or factor_exists not in (1, "1", True):
+        if (
+            bar_exists not in (1, "1", True)
+            or factor_exists not in (1, "1", True)
+            or any(value not in (1, "1", True) for value in coverage_exists)
+        ):
             raise PersistenceUnavailableError("ClickHouse daily schema is unavailable")
-        if version != 2:
+        if not isinstance(version, int) or version < 3:
             raise PersistenceUnavailableError("ClickHouse daily schema version is unavailable")
 
     async def append_bars(self, records: tuple[DailyBarRevision, ...]) -> int:
@@ -160,6 +227,80 @@ class ClickHouseDailyRepository:
             identities.add(record_id)
             rows.append((record_id, *self.factor_result_row(record)))
         return await self._append(self._factor_table, _FACTOR_INSERT_COLUMNS, rows)
+
+    async def append_coverage(self, coverage: DailyCoverageEvidence) -> int:
+        if not isinstance(coverage, DailyCoverageEvidence):
+            raise TypeError("coverage must be DailyCoverageEvidence")
+        session_rows = [
+            (
+                uuid5(_SESSION_NAMESPACE, value.content_hash),
+                value.source,
+                value.session_date,
+                value.is_open,
+                value.available_at,
+                value.response_hash,
+                value.content_hash,
+            )
+            for value in coverage.sessions
+        ]
+        lifecycle_rows = [
+            (
+                uuid5(_LIFECYCLE_NAMESPACE, value.content_hash),
+                value.source,
+                value.instrument,
+                value.list_date,
+                value.delist_date,
+                value.available_at,
+                value.response_hash,
+                value.content_hash,
+            )
+            for value in coverage.lifecycles
+        ]
+        suspension_rows = [
+            (
+                uuid5(_SUSPENSION_NAMESPACE, value.content_hash),
+                value.source,
+                value.instrument,
+                value.session_date,
+                value.suspended,
+                value.available_at,
+                value.response_hash,
+                value.content_hash,
+            )
+            for value in coverage.suspensions
+        ]
+        limit_rows = [
+            (
+                uuid5(_LIMIT_NAMESPACE, value.content_hash),
+                value.source,
+                value.instrument,
+                value.session_date,
+                value.pre_close,
+                value.up_limit,
+                value.down_limit,
+                value.available_at,
+                value.response_hash,
+                value.content_hash,
+            )
+            for value in coverage.price_limits
+        ]
+        for values in (
+            coverage.sessions,
+            coverage.lifecycles,
+            coverage.suspensions,
+            coverage.price_limits,
+        ):
+            if any(value.source != self._source for value in values):
+                raise ValueError("coverage source does not match repository source")
+        written = 0
+        for table, columns, rows in (
+            (self._session_table, _SESSION_INSERT_COLUMNS, session_rows),
+            (self._lifecycle_table, _LIFECYCLE_INSERT_COLUMNS, lifecycle_rows),
+            (self._suspension_table, _SUSPENSION_INSERT_COLUMNS, suspension_rows),
+            (self._limit_table, _LIMIT_INSERT_COLUMNS, limit_rows),
+        ):
+            written += await self._append(table, columns, rows)
+        return written
 
     async def query_bars_as_of(
         self,
@@ -205,6 +346,149 @@ class ClickHouseDailyRepository:
         except (IndexError, TypeError, ValueError):
             raise PersistenceUnavailableError(
                 "ClickHouse returned malformed adjustment-factor rows"
+            ) from None
+
+    async def query_coverage_as_of(
+        self,
+        instruments: tuple[str, ...],
+        start: date,
+        end: date,
+        as_of: datetime,
+    ) -> DailyCoverageEvidence:
+        self._validate_query(instruments, start, end)
+        cutoff = to_utc(as_of, name="as_of")
+        parameters: dict[str, object] = {
+            "source": self._source,
+            "instruments": list(instruments),
+            "start_date": start,
+            "end_date": end,
+            "as_of": cutoff,
+        }
+        sessions = await self._coverage_query(
+            f"""
+SELECT source, session_date,
+       tupleElement(latest, 1) AS is_open,
+       tupleElement(latest, 2) AS available_at,
+       tupleElement(latest, 3) AS response_hash,
+       tupleElement(latest, 4) AS content_hash
+FROM
+(
+    SELECT source, session_date,
+           argMax(tuple(is_open, available_at, response_hash, content_hash),
+                  tuple(available_at, record_id)) AS latest
+    FROM {self._session_table}
+    WHERE source = {{source:String}}
+      AND session_date BETWEEN {{start_date:Date}} AND {{end_date:Date}}
+      AND available_at <= {{as_of:DateTime64(6, 'UTC')}}
+    GROUP BY source, session_date
+)
+ORDER BY session_date
+""".strip(),
+            ("source", "session_date", "is_open", "available_at", "response_hash", "content_hash"),
+            parameters,
+        )
+        lifecycles = await self._coverage_query(
+            f"""
+SELECT source, instrument,
+       tupleElement(latest, 1) AS list_date,
+       tupleElement(latest, 2) AS delist_date,
+       tupleElement(latest, 3) AS available_at,
+       tupleElement(latest, 4) AS response_hash,
+       tupleElement(latest, 5) AS content_hash
+FROM
+(
+    SELECT source, instrument,
+           argMax(tuple(list_date, delist_date, available_at, response_hash, content_hash),
+                  tuple(available_at, record_id)) AS latest
+    FROM {self._lifecycle_table}
+    WHERE source = {{source:String}}
+      AND instrument IN {{instruments:Array(String)}}
+      AND available_at <= {{as_of:DateTime64(6, 'UTC')}}
+    GROUP BY source, instrument
+)
+ORDER BY instrument
+""".strip(),
+            (
+                "source",
+                "instrument",
+                "list_date",
+                "delist_date",
+                "available_at",
+                "response_hash",
+                "content_hash",
+            ),
+            parameters,
+        )
+        suspensions = await self._instrument_coverage_query(
+            self._suspension_table,
+            ("suspended", "available_at", "response_hash", "content_hash"),
+            parameters,
+        )
+        limits = await self._instrument_coverage_query(
+            self._limit_table,
+            (
+                "pre_close", "up_limit", "down_limit", "available_at",
+                "response_hash", "content_hash",
+            ),
+            parameters,
+        )
+        try:
+            return DailyCoverageEvidence(
+                sessions=tuple(self._map_session(row) for row in sessions),
+                lifecycles=tuple(self._map_lifecycle(row) for row in lifecycles),
+                suspensions=tuple(self._map_suspension(row) for row in suspensions),
+                price_limits=tuple(self._map_limit(row) for row in limits),
+            )
+        except (IndexError, TypeError, ValueError):
+            raise PersistenceUnavailableError(
+                "ClickHouse returned malformed daily coverage rows"
+            ) from None
+
+    async def _instrument_coverage_query(
+        self,
+        table: str,
+        value_columns: tuple[str, ...],
+        parameters: dict[str, object],
+    ) -> tuple[tuple[Any, ...], ...]:
+        result_columns = ("source", "instrument", "session_date", *value_columns)
+        projected = ", ".join(
+            f"tupleElement(latest, {index}) AS {column}"
+            for index, column in enumerate(value_columns, start=1)
+        )
+        sql = f"""
+SELECT source, instrument, session_date, {projected}
+FROM
+(
+    SELECT source, instrument, session_date,
+           argMax(tuple({', '.join(value_columns)}),
+                  tuple(available_at, record_id)) AS latest
+    FROM {table}
+    WHERE source = {{source:String}}
+      AND instrument IN {{instruments:Array(String)}}
+      AND session_date BETWEEN {{start_date:Date}} AND {{end_date:Date}}
+      AND available_at <= {{as_of:DateTime64(6, 'UTC')}}
+    GROUP BY source, instrument, session_date
+)
+ORDER BY instrument, session_date
+""".strip()
+        return await self._coverage_query(sql, result_columns, parameters)
+
+    async def _coverage_query(
+        self,
+        sql: str,
+        columns: tuple[str, ...],
+        parameters: dict[str, object],
+    ) -> tuple[tuple[Any, ...], ...]:
+        try:
+            result = await self._client.query(
+                query=sql, parameters=parameters, tz_mode="aware"
+            )
+            if tuple(result.column_names) != columns:
+                raise ValueError("unexpected columns")
+            return tuple(tuple(row) for row in result.result_rows)
+        except Exception:
+            raise PersistenceUnavailableError(
+                "ClickHouse daily coverage query failed"
             ) from None
 
     async def _append(
@@ -343,6 +627,64 @@ ORDER BY instrument, session_date, source
             factor=cls._decimal(row[9]),
         )
         if revision.content_hash != cls._string(row[10]):
+            raise ValueError("content hash mismatch")
+        return revision
+
+    @classmethod
+    def _map_session(cls, row: tuple[Any, ...]) -> TradingSession:
+        revision = TradingSession(
+            source=cls._string(row[0]),
+            session_date=cls._date(row[1]),
+            is_open=cls._boolean(row[2]),
+            available_at=cls._datetime(row[3]),
+            response_hash=cls._string(row[4]),
+        )
+        if revision.content_hash != cls._string(row[5]):
+            raise ValueError("content hash mismatch")
+        return revision
+
+    @classmethod
+    def _map_lifecycle(cls, row: tuple[Any, ...]) -> InstrumentLifecycle:
+        raw_delist = row[3]
+        revision = InstrumentLifecycle(
+            source=cls._string(row[0]),
+            instrument=cls._string(row[1]),
+            list_date=cls._date(row[2]),
+            delist_date=None if raw_delist is None else cls._date(raw_delist),
+            available_at=cls._datetime(row[4]),
+            response_hash=cls._string(row[5]),
+        )
+        if revision.content_hash != cls._string(row[6]):
+            raise ValueError("content hash mismatch")
+        return revision
+
+    @classmethod
+    def _map_suspension(cls, row: tuple[Any, ...]) -> DailySuspensionStatus:
+        revision = DailySuspensionStatus(
+            source=cls._string(row[0]),
+            instrument=cls._string(row[1]),
+            session_date=cls._date(row[2]),
+            suspended=cls._boolean(row[3]),
+            available_at=cls._datetime(row[4]),
+            response_hash=cls._string(row[5]),
+        )
+        if revision.content_hash != cls._string(row[6]):
+            raise ValueError("content hash mismatch")
+        return revision
+
+    @classmethod
+    def _map_limit(cls, row: tuple[Any, ...]) -> DailyPriceLimit:
+        revision = DailyPriceLimit(
+            source=cls._string(row[0]),
+            instrument=cls._string(row[1]),
+            session_date=cls._date(row[2]),
+            pre_close=cls._decimal(row[3]),
+            up_limit=cls._decimal(row[4]),
+            down_limit=cls._decimal(row[5]),
+            available_at=cls._datetime(row[6]),
+            response_hash=cls._string(row[7]),
+        )
+        if revision.content_hash != cls._string(row[8]):
             raise ValueError("content hash mismatch")
         return revision
 
@@ -485,3 +827,11 @@ ORDER BY instrument, session_date, source
         if not isinstance(value, int) or isinstance(value, bool):
             raise TypeError("expected integer")
         return value
+
+    @staticmethod
+    def _boolean(value: object) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, int) and value in (0, 1):
+            return bool(value)
+        raise TypeError("expected boolean")

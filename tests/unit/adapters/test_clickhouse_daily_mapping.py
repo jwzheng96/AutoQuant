@@ -66,7 +66,7 @@ class RecordingClient:
         self.query = AsyncMock(
             return_value=SimpleNamespace(column_names=(), result_rows=())
         )
-        self.command = AsyncMock(side_effect=[1, 1, 1, 2])
+        self.command = AsyncMock(side_effect=[1, 1, 1, 1, 1, 1, 1, 3])
 
 
 def repository(client: RecordingClient) -> ClickHouseDailyRepository:
@@ -245,13 +245,13 @@ async def test_query_factors_maps_exact_revision() -> None:
 
 
 @pytest.mark.asyncio
-async def test_connection_check_requires_both_tables_and_schema_version_two() -> None:
+async def test_connection_check_requires_all_tables_and_schema_version_three() -> None:
     client = RecordingClient()
 
     await repository(client).check_connection()
 
-    assert client.command.await_count == 4
+    assert client.command.await_count == 8
     client = RecordingClient()
-    client.command.side_effect = [1, 1, 0, 2]
+    client.command.side_effect = [1, 1, 1, 1, 1, 0, 1, 3]
     with pytest.raises(PersistenceUnavailableError, match="schema"):
         await repository(client).check_connection()

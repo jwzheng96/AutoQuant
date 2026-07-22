@@ -12,8 +12,8 @@ The repository also contains a deterministic A-share research ledger with versio
 rules, T+1 sellability, lot-size validation, conservative daily-open fills, liquidity caps,
 configurable commission/slippage, sell-side stamp duty, bilateral transfer fees, and a
 hash-chained execution journal. It is a tested domain core, not yet a Web backtest endpoint:
-historical security-status and suspension revisions must enter the point-in-time manifest
-before the UI is allowed to execute it.
+new schema-v3 manifests now include point-in-time calendars, lifecycles, suspension revisions,
+and exact daily price limits. Backtest result persistence and the audited UI job remain gated.
 
 All dependency, test, lint, type-check, migration, and Git mutation commands for this
 checkout must run on `rlocal`; see [the phase-1 runbook](docs/runbooks/phase1-data-foundation.md).

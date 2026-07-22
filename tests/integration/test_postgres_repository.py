@@ -28,7 +28,13 @@ pytestmark = [
 async def repository() -> AsyncIterator[PostgresControlRepository]:
     schema = f"autoquant_test_{uuid4().hex}"
     repo = PostgresControlRepository.connect(dsn=POSTGRES_DSN, schema=schema)
-    migration = Path("migrations/postgres/001_phase1.sql").read_text(encoding="utf-8")
+    migration = "\n".join(
+        Path(path).read_text(encoding="utf-8")
+        for path in (
+            "migrations/postgres/001_phase1.sql",
+            "migrations/postgres/003_revision_checkpoints.sql",
+        )
+    )
     try:
         await repo.initialize(migration)
         yield repo
@@ -76,7 +82,7 @@ def manifest(quality: QualityReport) -> DatasetManifest:
 
 
 @pytest.mark.asyncio
-async def test_checkpoint_is_monotonic_and_same_time_content_is_immutable(
+async def test_checkpoint_is_monotonic_and_accepts_same_event_corrections(
     repository: PostgresControlRepository,
 ) -> None:
     current = datetime(2026, 7, 20, 1, 31, tzinfo=UTC)
@@ -86,10 +92,9 @@ async def test_checkpoint_is_monotonic_and_same_time_content_is_immutable(
         await repository.advance_checkpoint(
             "rqdata", "minute", "000001.XSHE", current.replace(minute=30), "a" * 64
         )
-    with pytest.raises(ValueError, match="same timestamp"):
-        await repository.advance_checkpoint(
-            "rqdata", "minute", "000001.XSHE", current, "b" * 64
-        )
+    await repository.advance_checkpoint(
+        "rqdata", "minute", "000001.XSHE", current, "b" * 64
+    )
 
 
 @pytest.mark.asyncio

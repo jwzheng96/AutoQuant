@@ -304,8 +304,6 @@ class PostgresControlTransaction:
                 raise TypeError("event_time must be a datetime")
             if requested_time < stored_time:
                 raise ValueError("checkpoint cannot move backward")
-            if requested_time == stored_time and existing["content_hash"] != content_hash:
-                raise ValueError("checkpoint same timestamp has different content hash")
         await self._execute(
             """
             INSERT INTO ingestion_checkpoints

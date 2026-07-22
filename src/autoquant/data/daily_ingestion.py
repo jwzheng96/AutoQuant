@@ -8,6 +8,7 @@ from autoquant.clock import SHANGHAI, to_shanghai, to_utc
 from autoquant.data.daily_models import (
     AdjustmentFactorRevision,
     DailyBarRevision,
+    DailyCoverageEvidence,
     DailyDatasetBatch,
 )
 from autoquant.data.daily_ports import DailyDataSource, DailyMarketRepository
@@ -60,6 +61,7 @@ class DailyIngestionResult:
 class ValidatedDailyDataset:
     bars: tuple[DailyBarRevision, ...]
     factors: tuple[AdjustmentFactorRevision, ...]
+    coverage: DailyCoverageEvidence
 
 
 class DailyIngestionService:
@@ -100,6 +102,7 @@ class DailyIngestionService:
             persisted_factors = await self._market_repository.append_factors(
                 dataset.factors
             )
+            await self._market_repository.append_coverage(dataset.coverage)
         except PersistenceUnavailableError:
             return self._result(
                 "persistence_failed",
@@ -148,6 +151,19 @@ class DailyIngestionService:
 
         record_hashes = tuple(value.content_hash for value in dataset.bars) + tuple(
             value.content_hash for value in dataset.factors
+        ) + tuple(
+            value.content_hash
+            for values in (
+                tuple(
+                    value
+                    for value in dataset.coverage.sessions
+                    if request.start <= value.session_date <= request.end
+                ),
+                dataset.coverage.lifecycles,
+                dataset.coverage.suspensions,
+                dataset.coverage.price_limits,
+            )
+            for value in values
         )
         manifest = DatasetManifest(
             source=self._single_source(dataset),
@@ -284,14 +300,26 @@ class ValidatedDailyDatasetReader:
         factors = await self._market_repository.query_factors_as_of(
             manifest.instruments, start, end, cutoff
         )
+        coverage = await self._market_repository.query_coverage_as_of(
+            manifest.instruments, start, end, cutoff
+        )
         hashes = tuple(value.content_hash for value in bars) + tuple(
             value.content_hash for value in factors
+        ) + tuple(
+            value.content_hash
+            for values in (
+                coverage.sessions,
+                coverage.lifecycles,
+                coverage.suspensions,
+                coverage.price_limits,
+            )
+            for value in values
         )
         if hashes != manifest.record_hashes:
             raise PersistenceUnavailableError(
                 "validated daily rows do not match the manifest"
             )
-        return ValidatedDailyDataset(bars=bars, factors=factors)
+        return ValidatedDailyDataset(bars=bars, factors=factors, coverage=coverage)
 
 
 def _start_time(session_date: date) -> datetime:
