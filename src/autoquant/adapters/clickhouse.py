@@ -11,9 +11,9 @@ from clickhouse_connect.driver.asyncclient import (  # type: ignore[import-untyp
     AsyncClient,
 )
 
-from open_quant.clock import to_utc
-from open_quant.data.models import MinuteBarRevision
-from open_quant.errors import PersistenceUnavailableError
+from autoquant.clock import to_utc
+from autoquant.data.models import MinuteBarRevision
+from autoquant.errors import PersistenceUnavailableError
 
 _DEFAULT_TABLE = "minute_bar_revisions"
 _TABLE_IDENTIFIER = re.compile(

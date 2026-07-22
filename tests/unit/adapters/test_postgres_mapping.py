@@ -7,11 +7,11 @@ from pathlib import Path
 
 import pytest
 
-from open_quant.adapters.postgres import (
+from autoquant.adapters.postgres import (
     audit_event_hash,
     source_evidence_parameters,
 )
-from open_quant.data.models import SourceEvidence
+from autoquant.data.models import SourceEvidence
 
 OCCURRED_AT = datetime(2026, 7, 21, 8, 0, 0, 123456, tzinfo=UTC)
 PREVIOUS_HASH = "a" * 64

@@ -6,8 +6,8 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from open_quant.clock import to_shanghai, to_utc
-from open_quant.data.models import (
+from autoquant.clock import to_shanghai, to_utc
+from autoquant.data.models import (
     CoverageBatch,
     DatasetManifest,
     MarketCoverageEvidence,

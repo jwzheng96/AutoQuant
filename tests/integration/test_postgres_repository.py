@@ -10,16 +10,16 @@ from uuid import uuid4
 import pytest
 import pytest_asyncio
 
-from open_quant.adapters.postgres import PostgresControlRepository
-from open_quant.data.models import DatasetManifest, SourceEvidence
-from open_quant.data.quality import QualityIssue, QualityReport, QualitySeverity
+from autoquant.adapters.postgres import PostgresControlRepository
+from autoquant.data.models import DatasetManifest, SourceEvidence
+from autoquant.data.quality import QualityIssue, QualityReport, QualitySeverity
 
-POSTGRES_DSN = os.environ.get("OQ_POSTGRES_DSN", "").strip()
+POSTGRES_DSN = os.environ.get("AQ_POSTGRES_DSN", "").strip()
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.skipif(
         not POSTGRES_DSN,
-        reason="OQ_POSTGRES_DSN is not configured; PostgreSQL infrastructure unavailable",
+        reason="AQ_POSTGRES_DSN is not configured; PostgreSQL infrastructure unavailable",
     ),
 ]
 

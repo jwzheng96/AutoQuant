@@ -9,15 +9,15 @@ from typing import Annotated, NoReturn
 import typer
 from pydantic import SecretStr, ValidationError
 
-from open_quant.adapters.clickhouse import ClickHouseMinuteBarRepository
-from open_quant.adapters.postgres import PostgresControlRepository
-from open_quant.adapters.rqdata import RqdataHttpSource
-from open_quant.clock import to_utc
-from open_quant.config import AppSettings
-from open_quant.data.availability import HistoricalMinutePolicy
-from open_quant.data.ingestion import IngestionRequest, IngestionService
-from open_quant.data.quality import MinuteBarQualityGate
-from open_quant.errors import MissingCapabilityError, OpenQuantError
+from autoquant.adapters.clickhouse import ClickHouseMinuteBarRepository
+from autoquant.adapters.postgres import PostgresControlRepository
+from autoquant.adapters.rqdata import RqdataHttpSource
+from autoquant.clock import to_utc
+from autoquant.config import AppSettings
+from autoquant.data.availability import HistoricalMinutePolicy
+from autoquant.data.ingestion import IngestionRequest, IngestionService
+from autoquant.data.quality import MinuteBarQualityGate
+from autoquant.errors import AutoQuantError, MissingCapabilityError
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
 
@@ -120,7 +120,7 @@ def rqdata_check(
                 _parse_instant(end, name="end"),
             )
         )
-    except OpenQuantError:
+    except AutoQuantError:
         _fail("RQData read-only check failed")
     _emit({"records": count, "status": "ok"})
 
@@ -150,7 +150,7 @@ def db_check() -> None:
     """Verify both configured databases and phase-1 schemas."""
     try:
         asyncio.run(_database_check(_settings()))
-    except OpenQuantError:
+    except AutoQuantError:
         _fail("database check failed")
     _emit({"clickhouse": "ok", "postgres": "ok", "status": "ok"})
 
@@ -226,7 +226,7 @@ def ingest_minute(
     end_time = _parse_instant(end, name="end")
     try:
         payload = asyncio.run(_ingest(settings, tuple(instrument), start_time, end_time))
-    except (OpenQuantError, ValueError):
+    except (AutoQuantError, ValueError):
         _fail("minute ingestion failed")
     _emit(payload)
     if payload["status"] != "completed" or payload["manifest_hash"] is None:

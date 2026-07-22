@@ -11,15 +11,15 @@ import pytest
 import pytest_asyncio
 from clickhouse_connect.driver.asyncclient import AsyncClient
 
-from open_quant.adapters.clickhouse import ClickHouseMinuteBarRepository
-from open_quant.data.models import MinuteBarRevision
+from autoquant.adapters.clickhouse import ClickHouseMinuteBarRepository
+from autoquant.data.models import MinuteBarRevision
 
-CLICKHOUSE_DSN = os.environ.get("OQ_CLICKHOUSE_DSN", "").strip()
+CLICKHOUSE_DSN = os.environ.get("AQ_CLICKHOUSE_DSN", "").strip()
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.skipif(
         not CLICKHOUSE_DSN,
-        reason="OQ_CLICKHOUSE_DSN is not configured; ClickHouse infrastructure unavailable",
+        reason="AQ_CLICKHOUSE_DSN is not configured; ClickHouse infrastructure unavailable",
     ),
 ]
 

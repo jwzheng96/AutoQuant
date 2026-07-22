@@ -2,12 +2,12 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from open_quant.data.availability import (
+from autoquant.data.availability import (
     HistoricalMinutePolicy,
     LiveArrivalPolicy,
     visible_as_of,
 )
-from open_quant.data.models import MinuteBarRevision
+from autoquant.data.models import MinuteBarRevision
 
 
 def make_bar(available_at: datetime) -> MinuteBarRevision:

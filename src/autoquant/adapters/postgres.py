@@ -16,10 +16,10 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
-from open_quant.clock import to_utc
-from open_quant.data.models import DatasetManifest, SourceEvidence
-from open_quant.data.quality import QualityIssue, QualityReport, QualitySeverity
-from open_quant.errors import PersistenceUnavailableError
+from autoquant.clock import to_utc
+from autoquant.data.models import DatasetManifest, SourceEvidence
+from autoquant.data.quality import QualityIssue, QualityReport, QualitySeverity
+from autoquant.errors import PersistenceUnavailableError
 
 JsonScalar: TypeAlias = str | int | float | bool | None
 JsonValue: TypeAlias = JsonScalar | list["JsonValue"] | dict[str, "JsonValue"]
@@ -317,7 +317,7 @@ class PostgresControlTransaction:
         occurred = to_utc(occurred_at, name="occurred_at")
         normalized_payload = _json_object(payload)
         await self._execute(
-            "SELECT pg_advisory_xact_lock(hashtext('open_quant.audit_events'))",
+            "SELECT pg_advisory_xact_lock(hashtext('autoquant.audit_events'))",
             {},
         )
         last = await self._optional_one(

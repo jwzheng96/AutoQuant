@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Protocol
 
-from open_quant.data.models import (
+from autoquant.data.models import (
     CoverageBatch,
     DatasetManifest,
     MinuteBarBatch,

@@ -9,7 +9,7 @@ from decimal import Decimal
 from itertools import pairwise
 from typing import Any
 
-from open_quant.clock import to_utc
+from autoquant.clock import to_utc
 
 
 def _decimal_text(value: Decimal) -> str:

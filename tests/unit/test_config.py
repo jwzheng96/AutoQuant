@@ -1,8 +1,8 @@
 import pytest
 from pydantic import SecretStr
 
-from open_quant.config import AppSettings, RuntimeEnvironment
-from open_quant.errors import MissingCapabilityError
+from autoquant.config import AppSettings, RuntimeEnvironment
+from autoquant.errors import MissingCapabilityError
 
 
 def test_defaults_are_non_live_and_fail_closed() -> None:

@@ -3,7 +3,7 @@ from enum import StrEnum
 from pydantic import BaseModel, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from open_quant.errors import MissingCapabilityError
+from autoquant.errors import MissingCapabilityError
 
 
 class RuntimeEnvironment(StrEnum):
@@ -19,7 +19,7 @@ class RqdataCredentials(BaseModel):
 
 
 class AppSettings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="OQ_", env_file=".env", extra="forbid")
+    model_config = SettingsConfigDict(env_prefix="AQ_", env_file=".env", extra="forbid")
 
     environment: RuntimeEnvironment = RuntimeEnvironment.BACKTEST
     live_trading_enabled: bool = False

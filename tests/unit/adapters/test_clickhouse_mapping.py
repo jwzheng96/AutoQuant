@@ -10,9 +10,9 @@ import pytest
 from clickhouse_connect.driver.asyncclient import AsyncClient
 from clickhouse_connect.driver.binding import bind_query
 
-from open_quant.adapters.clickhouse import ClickHouseMinuteBarRepository
-from open_quant.data.models import MinuteBarRevision
-from open_quant.errors import PersistenceUnavailableError
+from autoquant.adapters.clickhouse import ClickHouseMinuteBarRepository
+from autoquant.data.models import MinuteBarRevision
+from autoquant.errors import PersistenceUnavailableError
 
 EVENT_TIME = datetime(2026, 7, 20, 1, 31, 2, 123456, tzinfo=UTC)
 PUBLISHED_AT = datetime(2026, 7, 20, 1, 31, 3, 234567, tzinfo=UTC)
@@ -389,7 +389,7 @@ async def test_query_rejects_content_hash_that_does_not_match_the_returned_row()
 async def test_connect_sanitizes_dsn_and_driver_details() -> None:
     dsn = "clickhouse://named-user:super-secret@example.invalid/database"
     with patch(
-        "open_quant.adapters.clickhouse.clickhouse_connect.get_async_client",
+        "autoquant.adapters.clickhouse.clickhouse_connect.get_async_client",
         new=AsyncMock(side_effect=RuntimeError(dsn)),
     ):
         with pytest.raises(PersistenceUnavailableError, match="connection failed") as caught:
@@ -413,7 +413,7 @@ async def test_connect_validates_identity_before_opening_client(
 ) -> None:
     factory = AsyncMock()
     with patch(
-        "open_quant.adapters.clickhouse.clickhouse_connect.get_async_client",
+        "autoquant.adapters.clickhouse.clickhouse_connect.get_async_client",
         new=factory,
     ):
         with pytest.raises(ValueError):

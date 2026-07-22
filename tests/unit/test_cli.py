@@ -5,7 +5,7 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
-from open_quant.cli import app
+from autoquant.cli import app
 
 runner = CliRunner()
 
@@ -41,10 +41,10 @@ def test_config_check_reports_only_capability_presence() -> None:
         app,
         ["config-check"],
         env={
-            "OQ_RQDATA_USERNAME": "configured-user",
-            "OQ_RQDATA_PASSWORD": "configured-password",
-            "OQ_POSTGRES_DSN": "postgresql+asyncpg://configured-secret",
-            "OQ_CLICKHOUSE_DSN": "https://configured-secret",
+            "AQ_RQDATA_USERNAME": "configured-user",
+            "AQ_RQDATA_PASSWORD": "configured-password",
+            "AQ_POSTGRES_DSN": "postgresql+asyncpg://configured-secret",
+            "AQ_CLICKHOUSE_DSN": "https://configured-secret",
         },
     )
 
@@ -67,7 +67,7 @@ def test_ingestion_refuses_live_environment_flag_before_capability_checks() -> N
             "--end",
             "2026-07-20T09:31:00+08:00",
         ],
-        env={"OQ_ENVIRONMENT": "live", "OQ_LIVE_TRADING_ENABLED": "true"},
+        env={"AQ_ENVIRONMENT": "live", "AQ_LIVE_TRADING_ENABLED": "true"},
     )
 
     assert result.exit_code != 0

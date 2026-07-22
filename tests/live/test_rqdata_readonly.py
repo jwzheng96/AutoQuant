@@ -3,16 +3,16 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from open_quant.adapters.rqdata import RqdataHttpSource
-from open_quant.config import AppSettings
-from open_quant.data.availability import HistoricalMinutePolicy
+from autoquant.adapters.rqdata import RqdataHttpSource
+from autoquant.config import AppSettings
+from autoquant.data.availability import HistoricalMinutePolicy
 
 
 @pytest.mark.live
 @pytest.mark.asyncio
 async def test_real_rqdata_can_read_one_known_minute() -> None:
-    if os.getenv("OQ_RUN_RQDATA_LIVE") != "1":
-        pytest.skip("set OQ_RUN_RQDATA_LIVE=1 to perform a real read-only API call")
+    if os.getenv("AQ_RUN_RQDATA_LIVE") != "1":
+        pytest.skip("set AQ_RUN_RQDATA_LIVE=1 to perform a real read-only API call")
     settings = AppSettings()
     source = RqdataHttpSource(
         credentials=settings.require_rqdata(),

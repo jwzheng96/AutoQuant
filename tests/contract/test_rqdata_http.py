@@ -7,10 +7,10 @@ import pytest
 import respx
 from pydantic import SecretStr
 
-from open_quant.adapters.rqdata import RqdataHttpSource
-from open_quant.config import RqdataCredentials
-from open_quant.data.availability import HistoricalMinutePolicy
-from open_quant.errors import VendorAuthenticationError, VendorResponseError
+from autoquant.adapters.rqdata import RqdataHttpSource
+from autoquant.config import RqdataCredentials
+from autoquant.data.availability import HistoricalMinutePolicy
+from autoquant.errors import VendorAuthenticationError, VendorResponseError
 
 AUTH_URL = "https://rqdata.example/auth"
 API_URL = "https://rqdata.example/api"

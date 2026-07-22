@@ -8,8 +8,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
 from enum import StrEnum
 
-from open_quant.clock import SHANGHAI, to_shanghai, to_utc
-from open_quant.data.models import (
+from autoquant.clock import SHANGHAI, to_shanghai, to_utc
+from autoquant.data.models import (
     MarketCoverageEvidence,
     MinuteBarRevision,
     SuspensionStatus,

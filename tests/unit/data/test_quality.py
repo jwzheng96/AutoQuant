@@ -6,13 +6,13 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from open_quant.data.models import (
+from autoquant.data.models import (
     MarketCoverageEvidence,
     MinuteBarRevision,
     SuspensionStatus,
     TradingPeriod,
 )
-from open_quant.data.quality import (
+from autoquant.data.quality import (
     MinuteBarQualityGate,
     QualityIssue,
     QualityReport,

@@ -6,11 +6,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
 
-from open_quant.clock import to_utc
-from open_quant.data.models import DatasetManifest, MinuteBarRevision, SourceEvidence
-from open_quant.data.ports import MarketDataSource, MinuteBarRepository
-from open_quant.data.quality import MinuteBarQualityGate, QualityReport
-from open_quant.errors import PersistenceUnavailableError
+from autoquant.clock import to_utc
+from autoquant.data.models import DatasetManifest, MinuteBarRevision, SourceEvidence
+from autoquant.data.ports import MarketDataSource, MinuteBarRepository
+from autoquant.data.quality import MinuteBarQualityGate, QualityReport
+from autoquant.errors import PersistenceUnavailableError
 
 
 class ControlTransaction(Protocol):

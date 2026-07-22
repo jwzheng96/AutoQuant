@@ -3,8 +3,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Protocol
 
-from open_quant.clock import to_utc
-from open_quant.data.models import MinuteBarRevision
+from autoquant.clock import to_utc
+from autoquant.data.models import MinuteBarRevision
 
 
 class AvailabilityPolicy(Protocol):

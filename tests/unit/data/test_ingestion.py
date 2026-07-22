@@ -7,12 +7,12 @@ from datetime import UTC, datetime
 
 import pytest
 
-from open_quant.data.ingestion import (
+from autoquant.data.ingestion import (
     IngestionRequest,
     IngestionService,
     ValidatedDatasetReader,
 )
-from open_quant.data.models import (
+from autoquant.data.models import (
     CoverageBatch,
     DatasetManifest,
     MarketCoverageEvidence,
@@ -22,8 +22,8 @@ from open_quant.data.models import (
     SuspensionStatus,
     TradingPeriod,
 )
-from open_quant.data.quality import MinuteBarQualityGate, QualityReport
-from open_quant.errors import PersistenceUnavailableError
+from autoquant.data.quality import MinuteBarQualityGate, QualityReport
+from autoquant.errors import PersistenceUnavailableError
 
 EVENT_TIME = datetime(2026, 7, 20, 1, 31, tzinfo=UTC)
 AS_OF = datetime(2026, 7, 21, 8, tzinfo=UTC)

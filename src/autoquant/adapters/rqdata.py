@@ -13,10 +13,10 @@ from typing import Any
 
 import httpx
 
-from open_quant.clock import SHANGHAI, to_shanghai, to_utc
-from open_quant.config import RqdataCredentials
-from open_quant.data.availability import HistoricalMinutePolicy
-from open_quant.data.models import (
+from autoquant.clock import SHANGHAI, to_shanghai, to_utc
+from autoquant.config import RqdataCredentials
+from autoquant.data.availability import HistoricalMinutePolicy
+from autoquant.data.models import (
     CoverageBatch,
     MarketCoverageEvidence,
     MinuteBarBatch,
@@ -25,7 +25,7 @@ from open_quant.data.models import (
     SuspensionStatus,
     TradingPeriod,
 )
-from open_quant.errors import VendorAuthenticationError, VendorResponseError
+from autoquant.errors import VendorAuthenticationError, VendorResponseError
 
 _SOURCE = "rqdata"
 _PRICE_FIELDS = ("open", "high", "low", "close", "volume", "total_turnover")

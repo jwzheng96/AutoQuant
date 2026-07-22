@@ -63,7 +63,9 @@ CREATE TABLE IF NOT EXISTS audit_events
     event_hash text NOT NULL UNIQUE CHECK (event_hash ~ '^[0-9a-f]{64}$')
 );
 
-CREATE OR REPLACE FUNCTION open_quant_validate_checkpoint()
+COMMENT ON TABLE audit_events IS 'AutoQuant audit log identity: autoquant.audit_events';
+
+CREATE OR REPLACE FUNCTION autoquant_validate_checkpoint()
 RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
     IF NEW.event_time < OLD.event_time THEN
@@ -85,12 +87,12 @@ BEGIN
     ) THEN
         CREATE TRIGGER ingestion_checkpoints_monotonic
         BEFORE UPDATE ON ingestion_checkpoints
-        FOR EACH ROW EXECUTE FUNCTION open_quant_validate_checkpoint();
+        FOR EACH ROW EXECUTE FUNCTION autoquant_validate_checkpoint();
     END IF;
 END;
 $create_checkpoint_trigger$;
 
-CREATE OR REPLACE FUNCTION open_quant_validate_manifest()
+CREATE OR REPLACE FUNCTION autoquant_validate_manifest()
 RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE
     quality_passed boolean;
@@ -119,12 +121,12 @@ BEGIN
         CREATE TRIGGER dataset_manifests_validate_quality
         BEFORE INSERT OR UPDATE OF quality_report_hash, production_complete, payload
         ON dataset_manifests
-        FOR EACH ROW EXECUTE FUNCTION open_quant_validate_manifest();
+        FOR EACH ROW EXECUTE FUNCTION autoquant_validate_manifest();
     END IF;
 END;
 $create_manifest_trigger$;
 
-CREATE OR REPLACE FUNCTION open_quant_reject_immutable_change()
+CREATE OR REPLACE FUNCTION autoquant_reject_immutable_change()
 RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
     RAISE EXCEPTION 'append-only record cannot be changed';
@@ -140,7 +142,7 @@ BEGIN
     ) THEN
         CREATE TRIGGER source_evidence_immutable
         BEFORE UPDATE OR DELETE ON source_evidence
-        FOR EACH ROW EXECUTE FUNCTION open_quant_reject_immutable_change();
+        FOR EACH ROW EXECUTE FUNCTION autoquant_reject_immutable_change();
     END IF;
     IF NOT EXISTS (
         SELECT 1 FROM pg_trigger
@@ -149,7 +151,7 @@ BEGIN
     ) THEN
         CREATE TRIGGER quality_reports_immutable
         BEFORE UPDATE OR DELETE ON quality_reports
-        FOR EACH ROW EXECUTE FUNCTION open_quant_reject_immutable_change();
+        FOR EACH ROW EXECUTE FUNCTION autoquant_reject_immutable_change();
     END IF;
     IF NOT EXISTS (
         SELECT 1 FROM pg_trigger
@@ -158,7 +160,7 @@ BEGIN
     ) THEN
         CREATE TRIGGER dataset_manifests_immutable
         BEFORE UPDATE OR DELETE ON dataset_manifests
-        FOR EACH ROW EXECUTE FUNCTION open_quant_reject_immutable_change();
+        FOR EACH ROW EXECUTE FUNCTION autoquant_reject_immutable_change();
     END IF;
     IF NOT EXISTS (
         SELECT 1 FROM pg_trigger
@@ -167,7 +169,7 @@ BEGIN
     ) THEN
         CREATE TRIGGER audit_events_immutable
         BEFORE UPDATE OR DELETE ON audit_events
-        FOR EACH ROW EXECUTE FUNCTION open_quant_reject_immutable_change();
+        FOR EACH ROW EXECUTE FUNCTION autoquant_reject_immutable_change();
     END IF;
 END;
 $create_immutable_triggers$;
