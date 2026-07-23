@@ -813,7 +813,18 @@ async def test_fundamentals_preserve_evidence_but_skip_all_null_metrics() -> Non
                         "grossprofit_margin": None,
                         "debt_to_assets": None,
                         "ocf_to_or": None,
-                    }
+                    },
+                    {
+                        "ts_code": "000001.SZ",
+                        "ann_date": None,
+                        "end_date": "20260630",
+                        "update_flag": "1",
+                        "roe_dt": "5",
+                        "roa": "1",
+                        "grossprofit_margin": "20",
+                        "debt_to_assets": "50",
+                        "ocf_to_or": "10",
+                    },
                 ]
             ],
         }

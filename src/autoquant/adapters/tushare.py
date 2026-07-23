@@ -1209,6 +1209,11 @@ class TushareDailySource:
         values: list[FinancialIndicatorRevision] = []
         for row in result.rows:
             instrument = from_tushare_code(self._text(row, "ts_code"))
+            if row.get("ann_date") in (None, ""):
+                # A report period is not a publication timestamp. Keep the
+                # raw source evidence, but never infer visibility for a row
+                # whose announcement date is absent.
+                continue
             announced_date = self._date(row, "ann_date")
             report_period = self._date(row, "end_date")
             if (
