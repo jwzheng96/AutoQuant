@@ -10,6 +10,8 @@ from typing import Protocol
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
+from pydantic import SecretStr
+
 from autoquant.backtest.models import InstrumentRules
 from autoquant.clock import to_utc
 from autoquant.data.daily_models import TradingSession
@@ -21,6 +23,7 @@ from autoquant.data.models import (
 )
 from autoquant.errors import (
     MarketCalendarUnavailableError,
+    PaperSchedulerLeaseLostError,
     PersistenceUnavailableError,
     QuoteStreamUnavailableError,
 )
@@ -32,6 +35,9 @@ from autoquant.execution.coordinator import (
     PaperSubmissionRequest,
 )
 from autoquant.execution.market_clock import AShareMarketClock, AShareTradingPhase
+from autoquant.execution.paper_scheduler_lease_store import (
+    PostgresPaperSchedulerLeaseRepository,
+)
 from autoquant.execution.quote_book import ContinuousQuoteBook, QuoteBookSnapshot
 from autoquant.execution.session_initializer import (
     MarketPhase,
@@ -267,6 +273,14 @@ class PaperTradingScheduler:
         self._clock = clock or AShareMarketClock()
         self._cycle_lock = asyncio.Lock()
 
+    @property
+    def account_id(self) -> str:
+        return self._account_id
+
+    @property
+    def strategy_id(self) -> str:
+        return self._strategy_id
+
     async def tick(self, *, now: datetime) -> PaperSchedulerCycle:
         instant = to_utc(now, name="scheduler tick time")
         if self._cycle_lock.locked():
@@ -464,6 +478,16 @@ class PaperTradingScheduler:
             except TimeoutError:
                 pass
 
+    async def fail_closed(self, *, now: datetime) -> KillSwitchControl:
+        """Activate the dependency kill switch for an external runtime failure."""
+
+        instant = to_utc(now, name="scheduler failure time")
+        current = await self._controls.ensure_fail_closed(
+            account_id=self._account_id,
+            now=instant,
+        )
+        return await self._activate_dependency_failure(current=current, now=instant)
+
     def _validate_pre_open_marks(self, *, marks: PreOpenMarks, now: datetime) -> None:
         if not isinstance(marks, PreOpenMarks):
             raise TypeError("pre-open mark reader must return PreOpenMarks")
@@ -519,6 +543,164 @@ class PaperTradingScheduler:
         if isinstance(error, (TypeError, ValueError)):
             return "invalid_scheduler_input"
         return "scheduler_dependency_failed"
+
+
+class LeasedPaperSchedulerRunner:
+    """Run a scheduler only while this process owns a renewable durable lease."""
+
+    def __init__(
+        self,
+        *,
+        scheduler: PaperTradingScheduler,
+        leases: PostgresPaperSchedulerLeaseRepository,
+        holder_id: str,
+        token: SecretStr,
+        ttl: timedelta = timedelta(seconds=30),
+        renewal_interval: timedelta = timedelta(seconds=10),
+    ) -> None:
+        if not timedelta(0) < renewal_interval < ttl:
+            raise ValueError("renewal_interval must be positive and smaller than ttl")
+        self._scheduler = scheduler
+        self._leases = leases
+        self._holder_id = holder_id
+        self._token = token
+        self._ttl = ttl
+        self._renewal_interval = renewal_interval
+
+    async def run(
+        self,
+        *,
+        stop: asyncio.Event,
+        poll_interval: timedelta,
+        now: Callable[[], datetime],
+        sink: CycleSink,
+    ) -> None:
+        lease = await self._leases.acquire(
+            account_id=self._scheduler.account_id,
+            strategy_id=self._scheduler.strategy_id,
+            holder_id=self._holder_id,
+            token=self._token,
+            now=now(),
+            ttl=self._ttl,
+        )
+        internal_stop = asyncio.Event()
+        if stop.is_set():
+            internal_stop.set()
+        heartbeat_failed = False
+
+        async def heartbeat() -> None:
+            nonlocal lease
+            while not internal_stop.is_set():
+                try:
+                    await asyncio.wait_for(
+                        internal_stop.wait(),
+                        timeout=self._renewal_interval.total_seconds(),
+                    )
+                except TimeoutError:
+                    lease = await self._leases.renew(
+                        account_id=self._scheduler.account_id,
+                        strategy_id=self._scheduler.strategy_id,
+                        holder_id=self._holder_id,
+                        token=self._token,
+                        now=max(to_utc(now(), name="scheduler heartbeat time"), lease.heartbeat_at),
+                        ttl=self._ttl,
+                    )
+
+        async def relay_stop() -> None:
+            await stop.wait()
+            internal_stop.set()
+
+        scheduler_task = asyncio.create_task(
+            self._scheduler.run(
+                stop=internal_stop,
+                poll_interval=poll_interval,
+                now=now,
+                sink=sink,
+            )
+        )
+        heartbeat_task = asyncio.create_task(heartbeat())
+        relay_task = asyncio.create_task(relay_stop())
+        run_error: BaseException | None = None
+        try:
+            done, _ = await asyncio.wait(
+                {scheduler_task, heartbeat_task, relay_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if heartbeat_task in done:
+                run_error = heartbeat_task.exception()
+                heartbeat_failed = run_error is not None
+                if run_error is None and not internal_stop.is_set():
+                    run_error = PaperSchedulerLeaseLostError(
+                        "paper scheduler heartbeat stopped unexpectedly"
+                    )
+                    heartbeat_failed = True
+            if scheduler_task in done and run_error is None:
+                run_error = scheduler_task.exception()
+                if run_error is None and not internal_stop.is_set():
+                    run_error = PersistenceUnavailableError(
+                        "paper scheduler stopped unexpectedly"
+                    )
+            internal_stop.set()
+            if not scheduler_task.done():
+                await scheduler_task
+        except asyncio.CancelledError:
+            internal_stop.set()
+            scheduler_task.cancel()
+            heartbeat_task.cancel()
+            relay_task.cancel()
+            await asyncio.gather(
+                scheduler_task,
+                heartbeat_task,
+                relay_task,
+                return_exceptions=True,
+            )
+            try:
+                await asyncio.shield(self._scheduler.fail_closed(now=now()))
+            except Exception:
+                pass
+            if not heartbeat_failed:
+                try:
+                    await asyncio.shield(
+                        self._leases.release(
+                            account_id=self._scheduler.account_id,
+                            strategy_id=self._scheduler.strategy_id,
+                            holder_id=self._holder_id,
+                            token=self._token,
+                            now=max(
+                                to_utc(now(), name="scheduler release time"),
+                                lease.heartbeat_at,
+                            ),
+                        )
+                    )
+                except Exception:
+                    pass
+            raise
+        finally:
+            for task in (heartbeat_task, relay_task):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(heartbeat_task, relay_task, return_exceptions=True)
+
+        if run_error is not None:
+            await self._scheduler.fail_closed(now=now())
+        if not heartbeat_failed:
+            try:
+                await self._leases.release(
+                    account_id=self._scheduler.account_id,
+                    strategy_id=self._scheduler.strategy_id,
+                    holder_id=self._holder_id,
+                    token=self._token,
+                    now=max(to_utc(now(), name="scheduler release time"), lease.heartbeat_at),
+                )
+            except Exception:
+                await self._scheduler.fail_closed(now=now())
+                raise PersistenceUnavailableError(
+                    "paper scheduler lease release failed"
+                ) from None
+        if run_error is not None:
+            raise PersistenceUnavailableError(
+                "paper scheduler lost durable runtime ownership"
+            ) from None
 
 
 def scheduler_cycle_payload(cycle: PaperSchedulerCycle) -> dict[str, object]:

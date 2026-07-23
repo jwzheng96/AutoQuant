@@ -64,5 +64,19 @@ uv run autoquant qmt-check
 - 不在 XtQuant 回调线程内执行同步查询。
 - 不用本阶段的适配器或预检结果宣称可盈利或可上实盘。
 
-下一阶段由代码增加真实只读连接、账户订阅、回调/查询汇合和断线恢复演练，完成前无需
-向系统提供任何交易授权。
+## 行情接入边界
+
+代码已提供不导入 XtQuant 的 `QmtWholeQuoteBridge`。Windows 装配层必须：
+
+1. 只对配置交易池调用 `get_full_tick`，将完整结果作为初始/重连基线；
+2. 通过 `subscribe_whole_quote` 接收 `{stock_code: tick}` 回调；
+3. 在回调时附带由 point-in-time 日历和交易时钟判定的阶段，再交给有界队列；
+4. 由单一消费线程 drain，不能在 XtData 回调线程内运行策略或同步查询；
+5. 断线、队列溢出或任一异常后停止调度，重新连接并取得完整新基线，不能靠增量自愈。
+
+XtData 的回调结构、tick 字段、证券状态和毫秒时间戳以
+[迅投官方 XtData 文档](https://dict.thinktrader.net/nativeApi/xtdata.html) 为准。
+
+schema v14 同时要求常驻模拟盘 scheduler 在启动前获取账户级进程租约并持续续租。租约
+丢失会激活停机开关；不能以重启进程绕过。下一阶段仍需在 Windows 增加真实只读连接、
+账户订阅、回调/查询汇合和断线恢复演练，完成前无需向系统提供任何交易授权。

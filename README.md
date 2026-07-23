@@ -91,8 +91,22 @@ chain. The scheduler uses point-in-time trading calendars, permits strategy inte
 morning/afternoon continuous auctions, replays daily session risk before use, and requires a
 complete fresh sequenced quote snapshot. Stream gaps, time regression, stale/missing prices,
 overlapping cycles, invalid strategy output, or evidence-sink failure activate the durable kill
-switch. The operator console verifies and displays scheduler recovery, but no external real-time
-adapter or production scheduler process is wired yet.
+switch. The operator console verifies and displays scheduler recovery.
+
+The QMT whole-quote adapter core now copies XtData callbacks into a bounded thread-safe queue,
+requires an exact `get_full_tick` baseline, translates only configured Shanghai/Shenzhen symbols,
+converts millisecond event times and numeric prices without binary-float arithmetic, and accepts
+market-open quotes only when both the trusted exchange phase and QMT `stockStatus=13` indicate
+continuous trading. Missing fields, invalid/zero/crossed prices, unexpected symbols, queue
+overflow, callback gaps, or a split batch disconnect the whole stream until a new baseline.
+It does not import XtQuant or connect to MiniQMT on this host.
+
+PostgreSQL schema v14 adds a separate single-owner paper-scheduler process lease. Advisory-lock
+acquisition, short heartbeats, hashed bearer tokens, generation fencing, expiry takeover and
+immutable acquire/release events prevent two scheduler processes from driving one account. The
+resident runner activates the durable kill switch and stops if heartbeat ownership or clean
+release cannot be proven. The remaining gate is deployment wiring to an authorized Windows QMT
+quote process plus a production pre-open mark reader; neither paper nor live trading is enabled.
 
 All dependency, test, lint, type-check, migration, and Git mutation commands for this
 checkout must run on `rlocal`; see [the phase-1 runbook](docs/runbooks/phase1-data-foundation.md).

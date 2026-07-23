@@ -105,6 +105,10 @@ class ContinuousQuoteBook:
         with self._lock:
             return self._connected and self._healthy
 
+    @property
+    def source(self) -> str:
+        return self._source
+
     def reset(
         self,
         *,

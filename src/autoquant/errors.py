@@ -42,6 +42,14 @@ class QmtSessionLeaseLostError(AutoQuantError):
     """A QMT adapter no longer owns its durable session lease."""
 
 
+class PaperSchedulerLeaseConflictError(AutoQuantError):
+    """A paper account already has another active scheduler owner."""
+
+
+class PaperSchedulerLeaseLostError(AutoQuantError):
+    """A paper scheduler no longer owns its durable process lease."""
+
+
 class MarketCalendarUnavailableError(AutoQuantError):
     """A point-in-time exchange calendar cannot prove the current market phase."""
 
