@@ -228,6 +228,13 @@ or expose any broker mutation method; live order submission and cancellation rem
 locked. The authenticated trading console displays only the latest evidence time and
 redacted record counts, current-host pass/blocked checks, and the remaining recovery gates.
 
+`autoquant promotion-check` evaluates paper-to-live evidence from one PostgreSQL
+repeatable-read, read-only snapshot. It emits policy, fact, and report hashes plus redacted
+per-gate actual/required values; a blocked result exits nonzero. The authenticated trading
+console shows the same report. This audit never enables live trading, and Windows recovery
+drills plus an explicit compliance artifact remain hard blockers. See the
+[paper promotion audit runbook](docs/runbooks/paper-promotion-audit.md).
+
 Copy `.env.example` to an untracked `.env` and supply credentials/DSNs only on the trusted
 runtime host. The Tushare Token previously shared in chat must be rotated before use; set
 only the replacement as `AQ_TUSHARE_TOKEN`. Never commit or paste it into logs or chat.

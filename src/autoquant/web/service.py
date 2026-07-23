@@ -15,6 +15,11 @@ from autoquant.errors import AutoQuantError, PersistenceUnavailableError
 from autoquant.execution.control import KillSwitchReason
 from autoquant.execution.control_store import PostgresExecutionControlRepository
 from autoquant.execution.paper_scheduler_store import PostgresPaperSchedulerRepository
+from autoquant.execution.promotion_audit import (
+    PaperPromotionAuditor,
+    PaperPromotionPolicy,
+    PostgresPaperPromotionFactRepository,
+)
 from autoquant.execution.qmt_preflight import inspect_qmt_readiness
 from autoquant.execution.qmt_readonly_store import (
     PostgresQmtReadOnlyAcceptanceRepository,
@@ -36,7 +41,9 @@ from autoquant.web.models import (
     OperatorJob,
     OperatorOverview,
     PaperExecutionStatus,
+    PaperPromotionStatus,
     PaperStrategyStatus,
+    PromotionGateView,
     QmtReadOnlyStatus,
     ResearchManifest,
     RiskControlStatus,
@@ -110,6 +117,8 @@ class ConsoleServicePort(Protocol):
 
     async def qmt_readonly_status(self) -> QmtReadOnlyStatus: ...
 
+    async def promotion_status(self) -> PaperPromotionStatus: ...
+
     async def activate_kill_switch(
         self, *, command_id: str, reason: str, requested_by: str
     ) -> PaperExecutionStatus: ...
@@ -146,6 +155,9 @@ class ConsoleService:
             PostgresQmtReadOnlyAcceptanceRepository | None
         ) = None,
         qmt_session_repository: PostgresQmtSessionLeaseRepository | None = None,
+        promotion_repository: (
+            PostgresPaperPromotionFactRepository | None
+        ) = None,
         ingestion_runner: IngestionRunner = run_daily_ingestion,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
         poll_interval: float = 1.0,
@@ -176,6 +188,7 @@ class ConsoleService:
             )
         self._qmt_acceptances = qmt_acceptance_repository
         self._qmt_sessions = qmt_session_repository
+        self._promotion = promotion_repository
         self._ingestion_runner = ingestion_runner
         self._now = now
         self._poll_interval = poll_interval
@@ -335,6 +348,8 @@ class ConsoleService:
             await self._qmt_acceptances.close()
         if self._qmt_sessions is not None:
             await self._qmt_sessions.close()
+        if self._promotion is not None:
+            await self._promotion.close()
         await self._operators.close()
         await self._control.close()
         await self._market.client.close()
@@ -734,6 +749,40 @@ class ConsoleService:
             order_count=evidence.order_count,
             trade_count=evidence.trade_count,
             remaining_gates=tuple(gates),
+        )
+
+    async def promotion_status(self) -> PaperPromotionStatus:
+        if self._promotion is None:
+            return PaperPromotionStatus(
+                status="unavailable",
+                blockers=("promotion_audit_store",),
+                gates={},
+            )
+        policy = PaperPromotionPolicy()
+        facts = await self._promotion.read(
+            account_id=self._settings.paper_account_id,
+            strategy_id=self._settings.paper_strategy_id,
+            now=self._now(),
+            lookback_days=policy.evidence_lookback_days,
+        )
+        report = PaperPromotionAuditor(policy=policy).evaluate(facts)
+        return PaperPromotionStatus(
+            status="blocked",
+            live_trading_ready=report.live_trading_ready,
+            evidence_gates_passed=report.evidence_gates_passed,
+            evaluated_at=report.evaluated_at,
+            policy_hash=report.policy_hash,
+            fact_hash=report.fact_hash,
+            report_hash=report.report_hash,
+            blockers=tuple(code.value for code in report.blockers),
+            gates={
+                gate.code.value: PromotionGateView(
+                    status="pass" if gate.passed else "blocked",
+                    actual=gate.actual,
+                    required=gate.required,
+                )
+                for gate in report.gates
+            },
         )
 
     async def activate_kill_switch(

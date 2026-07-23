@@ -31,6 +31,11 @@ from autoquant.execution.paper_unlock import (
     PaperRuntimeUnlockEvidence,
     PostgresPaperRuntimeUnlockRepository,
 )
+from autoquant.execution.promotion_audit import (
+    PaperPromotionAuditor,
+    PostgresPaperPromotionFactRepository,
+    PromotionGateCode,
+)
 from autoquant.execution.qmt_readonly import (
     build_qmt_readonly_baseline,
     normalize_qmt_asset,
@@ -101,6 +106,7 @@ async def registry_fixture() -> AsyncIterator[
             "migrations/postgres/009_execution_controls.sql",
             "migrations/postgres/011_paper_session_risk.sql",
             "migrations/postgres/012_qmt_session_leases.sql",
+            "migrations/postgres/013_paper_scheduler_events.sql",
             "migrations/postgres/014_paper_scheduler_leases.sql",
             "migrations/postgres/015_paper_strategy_registry.sql",
             "migrations/postgres/016_paper_runtime_unlock.sql",
@@ -541,3 +547,49 @@ async def test_qmt_readonly_acceptance_persists_only_redacted_fenced_evidence(
             evidence,
             now=now + timedelta(seconds=2),
         )
+
+
+@pytest.mark.asyncio
+async def test_promotion_facts_are_read_from_one_fail_closed_snapshot(
+    registry_fixture: tuple[
+        PostgresPaperStrategyRegistry,
+        ValidatedSmaRegistration,
+        AsyncEngine,
+        str,
+    ],
+) -> None:
+    registry, registration, engine, schema = registry_fixture
+    await registry.approve(registration)
+    controls = PostgresExecutionControlRepository(
+        engine=engine,
+        schema=schema,
+    )
+    state = await controls.ensure_fail_closed(
+        account_id=registration.account_id,
+        now=APPROVED_AT,
+    )
+    repository = PostgresPaperPromotionFactRepository(
+        engine=engine,
+        schema=schema,
+    )
+
+    facts = await repository.read(
+        account_id=registration.account_id,
+        strategy_id=registration.strategy_id,
+        now=APPROVED_AT + timedelta(hours=1),
+        lookback_days=180,
+    )
+    report = PaperPromotionAuditor().evaluate(facts)
+
+    assert facts.kill_switch_active is True
+    assert facts.control_state_hash == state.state_hash
+    assert (
+        facts.active_registration_hash
+        == registration.registration_hash
+    )
+    assert facts.sessions == ()
+    assert facts.scheduler_sessions == ()
+    assert facts.filled_order_count == 0
+    assert report.live_trading_ready is False
+    assert PromotionGateCode.PAPER_SESSION_COUNT in report.blockers
+    assert PromotionGateCode.QMT_ACCEPTANCE_FRESH in report.blockers

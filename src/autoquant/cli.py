@@ -26,6 +26,7 @@ from autoquant.execution.qmt_session_store import PostgresQmtSessionLeaseReposit
 from autoquant.operations import (
     approve_paper_sma_strategy,
     inspect_paper_pre_open,
+    inspect_paper_promotion,
     inspect_paper_runtime_readiness,
     revoke_paper_strategy,
     run_daily_ingestion,
@@ -354,6 +355,21 @@ def paper_runtime_check() -> None:
     except (AutoQuantError, LookupError, ValueError):
         _fail("paper runtime readiness check failed")
     _emit(payload)
+
+
+@app.command("promotion-check")
+def promotion_check() -> None:
+    """Audit paper-to-live evidence without changing controls or enabling orders."""
+
+    try:
+        payload = asyncio.run(inspect_paper_promotion(_settings()))
+    except MissingCapabilityError as error:
+        _fail(str(error))
+    except (AutoQuantError, LookupError, ValueError):
+        _fail("paper promotion audit failed closed")
+    _emit(payload)
+    if payload["status"] != "ok":
+        raise typer.Exit(code=2)
 
 
 async def _run_resident_paper(settings: AppSettings) -> None:

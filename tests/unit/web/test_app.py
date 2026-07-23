@@ -18,7 +18,9 @@ from autoquant.web.models import (
     OperatorJobState,
     OperatorOverview,
     PaperExecutionStatus,
+    PaperPromotionStatus,
     PaperStrategyStatus,
+    PromotionGateView,
     QmtReadOnlyStatus,
     ResearchManifest,
     RiskControlStatus,
@@ -211,6 +213,23 @@ class FakeConsoleService:
             remaining_gates=("windows_qmt_readonly_acceptance",),
         )
 
+    async def promotion_status(self) -> PaperPromotionStatus:
+        return PaperPromotionStatus(
+            status="blocked",
+            evaluated_at=datetime(2025, 1, 1, tzinfo=UTC),
+            policy_hash="a" * 64,
+            fact_hash="b" * 64,
+            report_hash="c" * 64,
+            blockers=("paper_session_count", "compliance_approval"),
+            gates={
+                "paper_session_count": PromotionGateView(
+                    status="blocked",
+                    actual="0",
+                    required=">=60",
+                )
+            },
+        )
+
     async def activate_kill_switch(
         self, *, command_id: str, reason: str, requested_by: str
     ) -> PaperExecutionStatus:
@@ -341,6 +360,21 @@ def test_trading_endpoint_is_explicitly_unavailable() -> None:
     assert response.json()["strategy"]["active"] is False
     assert response.json()["qmt"]["live_trading_locked"] is True
     assert response.json()["qmt"]["status"] == "blocked"
+    assert response.json()["promotion"]["live_trading_ready"] is False
+    assert "paper_session_count" in response.json()["promotion"]["blockers"]
+
+
+def test_promotion_endpoint_is_authenticated_and_never_unlocks_live() -> None:
+    app = create_app(_settings(), service=FakeConsoleService())
+
+    with TestClient(app) as client:
+        denied = client.get("/api/v1/promotion")
+        accepted = client.get("/api/v1/promotion", auth=_auth())
+
+    assert denied.status_code == 401
+    assert accepted.status_code == 200
+    assert accepted.json()["live_trading_ready"] is False
+    assert accepted.json()["report_hash"] == "c" * 64
 
 
 def test_risk_endpoint_is_authenticated_and_read_only() -> None:

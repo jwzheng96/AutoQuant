@@ -26,6 +26,9 @@ from autoquant.data.daily_ingestion import ValidatedDailyDatasetReader
 from autoquant.errors import AutoQuantError
 from autoquant.execution.control_store import PostgresExecutionControlRepository
 from autoquant.execution.paper_scheduler_store import PostgresPaperSchedulerRepository
+from autoquant.execution.promotion_audit import (
+    PostgresPaperPromotionFactRepository,
+)
 from autoquant.execution.qmt_readonly_store import (
     PostgresQmtReadOnlyAcceptanceRepository,
 )
@@ -293,6 +296,7 @@ def create_app(
         execution = await active_service(request).execution_status()
         strategy = await active_service(request).paper_strategy_status()
         qmt = await active_service(request).qmt_readonly_status()
+        promotion = await active_service(request).promotion_status()
         return {
             "status": "unavailable",
             "orders": [],
@@ -301,6 +305,7 @@ def create_app(
             "execution": execution.model_dump(mode="json"),
             "strategy": strategy.model_dump(mode="json"),
             "qmt": qmt.model_dump(mode="json"),
+            "promotion": promotion.model_dump(mode="json"),
             "reason": (
                 "Paper risk, reconciliation, simulation, and approval evidence are "
                 "audited. Live mode remains hard-locked until the remaining runtime, "
@@ -338,6 +343,14 @@ def create_app(
         _: str = Depends(authenticated_user),
     ) -> dict[str, object]:
         result = await active_service(request).qmt_readonly_status()
+        return result.model_dump(mode="json")
+
+    @app.get("/api/v1/promotion")
+    async def promotion_status(
+        request: Request,
+        _: str = Depends(authenticated_user),
+    ) -> dict[str, object]:
+        result = await active_service(request).promotion_status()
         return result.model_dump(mode="json")
 
     @app.post("/api/v1/execution/kill-switch/activate")
@@ -379,6 +392,9 @@ async def _production_service(settings: AppSettings) -> ConsoleService:
         dsn=postgres_dsn
     )
     qmt_sessions = PostgresQmtSessionLeaseRepository.connect(dsn=postgres_dsn)
+    promotions = PostgresPaperPromotionFactRepository.connect(
+        dsn=postgres_dsn
+    )
     control = PostgresControlRepository.connect(dsn=postgres_dsn)
     try:
         market = await ClickHouseDailyRepository.connect(dsn=clickhouse_dsn, source="tushare")
@@ -394,6 +410,7 @@ async def _production_service(settings: AppSettings) -> ConsoleService:
         await strategy_registry.close()
         await qmt_acceptances.close()
         await qmt_sessions.close()
+        await promotions.close()
         await control.close()
         raise
     reader = ValidatedDailyDatasetReader(
@@ -425,6 +442,7 @@ async def _production_service(settings: AppSettings) -> ConsoleService:
         strategy_registry=strategy_registry,
         qmt_acceptance_repository=qmt_acceptances,
         qmt_session_repository=qmt_sessions,
+        promotion_repository=promotions,
     )
 
 

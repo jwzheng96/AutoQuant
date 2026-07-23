@@ -478,6 +478,55 @@ class QmtReadOnlyStatus(BaseModel):
         return self
 
 
+class PromotionGateView(BaseModel):
+    status: str
+    actual: str
+    required: str
+
+    @model_validator(mode="after")
+    def require_known_status(self) -> Self:
+        if self.status not in {"pass", "blocked"}:
+            raise ValueError("promotion gate status is invalid")
+        return self
+
+
+class PaperPromotionStatus(BaseModel):
+    status: str
+    live_trading_ready: bool = False
+    evidence_gates_passed: bool = False
+    evaluated_at: datetime | None = None
+    policy_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    fact_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    report_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    blockers: tuple[str, ...]
+    gates: dict[str, PromotionGateView]
+
+    @field_validator("evaluated_at")
+    @classmethod
+    def require_aware_promotion_time(
+        cls,
+        value: datetime | None,
+    ) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("promotion audit time must be timezone-aware")
+        return value.astimezone(UTC)
+
+    @model_validator(mode="after")
+    def enforce_live_lock_and_complete_evidence(self) -> Self:
+        if self.live_trading_ready:
+            raise ValueError("operator console cannot mark live trading ready")
+        hashes = (self.policy_hash, self.fact_hash, self.report_hash)
+        if any(value is None for value in hashes) != all(
+            value is None for value in hashes
+        ):
+            raise ValueError("promotion audit hashes are incomplete")
+        if self.status not in {"blocked", "unavailable"}:
+            raise ValueError("promotion audit status is invalid")
+        return self
+
+
 class PaperStrategyStatus(BaseModel):
     status: str
     active: bool

@@ -24,7 +24,7 @@ function setText(id, value) {
 
 function statusPill(element, value) {
   element.textContent = value;
-  const style = value === "ok" || value === "completed"
+  const style = value === "ok" || value === "completed" || value === "pass"
     ? "ok"
     : value === "degraded" || value === "running" || value === "queued"
       ? "warning"
@@ -249,6 +249,40 @@ async function loadTrading() {
         : blockedQmtChecks.join(", ") || "不可用",
     );
     setText("qmt-remaining-gates", data.qmt?.remaining_gates?.join(", ") ?? "—");
+    setText(
+      "promotion-state",
+      data.promotion?.evidence_gates_passed
+        ? "证据门禁通过，真实交易仍锁定"
+        : "未达到晋级标准，真实交易锁定",
+    );
+    setText(
+      "promotion-report-hash",
+      data.promotion?.report_hash
+        ? `${data.promotion.report_hash.slice(0, 16)}…`
+        : "尚无可审计报告",
+    );
+    setText(
+      "promotion-blockers",
+      data.promotion?.blockers?.join(", ") || "—",
+    );
+    const promotionTable = document.getElementById("promotion-gates-table");
+    promotionTable.replaceChildren();
+    Object.entries(data.promotion?.gates ?? {})
+      .sort(([left], [right]) => left.localeCompare(right))
+      .forEach(([name, gate]) => {
+        const row = document.createElement("tr");
+        [name, gate.actual, gate.required].forEach(value => {
+          const cell = document.createElement("td");
+          cell.textContent = value;
+          row.append(cell);
+        });
+        const stateCell = document.createElement("td");
+        const badge = document.createElement("span");
+        statusPill(badge, gate.status);
+        stateCell.append(badge);
+        row.append(stateCell);
+        promotionTable.append(row);
+      });
   }
   catch (error) { showToast(`能力读取失败：${error.message}`); }
 }

@@ -43,6 +43,11 @@ from autoquant.execution.paper_unlock_service import (
     PaperRuntimeUnlockService,
 )
 from autoquant.execution.pre_open_marks import DailyClosePreOpenMarkReader
+from autoquant.execution.promotion_audit import (
+    PaperPromotionAuditor,
+    PaperPromotionPolicy,
+    PostgresPaperPromotionFactRepository,
+)
 from autoquant.execution.qmt_preflight import inspect_qmt_readiness
 from autoquant.execution.qmt_quote_runtime import (
     ImportedXtDataClient,
@@ -298,6 +303,50 @@ async def inspect_paper_runtime_readiness(
             await evidence.close()
         if clickhouse is not None:
             await clickhouse.client.close()
+
+
+async def inspect_paper_promotion(
+    settings: AppSettings,
+) -> dict[str, object]:
+    """Evaluate redacted paper-to-live gates without changing runtime state."""
+
+    if settings.environment is not RuntimeEnvironment.PAPER:
+        raise MissingCapabilityError("paper environment is not configured")
+    repository = PostgresPaperPromotionFactRepository.connect(
+        dsn=configured_dsn(
+            settings.postgres_dsn,
+            capability="PostgreSQL",
+        )
+    )
+    policy = PaperPromotionPolicy()
+    try:
+        facts = await repository.read(
+            account_id=settings.paper_account_id,
+            strategy_id=settings.paper_strategy_id,
+            now=datetime.now(UTC),
+            lookback_days=policy.evidence_lookback_days,
+        )
+        report = PaperPromotionAuditor(policy=policy).evaluate(facts)
+        return {
+            "blockers": [code.value for code in report.blockers],
+            "evaluated_at": report.evaluated_at.isoformat(),
+            "evidence_gates_passed": report.evidence_gates_passed,
+            "fact_hash": report.fact_hash,
+            "gates": {
+                gate.code.value: {
+                    "actual": gate.actual,
+                    "required": gate.required,
+                    "status": "pass" if gate.passed else "blocked",
+                }
+                for gate in report.gates
+            },
+            "live_trading_ready": report.live_trading_ready,
+            "policy_hash": report.policy_hash,
+            "report_hash": report.report_hash,
+            "status": "blocked",
+        }
+    finally:
+        await repository.close()
 
 
 async def unlock_paper_runtime(

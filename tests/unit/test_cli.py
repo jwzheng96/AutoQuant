@@ -144,6 +144,36 @@ def test_paper_runtime_check_reports_stable_capability_blocker() -> None:
     }
 
 
+def test_promotion_check_emits_redacted_blockers_and_exits_nonzero() -> None:
+    payload = {
+        "blockers": ["paper_session_count", "compliance_approval"],
+        "evaluated_at": "2026-07-23T08:00:00+00:00",
+        "evidence_gates_passed": False,
+        "fact_hash": "a" * 64,
+        "gates": {
+            "paper_session_count": {
+                "actual": "0",
+                "required": ">=60",
+                "status": "blocked",
+            }
+        },
+        "live_trading_ready": False,
+        "policy_hash": "b" * 64,
+        "report_hash": "c" * 64,
+        "status": "blocked",
+    }
+    with patch(
+        "autoquant.cli.inspect_paper_promotion",
+        new=AsyncMock(return_value=payload),
+    ):
+        result = runner.invoke(app, ["promotion-check"])
+
+    assert result.exit_code == 2
+    assert json.loads(result.stdout) == payload
+    assert "account_id" not in result.stdout
+    assert "token" not in result.stdout.lower()
+
+
 def test_run_paper_refuses_non_windows_before_database_or_quote_connection() -> None:
     secret = "paper-runtime-lease-secret-value-0001"
     result = runner.invoke(
