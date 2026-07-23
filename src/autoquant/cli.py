@@ -32,16 +32,20 @@ from autoquant.operations import (
     backfill_research_universe_snapshots,
     complete_qmt_recovery_drill,
     create_portfolio_validation,
+    create_research_data_campaign,
     create_research_universe_snapshot,
     create_validation_campaign,
     inspect_paper_pre_open,
     inspect_paper_promotion,
     inspect_paper_runtime_readiness,
     inspect_portfolio_validation,
+    inspect_research_data_campaign,
     inspect_validation_campaign,
+    retry_research_data_campaign_item,
     revoke_paper_strategy,
     run_daily_ingestion,
     run_qmt_readonly_acceptance,
+    run_research_data_campaign,
     run_session_reference_refresh,
     run_trading_calendar_refresh,
     start_qmt_recovery_drill,
@@ -887,6 +891,124 @@ def universe_snapshot_backfill(
         )
     except (AutoQuantError, LookupError, ValueError):
         _fail("research universe backfill failed")
+    _emit(payload)
+
+
+@app.command("research-data-campaign-create")
+def research_data_campaign_create(
+    campaign_key: Annotated[str, typer.Option("--campaign-key")],
+    start: Annotated[str, typer.Option("--start")],
+    end: Annotated[str, typer.Option("--end")],
+    requested_by: Annotated[str, typer.Option("--requested-by")],
+    index_code: Annotated[
+        str,
+        typer.Option("--index-code"),
+    ] = "399300.SZ",
+    max_attempts: Annotated[
+        int,
+        typer.Option("--max-attempts", min=1, max=10),
+    ] = 3,
+) -> None:
+    """Freeze an audited, survivorship-free daily data collection plan."""
+
+    try:
+        payload = asyncio.run(
+            create_research_data_campaign(
+                _settings(),
+                campaign_key=campaign_key,
+                index_code=index_code,
+                start_date=_parse_date(start, name="start"),
+                end_date=_parse_date(end, name="end"),
+                requested_by=requested_by,
+                max_attempts=max_attempts,
+            )
+        )
+    except (AutoQuantError, LookupError, ValueError):
+        _fail("research data campaign creation failed")
+    _emit(payload)
+
+
+@app.command("research-data-campaign-status")
+def research_data_campaign_status(
+    campaign_hash: Annotated[str, typer.Option("--campaign-hash")],
+) -> None:
+    """Inspect one research data campaign without changing its queue."""
+
+    try:
+        payload = asyncio.run(
+            inspect_research_data_campaign(
+                _settings(),
+                campaign_hash=campaign_hash,
+            )
+        )
+    except (AutoQuantError, LookupError, ValueError):
+        _fail("research data campaign status failed")
+    _emit(payload)
+    if payload["status"] == "failed":
+        raise typer.Exit(code=2)
+
+
+@app.command("research-data-campaign-run")
+def research_data_campaign_run(
+    campaign_hash: Annotated[str, typer.Option("--campaign-hash")],
+    max_items: Annotated[
+        int,
+        typer.Option("--max-items", min=1, max=25),
+    ] = 1,
+    pause_seconds: Annotated[
+        str,
+        typer.Option("--pause-seconds"),
+    ] = "1",
+) -> None:
+    """Run a bounded restart-safe data batch; live trading stays locked."""
+
+    try:
+        payload = asyncio.run(
+            run_research_data_campaign(
+                _settings(),
+                campaign_hash=campaign_hash,
+                max_items=max_items,
+                pause_seconds=_parse_decimal(
+                    pause_seconds,
+                    name="pause-seconds",
+                ),
+            )
+        )
+    except (AutoQuantError, LookupError, ValueError):
+        _fail("research data campaign execution failed")
+    _emit(payload)
+    if payload["status"] == "failed":
+        raise typer.Exit(code=2)
+
+
+@app.command("research-data-campaign-retry")
+def research_data_campaign_retry(
+    campaign_hash: Annotated[str, typer.Option("--campaign-hash")],
+    sequence: Annotated[
+        int,
+        typer.Option("--sequence", min=1),
+    ],
+    authorized_by: Annotated[str, typer.Option("--authorized-by")],
+    confirm_data_retry: Annotated[
+        bool,
+        typer.Option("--confirm-data-retry"),
+    ] = False,
+) -> None:
+    """Audit and requeue one failed data shard after its cause is corrected."""
+
+    if not confirm_data_retry:
+        _fail("research data retry confirmation is required")
+    try:
+        payload = asyncio.run(
+            retry_research_data_campaign_item(
+                _settings(),
+                campaign_hash=campaign_hash,
+                sequence=sequence,
+                authorized_by=authorized_by,
+            )
+        )
+    except (AutoQuantError, LookupError, ValueError):
+        _fail("research data campaign retry failed")
     _emit(payload)
 
 

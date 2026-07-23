@@ -16,6 +16,7 @@ from autoquant.adapters.tushare import (
     from_tushare_code,
     to_tushare_code,
 )
+from autoquant.data.daily_quality import DailyQualityGate
 from autoquant.data.models import SourceEvidence
 from autoquant.errors import VendorPermissionError, VendorResponseError
 
@@ -198,6 +199,28 @@ async def test_fetch_maps_daily_units_factor_coverage_and_next_open_visibility()
 
 
 @pytest.mark.asyncio
+async def test_repeated_daily_interval_reuses_calendar_and_lifecycle_evidence() -> None:
+    responses = base_responses()
+    for method in ("daily", "adj_factor", "suspend_d", "stk_limit"):
+        responses[method].append(responses[method][0])
+    client = FakeClient(responses)
+    adapter = source(client)
+
+    await adapter.fetch_daily_dataset(
+        ("000001.XSHE",), date(2026, 7, 20), date(2026, 7, 20)
+    )
+    await adapter.fetch_daily_dataset(
+        ("000001.XSHE",), date(2026, 7, 20), date(2026, 7, 20)
+    )
+
+    methods = [call[0] for call in client.calls]
+    assert methods.count("trade_cal") == 1
+    assert methods.count("stock_basic") == 3
+    assert methods.count("daily") == 2
+    assert methods.count("adj_factor") == 2
+
+
+@pytest.mark.asyncio
 async def test_historical_limit_uses_matching_daily_pre_close_when_vendor_omits_it() -> None:
     responses = base_responses()
     limit_rows = responses["stk_limit"][0]
@@ -211,6 +234,50 @@ async def test_historical_limit_uses_matching_daily_pre_close_when_vendor_omits_
     )
 
     assert batch.coverage.price_limits[0].pre_close == Decimal("9.95")
+
+
+@pytest.mark.asyncio
+async def test_historical_limit_ignores_null_pre_close_without_a_daily_bar() -> None:
+    responses = base_responses(
+        daily=[],
+        factors=[
+            {
+                "ts_code": "000001.SZ",
+                "trade_date": "20260720",
+                "adj_factor": "123.456",
+            }
+        ],
+        suspend=[
+            {
+                "ts_code": "000001.SZ",
+                "trade_date": "20260720",
+                "suspend_type": "S",
+                "suspend_timing": None,
+            }
+        ],
+    )
+    limit_rows = responses["stk_limit"][0]
+    assert isinstance(limit_rows, list)
+    limit_rows[0]["pre_close"] = None
+
+    batch = await source(FakeClient(responses)).fetch_daily_dataset(
+        ("000001.XSHE",),
+        date(2026, 7, 20),
+        date(2026, 7, 20),
+    )
+
+    assert batch.bars == ()
+    assert batch.factors == ()
+    assert batch.coverage.suspensions[0].suspended is True
+    assert batch.coverage.price_limits == ()
+    report = DailyQualityGate().evaluate(
+        batch=batch,
+        requested_instruments=("000001.XSHE",),
+        start=date(2026, 7, 20),
+        end=date(2026, 7, 20),
+        as_of=NOW,
+    )
+    assert report.passed is True
 
 
 @pytest.mark.asyncio

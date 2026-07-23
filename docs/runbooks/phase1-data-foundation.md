@@ -41,6 +41,7 @@ Apply `migrations/postgres/001_phase1.sql`,
 `migrations/postgres/021_validation_campaigns.sql`, then
 `migrations/postgres/022_portfolio_validation.sql`, then
 `migrations/postgres/023_research_universes.sql`, then
+`migrations/postgres/024_research_data_campaigns.sql`, then
 `migrations/clickhouse/001_phase1.sql` and
 `migrations/clickhouse/002_tushare_daily.sql` and
 `migrations/clickhouse/003_daily_coverage.sql` in order, only to explicitly authorized
@@ -346,6 +347,55 @@ become research cutoffs. Schema v23 uniquely identifies a snapshot by policy
 hash and reference date; reruns return existing artifacts instead of creating
 new samples with later request timestamps. Completed months remain committed
 if a later month fails, and a rerun safely resumes them.
+
+After every month in the intended research interval exists, freeze the
+survivorship-free daily collection plan:
+
+```bash
+uv run autoquant research-data-campaign-create \
+  --campaign-key csi300-survivorship-free-202001-202607-v1 \
+  --index-code 399300.SZ \
+  --start 2020-01-01 \
+  --end 2026-07-22 \
+  --requested-by operator
+```
+
+Schema v24 requires exactly one snapshot for every calendar month and one
+universe policy across the interval. It takes the union of all historical
+members, freezes one hash-addressed shard per instrument, and keeps live
+trading locked. Run only a bounded, sequential batch at a time:
+
+```bash
+uv run autoquant research-data-campaign-run \
+  --campaign-hash <campaign-hash> \
+  --max-items 10 \
+  --pause-seconds 1
+
+uv run autoquant research-data-campaign-status \
+  --campaign-hash <campaign-hash>
+```
+
+Each shard covers the same full interval, passes the existing daily quality
+gate, and points to a production-complete immutable dataset manifest. Calendar
+and lifecycle responses are cached only inside one worker invocation; market,
+factor, suspension and price-limit calls remain per instrument. The queue uses
+row locks, persists attempts, and recovers interrupted `running` items on the
+next invocation. Vendor response-shape and quality failures stop in a terminal
+state instead of being skipped. After the cause is understood and corrected,
+explicitly audit a bounded retry:
+
+```bash
+uv run autoquant research-data-campaign-retry \
+  --campaign-hash <campaign-hash> \
+  --sequence <failed-sequence> \
+  --authorized-by operator \
+  --confirm-data-retry
+```
+
+When every shard is complete, the worker creates one immutable aggregate
+research manifest binding the policy hash, all monthly snapshot hashes and all
+daily shard manifest hashes. Until that aggregate exists, expanded portfolio
+validation must not start.
 
 ```bash
 uv run autoquant approve-paper-sma \

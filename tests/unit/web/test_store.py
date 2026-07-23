@@ -235,3 +235,17 @@ def test_research_universe_migration_binds_source_evidence() -> None:
     assert "research_universe_snapshots_identity_idx" in migration
     assert "research_universe_snapshots_immutable" in migration
     assert "VALUES ('postgres', 23)" in migration
+
+
+def test_research_data_campaign_migration_is_restart_safe_and_versioned() -> None:
+    migration = Path(
+        "migrations/postgres/024_research_data_campaigns.sql"
+    ).read_text(encoding="utf-8")
+
+    assert "CREATE TABLE IF NOT EXISTS research_data_campaigns" in migration
+    assert "CREATE TABLE IF NOT EXISTS research_data_campaign_items" in migration
+    assert "CREATE TABLE IF NOT EXISTS research_dataset_manifests" in migration
+    assert "REFERENCES dataset_manifests(manifest_hash)" in migration
+    assert "research_data_campaign_items_queue_idx" in migration
+    assert "research_dataset_manifests_immutable" in migration
+    assert "VALUES ('postgres', 24)" in migration

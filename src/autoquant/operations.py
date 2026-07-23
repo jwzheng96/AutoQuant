@@ -26,6 +26,7 @@ from autoquant.data.daily_ingestion import (
     ValidatedDailyDatasetReader,
 )
 from autoquant.data.daily_quality import DailyQualityGate
+from autoquant.data.research_data_campaign import ResearchDataCampaignSpec
 from autoquant.data.session_reference import SessionReferenceRefreshService
 from autoquant.data.universe import (
     PointInTimeUniversePolicy,
@@ -35,6 +36,10 @@ from autoquant.errors import (
     AutoQuantError,
     MissingCapabilityError,
     PersistenceUnavailableError,
+    VendorAuthenticationError,
+    VendorPermissionError,
+    VendorRateLimitError,
+    VendorResponseError,
 )
 from autoquant.execution.control import KillSwitchReason
 from autoquant.execution.control_store import PostgresExecutionControlRepository
@@ -105,6 +110,10 @@ from autoquant.web.models import (
 )
 from autoquant.web.portfolio_validation_store import (
     PostgresPortfolioValidationRepository,
+)
+from autoquant.web.research_data_store import (
+    PostgresResearchDataCampaignRepository,
+    ResearchDataCampaignStatus,
 )
 from autoquant.web.strategy_promotion import (
     PaperPortfolioComponentApproval,
@@ -439,6 +448,370 @@ def _month_intervals(
             "one universe backfill cannot exceed 12 months"
         )
     return tuple(values)
+
+
+async def create_research_data_campaign(
+    settings: AppSettings,
+    *,
+    campaign_key: str,
+    index_code: str,
+    start_date: date,
+    end_date: date,
+    requested_by: str,
+    max_attempts: int = 3,
+) -> dict[str, object]:
+    """Freeze one survivorship-free daily data plan without enabling trading."""
+
+    if settings.live_trading_enabled:
+        raise MissingCapabilityError(
+            "research data campaign creation requires live trading locked"
+        )
+    if start_date > end_date:
+        raise ValueError("research data campaign start cannot follow end")
+    safe_cutoff = to_shanghai(datetime.now(UTC)).date() - timedelta(days=1)
+    if end_date > safe_cutoff:
+        raise ValueError("research data campaign cannot include future data")
+    dsn = configured_dsn(settings.postgres_dsn, capability="PostgreSQL")
+    universes = PostgresResearchUniverseRepository.connect(dsn=dsn)
+    campaigns = PostgresResearchDataCampaignRepository.connect(dsn=dsn)
+    control = PostgresControlRepository.connect(dsn=dsn)
+    try:
+        views = tuple(
+            sorted(
+                (
+                    value
+                    for value in await universes.list(limit=200)
+                    if value.index_code == index_code
+                    and start_date <= value.reference_date <= end_date
+                ),
+                key=lambda value: value.reference_date,
+            )
+        )
+        _require_monthly_snapshot_coverage(
+            views=views,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        policy_hashes = {value.policy_hash for value in views}
+        if len(policy_hashes) != 1:
+            raise ValueError(
+                "research data campaign requires one universe policy"
+            )
+        details = tuple(
+            [await universes.detail(value.snapshot_hash) for value in views]
+        )
+        instruments = tuple(
+            sorted(
+                {
+                    member.instrument
+                    for detail in details
+                    for member in detail.members
+                }
+            )
+        )
+        spec = ResearchDataCampaignSpec(
+            campaign_key=campaign_key,
+            policy_hash=next(iter(policy_hashes)),
+            snapshot_hashes=tuple(value.snapshot_hash for value in views),
+            instruments=instruments,
+            start_date=start_date,
+            end_date=end_date,
+            requested_by=requested_by,
+            max_attempts=max_attempts,
+        )
+        status = await campaigns.create(spec, created_at=datetime.now(UTC))
+        await control.append_audit_event(
+            "research.data.campaign.created",
+            datetime.now(UTC),
+            {
+                "campaign_hash": spec.campaign_hash,
+                "end_date": end_date.isoformat(),
+                "index_code": index_code,
+                "instrument_count": len(spec.instruments),
+                "requested_by": requested_by,
+                "snapshot_count": len(spec.snapshot_hashes),
+                "start_date": start_date.isoformat(),
+            },
+        )
+        return _research_data_campaign_payload(status)
+    finally:
+        await control.close()
+        await campaigns.close()
+        await universes.close()
+
+
+async def inspect_research_data_campaign(
+    settings: AppSettings,
+    *,
+    campaign_hash: str,
+) -> dict[str, object]:
+    repository = PostgresResearchDataCampaignRepository.connect(
+        dsn=configured_dsn(
+            settings.postgres_dsn,
+            capability="PostgreSQL",
+        )
+    )
+    try:
+        return _research_data_campaign_payload(
+            await repository.status(campaign_hash=campaign_hash)
+        )
+    finally:
+        await repository.close()
+
+
+async def run_research_data_campaign(
+    settings: AppSettings,
+    *,
+    campaign_hash: str,
+    max_items: int,
+    pause_seconds: Decimal,
+) -> dict[str, object]:
+    """Run a bounded number of persistent shards and finalize when complete."""
+
+    if settings.live_trading_enabled:
+        raise MissingCapabilityError(
+            "research data campaign execution requires live trading locked"
+        )
+    if max_items < 1 or max_items > 25:
+        raise ValueError("max_items must be between 1 and 25")
+    if pause_seconds < 0 or pause_seconds > Decimal("60"):
+        raise ValueError("pause_seconds must be between 0 and 60")
+    dsn = configured_dsn(settings.postgres_dsn, capability="PostgreSQL")
+    repository = PostgresResearchDataCampaignRepository.connect(dsn=dsn)
+    control = PostgresControlRepository.connect(dsn=dsn)
+    source: TushareDailySource | None = None
+    market: ClickHouseDailyRepository | None = None
+    processed = 0
+    completed = 0
+    requeued = 0
+    failed = 0
+    recovered = 0
+    try:
+        status = await repository.status(campaign_hash=campaign_hash)
+        recovered = await repository.recover_running(
+            campaign_hash=status.spec.campaign_hash
+        )
+        source = tushare_source(settings)
+        market = await ClickHouseDailyRepository.connect(
+            dsn=configured_dsn(
+                settings.clickhouse_dsn,
+                capability="ClickHouse",
+            ),
+            source="tushare",
+        )
+        service = DailyIngestionService(
+            source=source,
+            quality_gate=DailyQualityGate(),
+            market_repository=market,
+            control_repository=control,
+            now=lambda: datetime.now(UTC),
+        )
+        for _ in range(max_items):
+            item = await repository.claim_next(
+                campaign_hash=status.spec.campaign_hash,
+                now=datetime.now(UTC),
+            )
+            if item is None:
+                break
+            processed += 1
+            try:
+                result = await service.run(
+                    DailyIngestionRequest(
+                        instruments=(item.instrument,),
+                        start=status.spec.start_date,
+                        end=status.spec.end_date,
+                        as_of=None,
+                        production_complete_requested=True,
+                    )
+                )
+                if result.status == "completed" and result.manifest_hash is not None:
+                    await repository.complete_item(
+                        campaign_hash=status.spec.campaign_hash,
+                        sequence=item.sequence,
+                        manifest_hash=result.manifest_hash,
+                        now=datetime.now(UTC),
+                    )
+                    completed += 1
+                else:
+                    outcome = await repository.fail_item(
+                        campaign_hash=status.spec.campaign_hash,
+                        sequence=item.sequence,
+                        error_code=f"daily_{result.status}"[:80],
+                        retryable=result.status == "persistence_failed",
+                        now=datetime.now(UTC),
+                    )
+                    if outcome.state == "queued":
+                        requeued += 1
+                    else:
+                        failed += 1
+            except AutoQuantError as error:
+                outcome = await repository.fail_item(
+                    campaign_hash=status.spec.campaign_hash,
+                    sequence=item.sequence,
+                    error_code=_research_data_error_code(error),
+                    retryable=isinstance(
+                        error,
+                        (VendorRateLimitError, PersistenceUnavailableError),
+                    ),
+                    now=datetime.now(UTC),
+                )
+                if outcome.state == "queued":
+                    requeued += 1
+                else:
+                    failed += 1
+            if pause_seconds and processed < max_items:
+                await asyncio.sleep(float(pause_seconds))
+        final_status = await repository.status(
+            campaign_hash=status.spec.campaign_hash
+        )
+        manifest = await repository.finalize(
+            campaign_hash=status.spec.campaign_hash,
+            created_at=datetime.now(UTC),
+        )
+        final_status = await repository.status(
+            campaign_hash=status.spec.campaign_hash
+        )
+        await control.append_audit_event(
+            "research.data.campaign.batch.completed",
+            datetime.now(UTC),
+            {
+                "campaign_hash": status.spec.campaign_hash,
+                "completed_count": completed,
+                "failed_count": failed,
+                "manifest_hash": (
+                    None if manifest is None else manifest.manifest_hash
+                ),
+                "processed_count": processed,
+                "recovered_count": recovered,
+                "requeued_count": requeued,
+            },
+        )
+        payload = _research_data_campaign_payload(final_status)
+        payload["batch"] = {
+            "completed_count": completed,
+            "failed_count": failed,
+            "processed_count": processed,
+            "recovered_count": recovered,
+            "requeued_count": requeued,
+        }
+        return payload
+    finally:
+        if market is not None:
+            await market.client.close()
+        if source is not None:
+            await source.close()
+        await control.close()
+        await repository.close()
+
+
+async def retry_research_data_campaign_item(
+    settings: AppSettings,
+    *,
+    campaign_hash: str,
+    sequence: int,
+    authorized_by: str,
+) -> dict[str, object]:
+    """Explicitly requeue one terminal data shard while live stays locked."""
+
+    if settings.live_trading_enabled:
+        raise MissingCapabilityError(
+            "research data retry requires live trading locked"
+        )
+    if (
+        not authorized_by.strip()
+        or authorized_by != authorized_by.strip()
+        or len(authorized_by) > 128
+    ):
+        raise ValueError("authorized_by must contain 1-128 trimmed characters")
+    dsn = configured_dsn(settings.postgres_dsn, capability="PostgreSQL")
+    repository = PostgresResearchDataCampaignRepository.connect(dsn=dsn)
+    control = PostgresControlRepository.connect(dsn=dsn)
+    try:
+        item = await repository.retry_failed_item(
+            campaign_hash=campaign_hash,
+            sequence=sequence,
+        )
+        await control.append_audit_event(
+            "research.data.campaign.item.retry_authorized",
+            datetime.now(UTC),
+            {
+                "authorized_by": authorized_by,
+                "campaign_hash": campaign_hash,
+                "instrument": item.instrument,
+                "sequence": sequence,
+            },
+        )
+        status = await repository.status(campaign_hash=campaign_hash)
+        return _research_data_campaign_payload(status)
+    finally:
+        await control.close()
+        await repository.close()
+
+
+def _research_data_error_code(error: AutoQuantError) -> str:
+    if isinstance(error, VendorRateLimitError):
+        return "vendor_rate_limited"
+    if isinstance(error, VendorAuthenticationError):
+        return "vendor_authentication_failed"
+    if isinstance(error, VendorPermissionError):
+        return "vendor_permission_denied"
+    if isinstance(error, VendorResponseError):
+        return "vendor_response_invalid"
+    if isinstance(error, PersistenceUnavailableError):
+        return "persistence_unavailable"
+    return "autoquant_error"
+
+
+def _require_monthly_snapshot_coverage(
+    *,
+    views: tuple[ResearchUniverseSnapshotView, ...],
+    start_date: date,
+    end_date: date,
+) -> None:
+    expected_values: list[tuple[int, int]] = []
+    current = start_date.replace(day=1)
+    final = end_date.replace(day=1)
+    while current <= final:
+        expected_values.append((current.year, current.month))
+        current = (
+            date(current.year + 1, 1, 1)
+            if current.month == 12
+            else date(current.year, current.month + 1, 1)
+        )
+    expected = tuple(expected_values)
+    actual = tuple(
+        (value.reference_date.year, value.reference_date.month)
+        for value in views
+    )
+    if actual != expected or len(set(actual)) != len(actual):
+        raise ValueError(
+            "research data campaign requires one snapshot for every month"
+        )
+
+
+def _research_data_campaign_payload(
+    status: ResearchDataCampaignStatus,
+) -> dict[str, object]:
+    counts = {
+        state: sum(value.state == state for value in status.items)
+        for state in ("queued", "running", "completed", "failed")
+    }
+    return {
+        "campaign_hash": status.spec.campaign_hash,
+        "campaign_key": status.spec.campaign_key,
+        "created_at": status.created_at.isoformat(),
+        "end_date": status.spec.end_date.isoformat(),
+        "instrument_count": len(status.spec.instruments),
+        "item_counts": counts,
+        "live_trading_locked": True,
+        "manifest_hash": (
+            None if status.manifest is None else status.manifest.manifest_hash
+        ),
+        "policy_hash": status.spec.policy_hash,
+        "snapshot_count": len(status.spec.snapshot_hashes),
+        "start_date": status.spec.start_date.isoformat(),
+        "status": status.status,
+    }
 
 
 async def create_validation_campaign(

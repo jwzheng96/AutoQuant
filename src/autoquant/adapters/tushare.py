@@ -363,6 +363,8 @@ class TushareDailySource:
         self._client = client
         self._now = now
         self._availability = availability or NextTradingSessionOpenPolicy()
+        self._calendar_cache: dict[tuple[date, date], TushareApiResult] = {}
+        self._stock_basic_cache: dict[str, TushareApiResult] = {}
 
     async def close(self) -> None:
         await self._client.close()
@@ -421,25 +423,13 @@ class TushareDailySource:
         vendor_codes = tuple(to_tushare_code(value) for value in instruments)
         evidence: list[SourceEvidence] = []
 
-        calendar_result = await self._client.post(
-            "trade_cal",
-            params={
-                "exchange": "SSE",
-                "start_date": self._date_text(start),
-                "end_date": self._date_text(end + timedelta(days=14)),
-            },
-            fields=self.CALENDAR_FIELDS,
-        )
+        calendar_result = await self._daily_calendar(start, end)
         evidence.append(calendar_result.evidence)
         sessions = self._map_sessions(calendar_result)
 
         lifecycles: list[InstrumentLifecycle] = []
         for status in ("L", "D", "P"):
-            result = await self._client.post(
-                "stock_basic",
-                params={"exchange": "", "list_status": status},
-                fields=self.BASIC_FIELDS,
-            )
+            result = await self._stock_basic(status)
             evidence.append(result.evidence)
             lifecycles.extend(
                 self._map_lifecycles(result, requested=frozenset(instruments))
@@ -535,6 +525,15 @@ class TushareDailySource:
                 )
             )
 
+        bar_keys = {
+            (value.instrument, value.session_date)
+            for value in bars
+        }
+        factors = [
+            value
+            for value in factors
+            if (value.instrument, value.session_date) in bar_keys
+        ]
         return DailyDatasetBatch(
             bars=tuple(sorted(bars, key=lambda value: (value.instrument, value.session_date))),
             factors=tuple(
@@ -560,6 +559,39 @@ class TushareDailySource:
             ),
             source_evidence=tuple(evidence),
         )
+
+    async def _daily_calendar(
+        self,
+        start: date,
+        end: date,
+    ) -> TushareApiResult:
+        key = (start, end)
+        cached = self._calendar_cache.get(key)
+        if cached is not None:
+            return cached
+        result = await self._client.post(
+            "trade_cal",
+            params={
+                "exchange": "SSE",
+                "start_date": self._date_text(start),
+                "end_date": self._date_text(end + timedelta(days=14)),
+            },
+            fields=self.CALENDAR_FIELDS,
+        )
+        self._calendar_cache[key] = result
+        return result
+
+    async def _stock_basic(self, status: str) -> TushareApiResult:
+        cached = self._stock_basic_cache.get(status)
+        if cached is not None:
+            return cached
+        result = await self._client.post(
+            "stock_basic",
+            params={"exchange": "", "list_status": status},
+            fields=self.BASIC_FIELDS,
+        )
+        self._stock_basic_cache[status] = result
+        return result
 
     async def fetch_trading_calendar(
         self,
@@ -1018,9 +1050,10 @@ class TushareDailySource:
             raw_pre_close = row.get("pre_close")
             if raw_pre_close is None:
                 if bar_pre_close is None:
-                    raise VendorResponseError(
-                        "Tushare stk_limit returned invalid pre_close"
-                    )
+                    # Tushare can emit a limit row with no pre-close on a
+                    # fully suspended session. The suspension evidence, not
+                    # this unusable row, proves that no bar is expected.
+                    continue
                 pre_close = bar_pre_close
             else:
                 pre_close = cls._decimal(row, "pre_close")
