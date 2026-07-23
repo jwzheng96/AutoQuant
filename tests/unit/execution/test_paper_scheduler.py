@@ -25,7 +25,13 @@ from autoquant.execution.paper_scheduler import (
     PreOpenMarks,
 )
 from autoquant.execution.quote_book import ContinuousQuoteBook
-from autoquant.risk.models import MarketQuote, ProposedOrder, RiskPolicy
+from autoquant.execution.strategy_account import PaperStrategyAccountEvidence
+from autoquant.risk.models import (
+    MarketQuote,
+    ProposedOrder,
+    RiskAccountState,
+    RiskPolicy,
+)
 
 INSTRUMENT = "600000.XSHG"
 SESSION_DATE = date(2026, 7, 23)
@@ -97,6 +103,29 @@ def _intent(*, submitted_at: datetime = OPEN, order_id: str = "paper-signal-0001
     )
 
 
+def _account_evidence(*, as_of: datetime = OPEN) -> PaperStrategyAccountEvidence:
+    return PaperStrategyAccountEvidence(
+        session_date=as_of.astimezone().date(),
+        account=RiskAccountState(
+            account_id="paper-main",
+            as_of=as_of,
+            cash=Decimal("1000000"),
+            equity=Decimal("1000000"),
+            day_start_equity=Decimal("1000000"),
+            peak_equity=Decimal("1000000"),
+            gross_exposure=Decimal("0"),
+            daily_turnover=Decimal("0"),
+            open_order_count=0,
+            reconciled=True,
+            kill_switch=False,
+        ),
+        reconciliation_hash="a" * 64,
+        internal_snapshot_hash="b" * 64,
+        broker_snapshot_hash="c" * 64,
+        session_state_hash="d" * 64,
+    )
+
+
 def _evaluation(
     *,
     intents: tuple[PaperStrategyIntent, ...] = (),
@@ -114,6 +143,9 @@ def _evaluation(
             max_age=timedelta(seconds=3),
             require_market_open=True,
         ).evidence_hash,
+        account_evidence_hash=_account_evidence(
+            as_of=evaluated_at
+        ).evidence_hash,
         signal_evidence_hash=signal_evidence_hash,
         intents=intents,
     )
@@ -130,6 +162,7 @@ def _scheduler(
     controls: MagicMock | None = None,
     sessions: MagicMock | None = None,
     intent_source: MagicMock | None = None,
+    strategy_account_reader: AsyncMock | None = None,
 ) -> tuple[PaperTradingScheduler, dict[str, object]]:
     active_controls = MagicMock() if controls is None else controls
     if controls is None:
@@ -148,6 +181,11 @@ def _scheduler(
     active_intents = MagicMock() if intent_source is None else intent_source
     if intent_source is None:
         active_intents.evaluate = AsyncMock(return_value=_evaluation())
+    active_account_reader = (
+        AsyncMock(return_value=_account_evidence())
+        if strategy_account_reader is None
+        else strategy_account_reader
+    )
     active_calendar = (
         AsyncMock(return_value=_session()) if calendar_reader is None else calendar_reader
     )
@@ -165,6 +203,7 @@ def _scheduler(
         controls=active_controls,
         sessions=active_sessions,
         intent_source=active_intents,
+        strategy_account_reader=active_account_reader,
     )
     return scheduler, {
         "calendar": active_calendar,
@@ -174,6 +213,7 @@ def _scheduler(
         "controls": active_controls,
         "sessions": active_sessions,
         "intents": active_intents,
+        "account_reader": active_account_reader,
         "quotes": book,
     }
 
@@ -250,6 +290,7 @@ async def test_continuous_cycle_with_no_intents_commits_quote_evidence() -> None
     assert cycle.strategy_evaluation_hash is not None
     assert len(cycle.cycle_hash) == 64
     dependencies["sessions"].replay.assert_awaited_once()  # type: ignore[union-attr]
+    dependencies["account_reader"].assert_awaited_once()  # type: ignore[union-attr]
 
 
 def test_strategy_evaluation_hash_commits_no_intent_signal_evidence() -> None:

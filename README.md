@@ -125,6 +125,24 @@ uses another strategy ID, changes the evaluation timestamp or fails to bind the 
 is rejected and activates the dependency kill switch. This makes “why nothing traded” auditable,
 not only filled orders.
 
+Before invoking that strategy, the scheduler now obtains `PaperStrategyAccountEvidence` under
+the account coordination lock. It independently replays internal and simulated-broker histories,
+projects both accounts at the exact quote marks, persists a reconciliation report, derives
+session turnover from fill facts and advances the hash-chained daily risk state. The strategy
+receives cash, positions, sellable quantities, open orders, exposure and daily risk metrics only
+after reconciliation and a stable inactive control fence. Its evaluation hash must bind this
+account-evidence hash as well as the quote hash. A mismatch activates
+`reconciliation_failed`; a control change or missing session state fails closed.
+
+The production intent adapter accepts an audited target portfolio rather than arbitrary broker
+commands. A target signal fixes strategy/version/time, exact universe, per-instrument target
+quantity, A-share rule version, risk-policy hash and upstream evidence hash. The adapter compares
+it with the reconciled account, rounds buys to the configured minimum/step, caps every order,
+never sells more than the currently sellable quantity, and generates deterministic client order
+IDs from the signal and account evidence. An unreachable T+1 sell target remains an auditable
+no-intent evaluation instead of creating an invalid order. Target providers from unregistered
+strategies, times or universes are rejected before pre-trade risk.
+
 The production pre-open reader now selects the latest single open session whose Tushare daily
 close is point-in-time visible for every configured instrument. It rejects mixed-session marks,
 future visibility, post-cutoff ingestion, stale valuation dates, unknown availability policies

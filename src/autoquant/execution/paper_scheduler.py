@@ -46,12 +46,17 @@ from autoquant.execution.session_initializer import (
     PaperSessionInitializer,
 )
 from autoquant.execution.session_risk_store import PostgresPaperSessionRiskRepository
+from autoquant.execution.strategy_account import PaperStrategyAccountEvidence
 from autoquant.risk.models import MarketQuote, ProposedOrder, RiskPolicy
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 CalendarReader = Callable[[date, datetime], Awaitable[TradingSession]]
 PreOpenMarkReader = Callable[[date, tuple[str, ...], datetime], Awaitable["PreOpenMarks"]]
 CycleSink = Callable[["PaperSchedulerCycle"], Awaitable[None]]
+StrategyAccountReader = Callable[
+    [str, date, dict[str, Decimal], datetime],
+    Awaitable[PaperStrategyAccountEvidence],
+]
 
 
 class PaperIntentSource(Protocol):
@@ -121,6 +126,7 @@ class PaperStrategyContext:
     now: datetime
     phase: AShareTradingPhase
     quote_snapshot: QuoteBookSnapshot
+    account_evidence: PaperStrategyAccountEvidence
 
     def __post_init__(self) -> None:
         _require_nonblank(self.account_id, name="account_id")
@@ -131,6 +137,13 @@ class PaperStrategyContext:
             raise ValueError("strategy context requires a continuous-auction phase")
         if self.quote_snapshot.as_of != now:
             raise ValueError("strategy context and quote snapshot times must match")
+        if (
+            not isinstance(self.account_evidence, PaperStrategyAccountEvidence)
+            or self.account_evidence.session_date != self.session_date
+            or self.account_evidence.account.account_id != self.account_id
+            or self.account_evidence.account.as_of != now
+        ):
+            raise ValueError("strategy context account evidence does not match")
         object.__setattr__(self, "now", now)
 
     @property
@@ -144,6 +157,7 @@ class PaperStrategyEvaluation:
     strategy_version: str
     evaluated_at: datetime
     quote_evidence_hash: str
+    account_evidence_hash: str
     signal_evidence_hash: str
     intents: tuple[PaperStrategyIntent, ...]
     evaluation_hash: str = field(init=False)
@@ -158,6 +172,10 @@ class PaperStrategyEvaluation:
         _require_lowercase_sha256(
             self.quote_evidence_hash,
             name="strategy quote_evidence_hash",
+        )
+        _require_lowercase_sha256(
+            self.account_evidence_hash,
+            name="strategy account_evidence_hash",
         )
         _require_lowercase_sha256(
             self.signal_evidence_hash,
@@ -177,6 +195,7 @@ class PaperStrategyEvaluation:
                     "intent_hashes": [
                         _strategy_intent_hash(intent) for intent in intents
                     ],
+                    "account_evidence_hash": self.account_evidence_hash,
                     "quote_evidence_hash": self.quote_evidence_hash,
                     "signal_evidence_hash": self.signal_evidence_hash,
                     "strategy_id": self.strategy_id,
@@ -305,6 +324,7 @@ class PaperTradingScheduler:
         controls: PostgresExecutionControlRepository,
         sessions: PostgresPaperSessionRiskRepository,
         intent_source: PaperIntentSource,
+        strategy_account_reader: StrategyAccountReader,
         max_quote_age: timedelta = timedelta(seconds=3),
         max_pre_open_mark_age: timedelta = timedelta(days=4),
         max_orders_per_cycle: int = 20,
@@ -336,6 +356,7 @@ class PaperTradingScheduler:
         self._controls = controls
         self._sessions = sessions
         self._intent_source = intent_source
+        self._strategy_account_reader = strategy_account_reader
         self._max_quote_age = max_quote_age
         self._max_pre_open_mark_age = max_pre_open_mark_age
         self._max_orders_per_cycle = max_orders_per_cycle
@@ -448,12 +469,19 @@ class PaperTradingScheduler:
                 max_age=self._max_quote_age,
                 require_market_open=True,
             )
+            account_evidence = await self._strategy_account_reader(
+                self._account_id,
+                session_date,
+                snapshot.marks,
+                now,
+            )
             context = PaperStrategyContext(
                 account_id=self._account_id,
                 session_date=session_date,
                 now=now,
                 phase=phase,
                 quote_snapshot=snapshot,
+                account_evidence=account_evidence,
             )
             evaluation = await self._intent_source.evaluate(context)
             self._validate_evaluation(evaluation=evaluation, context=context)
@@ -604,6 +632,8 @@ class PaperTradingScheduler:
             raise ValueError("strategy evaluation timestamp must equal the scheduler tick")
         if evaluation.quote_evidence_hash != context.quote_snapshot.evidence_hash:
             raise ValueError("strategy evaluation does not bind the quote snapshot")
+        if evaluation.account_evidence_hash != context.account_evidence.evidence_hash:
+            raise ValueError("strategy evaluation does not bind the account evidence")
 
     async def _activate_dependency_failure(
         self, *, current: KillSwitchControl, now: datetime

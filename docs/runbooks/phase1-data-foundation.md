@@ -166,9 +166,21 @@ and the resident scheduler runtime remain separate release gates.
 
 The intent source boundary returns a `PaperStrategyEvaluation`, not a bare order tuple. It must
 commit the registered strategy ID and implementation version, scheduler timestamp, exact quote
-evidence hash, signal/state evidence hash and canonical intent fingerprints. The scheduler saves
-the resulting evaluation hash for both `no_intents` and `completed` cycles. Missing or mismatched
-strategy evidence is an invalid scheduler input and fails closed.
+evidence hash, reconciled account-evidence hash, signal/state evidence hash and canonical intent
+fingerprints. Before evaluation, the strategy-account reader independently rebuilds internal and
+simulated-broker accounts from their fact streams, persists the reconciliation, derives turnover
+from fill deltas and advances the session-risk chain under the account coordination lock. The
+scheduler saves the resulting evaluation hash for both `no_intents` and `completed` cycles.
+Missing or mismatched strategy/account evidence is an invalid scheduler input and fails closed.
+
+Production strategy adapters must emit an exact `TargetPortfolioSignal`; they cannot submit raw
+broker instructions. The target signal commits strategy/version/time, universe, target
+quantities, rule versions, risk-policy hashes and upstream model evidence. The intent adapter
+derives only the bounded difference from the reconciled account, enforces board-lot and
+sellability constraints, and creates deterministic idempotency keys. T+1-unavailable quantities
+remain pending target evidence with no order. The coordinator still independently reruns
+reconciliation and the complete pre-trade risk engine before the simulated broker can accept an
+intent.
 
 Before assembling a resident paper runtime, set `AQ_ENVIRONMENT=paper`, leave
 `AQ_LIVE_TRADING_ENABLED=false`, keep the account kill switch active, and run the read-only
