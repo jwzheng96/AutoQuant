@@ -77,6 +77,25 @@ uv run autoquant qmt-check
 XtData 的回调结构、tick 字段、证券状态和毫秒时间戳以
 [迅投官方 XtData 文档](https://dict.thinktrader.net/nativeApi/xtdata.html) 为准。
 
+## 交易侧只读基线
+
+Windows 装配层建立连接并成功订阅账户后，按以下顺序构建只读基线：
+
+1. 记录 `QmtCallbackBuffer.cursor`；
+2. 依次查询 `query_stock_asset`、`query_stock_positions`、`query_stock_orders` 和
+   `query_stock_trades`；
+3. 再次记录 cursor；前后不同则丢弃全部查询结果并重试，不能拼接新旧快照；
+4. 只复制官方字段到普通标量字典；股票 `order_type` 通过当前 XtQuant 包的
+   `xtconstant.STOCK_BUY` / `STOCK_SELL` 映射为 `buy` / `sell`；
+5. 使用配置中的真实账号验证每条返回记录，但把内部 `AQ_PAPER_ACCOUNT_ID` 作为 logical
+   account 交给持久化对账；
+6. 四项任一返回 `None`、状态未知、资产不平、委托/成交不收敛，都激活停机开关；
+7. 基线后持续 drain 回调。只有账户状态 `0` 心跳不触发重查，其余回调先撤销快照信任，
+   再完整执行上述四项查询。
+
+官方文档明确说明资产查询 `None` 是失败；委托、成交和持仓的 `None` 可能同时代表失败或
+空集合。因此 AutoQuant 对四类 `None` 均不作“空账户”推断。
+
 schema v14 同时要求常驻模拟盘 scheduler 在启动前获取账户级进程租约并持续续租。租约
 丢失会激活停机开关；不能以重启进程绕过。下一阶段仍需在 Windows 增加真实只读连接、
 账户订阅、回调/查询汇合和断线恢复演练，完成前无需向系统提供任何交易授权。

@@ -101,6 +101,16 @@ continuous trading. Missing fields, invalid/zero/crossed prices, unexpected symb
 overflow, callback gaps, or a split batch disconnect the whole stream until a new baseline.
 It does not import XtQuant or connect to MiniQMT on this host.
 
+The QMT trading-side read-only core now normalizes the documented `XtAsset`, `XtPosition`,
+`XtOrder` and `XtTrade` fields through a Windows shim contract. A trusted baseline requires all
+four queries to complete without an intervening callback; `None` never means an empty account.
+Assets must balance to positions, order cumulative fills must converge with unique daily trades,
+and unknown/inconsistent order states fail closed. A bounded callback cursor permits only normal
+account-status heartbeats to retain the baseline; disconnects, gaps, order/trade changes or error
+callbacks require a complete re-query. The resulting broker snapshot uses a logical account alias
+and can feed the existing persisted reconciliation supervisor without storing the broker account
+identifier in its snapshot payload. This remains unverified against a real Windows MiniQMT.
+
 PostgreSQL schema v14 adds a separate single-owner paper-scheduler process lease. Advisory-lock
 acquisition, short heartbeats, hashed bearer tokens, generation fencing, expiry takeover and
 immutable acquire/release events prevent two scheduler processes from driving one account. The

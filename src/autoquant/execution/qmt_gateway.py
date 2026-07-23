@@ -5,13 +5,13 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from math import isfinite
-from queue import Empty, SimpleQueue
+from queue import Empty, Full, Queue
 from threading import Lock
 from types import MappingProxyType
 from typing import TypeAlias
 
 from autoquant.clock import to_utc
-from autoquant.errors import LiveTradingLockedError
+from autoquant.errors import BrokerStateUnknownError, LiveTradingLockedError
 
 QmtCallbackValue: TypeAlias = str | int | float | bool | None
 
@@ -56,11 +56,24 @@ class QmtCallbackBuffer:
     state transitions belong to the coordinator consuming the queue, never to callbacks.
     """
 
-    def __init__(self) -> None:
-        self._queue: SimpleQueue[QmtCallbackEnvelope] = SimpleQueue()
+    def __init__(self, *, capacity: int = 10_000) -> None:
+        if not isinstance(capacity, int) or isinstance(capacity, bool) or capacity < 1:
+            raise ValueError("capacity must be a positive integer")
+        self._queue: Queue[QmtCallbackEnvelope] = Queue(maxsize=capacity)
         self._sequence_lock = Lock()
         self._drain_lock = Lock()
         self._sequence = 0
+        self._overflowed = False
+
+    @property
+    def cursor(self) -> int:
+        with self._sequence_lock:
+            return self._sequence
+
+    @property
+    def healthy(self) -> bool:
+        with self._sequence_lock:
+            return not self._overflowed
 
     def capture(
         self,
@@ -76,6 +89,10 @@ class QmtCallbackBuffer:
             datetime.now(UTC) if received_at is None else to_utc(received_at, name="received_at")
         )
         with self._sequence_lock:
+            if self._overflowed:
+                raise BrokerStateUnknownError(
+                    "QMT callback buffer overflow requires a full reconnect"
+                )
             self._sequence += 1
             envelope = QmtCallbackEnvelope(
                 local_sequence=self._sequence,
@@ -83,12 +100,22 @@ class QmtCallbackBuffer:
                 received_at=captured_at,
                 payload=frozen_payload,
             )
-            self._queue.put(envelope)
+            try:
+                self._queue.put_nowait(envelope)
+            except Full:
+                self._overflowed = True
+                raise BrokerStateUnknownError(
+                    "QMT callback buffer overflow requires a full reconnect"
+                ) from None
         return envelope
 
     def drain(self, *, limit: int = 1000) -> tuple[QmtCallbackEnvelope, ...]:
         if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
             raise ValueError("limit must be a positive integer")
+        if not self.healthy:
+            raise BrokerStateUnknownError(
+                "QMT callback buffer overflow requires a full reconnect"
+            )
         if not self._drain_lock.acquire(blocking=False):
             raise RuntimeError("QMT callback buffer already has an active consumer")
         try:

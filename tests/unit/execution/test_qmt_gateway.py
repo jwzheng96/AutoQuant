@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from autoquant.errors import LiveTradingLockedError
+from autoquant.errors import BrokerStateUnknownError, LiveTradingLockedError
 from autoquant.execution.qmt_gateway import (
     LockedQmtGateway,
     QmtCallbackBuffer,
@@ -24,6 +24,7 @@ def test_callback_capture_preserves_local_order_and_copies_payload() -> None:
     drained = buffer.drain()
 
     assert [event.local_sequence for event in drained] == [1, 2]
+    assert buffer.cursor == 2
     assert first.payload["order_id"] == "first"
     assert second.local_sequence == 2
     assert buffer.drain() == ()
@@ -32,6 +33,19 @@ def test_callback_capture_preserves_local_order_and_copies_payload() -> None:
 def test_callback_buffer_validates_limit() -> None:
     with pytest.raises(ValueError, match="positive"):
         QmtCallbackBuffer().drain(limit=0)
+
+
+def test_callback_buffer_overflow_requires_a_full_reconnect() -> None:
+    buffer = QmtCallbackBuffer(capacity=1)
+    buffer.capture(QmtCallbackKind.ORDER, {"order_id": 1})
+
+    with pytest.raises(BrokerStateUnknownError, match="overflow"):
+        buffer.capture(QmtCallbackKind.ORDER, {"order_id": 2})
+    with pytest.raises(BrokerStateUnknownError, match="overflow"):
+        buffer.capture(QmtCallbackKind.ORDER, {"order_id": 3})
+    assert not buffer.healthy
+    with pytest.raises(BrokerStateUnknownError, match="overflow"):
+        buffer.drain()
 
 
 @pytest.mark.parametrize(
