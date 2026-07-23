@@ -136,17 +136,13 @@ class DynamicMomentumOrderPolicy:
                 market,
             ):
                 continue
-            quantity = _baseline_quantity(
-                initial_cash=self._spec.initial_cash,
+            quantity = _target_quantity(
+                market,
                 allocation=(
                     self._spec.gross_allocation
                     / self._parameters.selection_count
                 ),
-                reference_price=market.bar.pre_close,
-                slippage_bps=self._spec.slippage_bps,
-                buy_minimum=market.rules.buy_minimum,
-                buy_step=market.rules.buy_step,
-                maximum=market.rules.max_order_quantity,
+                spec=self._spec,
             )
             quantity = min(
                 quantity,
@@ -280,6 +276,224 @@ class DynamicMomentumOrderPolicy:
             quantity=quantity,
             session_date=session_date,
         )
+
+
+class DynamicEqualWeightBenchmarkPolicy:
+    """Quarterly point-in-time equal-weight benchmark with executable orders."""
+
+    def __init__(
+        self,
+        *,
+        sessions: tuple[DynamicMarketSession, ...],
+        start_index: int,
+        trade_session_count: int,
+        spec: DynamicPortfolioResearchSpec,
+        rebalance_sessions: int = 63,
+    ) -> None:
+        sessions = tuple(sessions)
+        if (
+            not sessions
+            or start_index < 0
+            or trade_session_count < 1
+            or start_index + trade_session_count > len(sessions)
+            or rebalance_sessions < 20
+            or rebalance_sessions > 126
+        ):
+            raise ValueError("dynamic benchmark interval is invalid")
+        self._sessions = sessions
+        self._start_index = start_index
+        self._trade_session_count = trade_session_count
+        self._spec = spec
+        self._rebalance_sessions = rebalance_sessions
+        self._order_sequence = 0
+
+    def __call__(
+        self,
+        trade_index: int,
+        markets: tuple[MarketState, ...],
+        previous: AccountSnapshot | None,
+    ) -> tuple[OrderIntent, ...]:
+        if not 0 <= trade_index < self._trade_session_count:
+            raise ValueError("dynamic benchmark trade index is invalid")
+        session = self._sessions[self._start_index + trade_index]
+        if not markets or markets != session.markets:
+            raise ValueError(
+                "dynamic benchmark markets do not match the frozen panel"
+            )
+        holdings = (
+            {}
+            if previous is None
+            else {
+                value.instrument: value.total_quantity
+                for value in previous.positions
+            }
+        )
+        current = {
+            value.bar.instrument: value for value in session.markets
+        }
+        if trade_index == self._trade_session_count - 1:
+            return self._orders_to_targets(
+                holdings=holdings,
+                targets={},
+                markets=current,
+                session_date=session.session_date,
+                suffix="forced-exit",
+            )
+        if trade_index % self._rebalance_sessions:
+            return ()
+        targets = _equal_weight_targets(
+            members=session.active_members,
+            markets=current,
+            spec=self._spec,
+        )
+        return self._orders_to_targets(
+            holdings=holdings,
+            targets=targets,
+            markets=current,
+            session_date=session.session_date,
+            suffix="rebalance",
+        )
+
+    def _orders_to_targets(
+        self,
+        *,
+        holdings: dict[str, int],
+        targets: dict[str, int],
+        markets: dict[str, MarketState],
+        session_date: date,
+        suffix: str,
+    ) -> tuple[OrderIntent, ...]:
+        orders: list[OrderIntent] = []
+        for side in (OrderSide.SELL, OrderSide.BUY):
+            instruments = sorted(set(holdings) | set(targets))
+            for instrument in instruments:
+                held = holdings.get(instrument, 0)
+                target = targets.get(instrument, 0)
+                delta = target - held
+                if (
+                    (side is OrderSide.SELL and delta >= 0)
+                    or (side is OrderSide.BUY and delta <= 0)
+                ):
+                    continue
+                market = markets.get(instrument)
+                if market is None or not _can_trade(side, market):
+                    continue
+                step = (
+                    market.rules.sell_step
+                    if side is OrderSide.SELL
+                    else market.rules.buy_step
+                )
+                desired = abs(delta) // step * step
+                quantity = min(
+                    desired,
+                    _liquidity_quantity(
+                        market,
+                        participation=(
+                            self._spec.maximum_volume_participation
+                        ),
+                        step=step,
+                    ),
+                )
+                if (
+                    quantity <= 0
+                    or (
+                        side is OrderSide.BUY
+                        and quantity < market.rules.buy_minimum
+                    )
+                ):
+                    continue
+                self._order_sequence += 1
+                orders.append(
+                    _order(
+                        order_id=(
+                            f"dynamic-benchmark-"
+                            f"{self._order_sequence:06d}-{suffix}"
+                        ),
+                        instrument=instrument,
+                        side=side,
+                        quantity=quantity,
+                        session_date=session_date,
+                    )
+                )
+        return tuple(orders)
+
+
+def _equal_weight_targets(
+    *,
+    members: tuple[str, ...],
+    markets: dict[str, MarketState],
+    spec: DynamicPortfolioResearchSpec,
+) -> dict[str, int]:
+    candidates = sorted(
+        (
+            (
+                market.bar.pre_close
+                * (
+                    Decimal("1")
+                    + spec.slippage_bps / Decimal("10000")
+                )
+                * market.rules.buy_minimum,
+                instrument,
+                market,
+            )
+            for instrument in members
+            if (market := markets.get(instrument)) is not None
+        ),
+        key=lambda value: (value[0], value[1]),
+    )
+    selected: tuple[
+        tuple[Decimal, str, MarketState],
+        ...,
+    ] = ()
+    allocation = Decimal("0")
+    for count in range(len(candidates), 0, -1):
+        allocation = min(
+            spec.maximum_position_weight,
+            spec.gross_allocation / Decimal(count),
+        )
+        if (
+            candidates[count - 1][0]
+            <= spec.initial_cash * allocation
+        ):
+            selected = tuple(candidates[:count])
+            break
+    return {
+        instrument: quantity
+        for _, instrument, market in selected
+        if (
+            quantity := _target_quantity(
+                market,
+                allocation=allocation,
+                spec=spec,
+            )
+        )
+        >= market.rules.buy_minimum
+    }
+
+
+def _target_quantity(
+    market: MarketState,
+    *,
+    allocation: Decimal,
+    spec: DynamicPortfolioResearchSpec,
+) -> int:
+    estimated_price = market.bar.pre_close * (
+        Decimal("1") + spec.slippage_bps / Decimal("10000")
+    )
+    if (
+        estimated_price * market.rules.buy_minimum
+        > spec.initial_cash * allocation
+    ):
+        return 0
+    return _baseline_quantity(
+        initial_cash=spec.initial_cash,
+        allocation=allocation,
+        reference_price=market.bar.pre_close,
+        slippage_bps=spec.slippage_bps,
+        buy_minimum=market.rules.buy_minimum,
+        buy_step=market.rules.buy_step,
+        maximum=market.rules.max_order_quantity,
+    )
 
 
 def _liquidity_quantity(

@@ -8,6 +8,7 @@ from autoquant.backtest.dynamic_portfolio import (
     DynamicPortfolioResearchSpec,
 )
 from autoquant.backtest.dynamic_strategy import (
+    DynamicEqualWeightBenchmarkPolicy,
     DynamicMomentumOrderPolicy,
 )
 from autoquant.backtest.models import MarketState, OrderSide
@@ -29,16 +30,19 @@ def _market(
     index: int,
     *,
     close_shift: Decimal = Decimal("0"),
+    price_multiplier: Decimal = Decimal("1"),
     volume: int = 1_000_000,
 ) -> MarketState:
     session_date = date(2026, 1, 1) + timedelta(days=index)
     rank = Decimal(INSTRUMENTS.index(instrument) + 1)
-    previous = Decimal("10") + rank * Decimal(index - 1) / Decimal("100")
+    previous = (
+        Decimal("10") + rank * Decimal(index - 1) / Decimal("100")
+    ) * price_multiplier
     close = (
         Decimal("10")
         + rank * Decimal(index) / Decimal("100")
         + close_shift
-    )
+    ) * price_multiplier
     event = datetime.combine(
         session_date,
         datetime.min.time(),
@@ -79,6 +83,8 @@ def _sessions(
     *,
     current_shift: Decimal = Decimal("0"),
     omit_current: str | None = None,
+    active_current: tuple[str, ...] = INSTRUMENTS,
+    expensive_current: str | None = None,
 ) -> tuple[DynamicMarketSession, ...]:
     values = []
     for index in range(23):
@@ -91,6 +97,12 @@ def _sessions(
                     if index == 21 and instrument == INSTRUMENTS[0]
                     else Decimal("0")
                 ),
+                price_multiplier=(
+                    Decimal("100")
+                    if index == 21
+                    and instrument == expensive_current
+                    else Decimal("1")
+                ),
             )
             for instrument in INSTRUMENTS
             if not (index == 21 and instrument == omit_current)
@@ -99,7 +111,9 @@ def _sessions(
             DynamicMarketSession(
                 session_date=date(2026, 1, 1) + timedelta(days=index),
                 snapshot_hash=f"{index + 1:064x}",
-                active_members=INSTRUMENTS,
+                active_members=(
+                    active_current if index == 21 else INSTRUMENTS
+                ),
                 markets=markets,
             )
         )
@@ -153,3 +167,37 @@ def test_dynamic_signal_does_not_fabricate_missing_execution_market() -> None:
     orders = _orders(_sessions(omit_current="600519.XSHG"))
 
     assert orders == (("600000.XSHG", OrderSide.BUY),)
+
+
+def test_dynamic_signal_skips_unaffordable_board_lot() -> None:
+    orders = _orders(
+        _sessions(expensive_current="600519.XSHG")
+    )
+
+    assert orders == (("600000.XSHG", OrderSide.BUY),)
+
+
+def test_dynamic_signal_only_selects_point_in_time_members() -> None:
+    orders = _orders(
+        _sessions(active_current=INSTRUMENTS[:2])
+    )
+
+    assert orders == (
+        ("000001.XSHE", OrderSide.BUY),
+        ("600000.XSHG", OrderSide.BUY),
+    )
+
+
+def test_dynamic_benchmark_rebalances_only_frozen_current_members() -> None:
+    sessions = _sessions(active_current=INSTRUMENTS[:2])
+    policy = DynamicEqualWeightBenchmarkPolicy(
+        sessions=sessions,
+        start_index=21,
+        trade_session_count=2,
+        spec=_spec(),
+    )
+
+    orders = policy(0, sessions[21].markets, None)
+
+    assert tuple(value.instrument for value in orders) == INSTRUMENTS[:2]
+    assert all(value.side is OrderSide.BUY for value in orders)
