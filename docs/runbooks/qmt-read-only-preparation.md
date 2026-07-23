@@ -73,6 +73,41 @@ SHA-256，连接并订阅配置账户，确认账户状态为正常，然后在�
 当前控制台主机的逐项 `pass`/`blocked` 和剩余演练门禁。证据超过 24 小时会显示为过期；
 页面不提供验收、解锁、下单或撤单操作。
 
+## 故障恢复演练
+
+schema v18 使用 30 分钟挑战窗口，分别记录断网和 MiniQMT 重启恢复。每次演练先运行上面的
+`qmt-readonly-accept` 取得新鲜基线，然后开始挑战：
+
+```powershell
+uv run autoquant qmt-drill-start `
+  --kind disconnect_recovery `
+  --actor operator `
+  --confirm-controlled-drill
+```
+
+保存输出中的 `drill_id`，不要保存 `.env`。随后启动 `run-paper`，按演练类型执行受控断网
+或人工重启 MiniQMT，并确认驻留进程失败关闭。恢复网络/MiniQMT 后，再次运行
+`qmt-readonly-accept` 取得新证据，最后在挑战过期前执行：
+
+```powershell
+uv run autoquant qmt-drill-complete `
+  --drill-id <drill_id> `
+  --actor operator `
+  --confirm-intervention-complete
+```
+
+完成命令不会只相信人工确认。PostgreSQL 必须同时看到：
+
+1. 开始时绑定的新鲜 QMT 只读基线；
+2. 开始之后由运行时写入的 `dependency_unavailable` 或 `recovery_failed` 停机事件；
+3. 停机事件之后生成、且不同于基线的 QMT 只读验收；
+4. 完成时停机开关仍为 active。
+
+缺少任一事实、挑战超时或重复并发挑战都会失败关闭。完成
+`disconnect_recovery` 后还必须用同样流程单独完成
+`miniqmt_restart_recovery`；一个事件不能同时满足两类演练。当前流程证明“故障被停机控制
+捕获，且环境随后恢复到只读可验收状态”，不证明自动重连，也不授权真实交易。
+
 ## 失败处理
 
 - `windows_runtime`：命令不在 Windows 节点运行。

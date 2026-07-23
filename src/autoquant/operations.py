@@ -57,6 +57,10 @@ from autoquant.execution.qmt_readonly_store import (
     PostgresQmtReadOnlyAcceptanceRepository,
     QmtReadOnlyAcceptanceEvidence,
 )
+from autoquant.execution.qmt_recovery_drill import (
+    PostgresQmtRecoveryDrillRepository,
+    QmtRecoveryDrillKind,
+)
 from autoquant.execution.qmt_session_store import (
     PostgresQmtSessionLeaseRepository,
 )
@@ -344,6 +348,83 @@ async def inspect_paper_promotion(
             "policy_hash": report.policy_hash,
             "report_hash": report.report_hash,
             "status": "blocked",
+        }
+    finally:
+        await repository.close()
+
+
+async def start_qmt_recovery_drill(
+    settings: AppSettings,
+    *,
+    kind: QmtRecoveryDrillKind,
+    actor: str,
+) -> dict[str, object]:
+    """Create a bounded drill challenge from fresh read-only QMT evidence."""
+
+    if settings.environment is not RuntimeEnvironment.PAPER:
+        raise MissingCapabilityError("paper environment is not configured")
+    repository = PostgresQmtRecoveryDrillRepository.connect(
+        dsn=configured_dsn(
+            settings.postgres_dsn,
+            capability="PostgreSQL",
+        )
+    )
+    try:
+        event = await repository.start(
+            account_id=settings.paper_account_id,
+            kind=kind,
+            actor=actor,
+            now=datetime.now(UTC),
+        )
+        return {
+            "baseline_qmt_evidence_hash": (
+                event.baseline_qmt_evidence_hash
+            ),
+            "drill_id": str(event.drill_id),
+            "event_hash": event.event_hash,
+            "expires_at": event.expires_at.isoformat(),
+            "kind": event.kind.value,
+            "live_trading_locked": True,
+            "status": "drill_started",
+        }
+    finally:
+        await repository.close()
+
+
+async def complete_qmt_recovery_drill(
+    settings: AppSettings,
+    *,
+    drill_id: UUID,
+    actor: str,
+) -> dict[str, object]:
+    """Complete a drill only after fail-close and fresh QMT recovery evidence."""
+
+    if settings.environment is not RuntimeEnvironment.PAPER:
+        raise MissingCapabilityError("paper environment is not configured")
+    repository = PostgresQmtRecoveryDrillRepository.connect(
+        dsn=configured_dsn(
+            settings.postgres_dsn,
+            capability="PostgreSQL",
+        )
+    )
+    try:
+        event = await repository.complete(
+            drill_id=drill_id,
+            actor=actor,
+            now=datetime.now(UTC),
+        )
+        return {
+            "drill_id": str(event.drill_id),
+            "event_hash": event.event_hash,
+            "failure_control_event_hash": (
+                event.failure_control_event_hash
+            ),
+            "kind": event.kind.value,
+            "live_trading_locked": True,
+            "recovery_qmt_evidence_hash": (
+                event.recovery_qmt_evidence_hash
+            ),
+            "status": "drill_completed",
         }
     finally:
         await repository.close()

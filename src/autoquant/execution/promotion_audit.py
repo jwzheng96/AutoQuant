@@ -22,6 +22,7 @@ from autoquant.data.models import (
     _require_nonblank,
 )
 from autoquant.errors import PersistenceUnavailableError
+from autoquant.execution.qmt_recovery_drill import QmtRecoveryDrillKind
 
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -347,6 +348,7 @@ class PaperPromotionFacts:
     unknown_order_count: int
     risk_decision_count: int
     kill_switch_drill_dates: tuple[date, ...]
+    qmt_recovery_drill_kinds: tuple[QmtRecoveryDrillKind, ...]
     fact_hash: str = field(init=False)
 
     def __post_init__(self) -> None:
@@ -402,6 +404,17 @@ class PaperPromotionFacts:
         )
         reconciled = tuple(sorted(set(self.reconciled_session_dates)))
         drills = tuple(sorted(set(self.kill_switch_drill_dates)))
+        qmt_drills = tuple(
+            sorted(
+                set(self.qmt_recovery_drill_kinds),
+                key=lambda value: value.value,
+            )
+        )
+        if any(
+            not isinstance(value, QmtRecoveryDrillKind)
+            for value in qmt_drills
+        ):
+            raise TypeError("QMT recovery drill evidence is invalid")
         if len({item.session_date for item in sessions}) != len(sessions):
             raise ValueError("paper promotion sessions must be unique")
         if len({item.session_date for item in scheduler}) != len(scheduler):
@@ -411,6 +424,11 @@ class PaperPromotionFacts:
         object.__setattr__(self, "fills", fills)
         object.__setattr__(self, "reconciled_session_dates", reconciled)
         object.__setattr__(self, "kill_switch_drill_dates", drills)
+        object.__setattr__(
+            self,
+            "qmt_recovery_drill_kinds",
+            qmt_drills,
+        )
         if self.approved_slippage_bps is not None and (
             not isinstance(self.approved_slippage_bps, Decimal)
             or not self.approved_slippage_bps.is_finite()
@@ -464,6 +482,9 @@ class PaperPromotionFacts:
                 value.isoformat() for value in self.kill_switch_drill_dates
             ],
             "qmt_evidence_hash": self.qmt_evidence_hash,
+            "qmt_recovery_drill_kinds": [
+                value.value for value in self.qmt_recovery_drill_kinds
+            ],
             "qmt_observed_at": (
                 None
                 if self.qmt_observed_at is None
@@ -858,9 +879,19 @@ class PaperPromotionAuditor:
             ),
             PromotionGate(
                 PromotionGateCode.WINDOWS_RECOVERY_DRILLS,
-                False,
-                "not_persisted",
-                "disconnect_and_miniqmt_restart_verified",
+                set(facts.qmt_recovery_drill_kinds)
+                == set(QmtRecoveryDrillKind),
+                (
+                    "none"
+                    if not facts.qmt_recovery_drill_kinds
+                    else ",".join(
+                        value.value
+                        for value in facts.qmt_recovery_drill_kinds
+                    )
+                ),
+                ",".join(
+                    value.value for value in QmtRecoveryDrillKind
+                ),
             ),
             PromotionGate(
                 PromotionGateCode.COMPLIANCE_APPROVAL,
@@ -1204,6 +1235,24 @@ class PostgresPaperPromotionFactRepository:
                         },
                     )
                 ).all()
+                qmt_drill_kinds = (
+                    await connection.scalars(
+                        text(
+                            f"""
+                            SELECT DISTINCT kind
+                            FROM {self._schema}.qmt_recovery_drill_events
+                            WHERE account_id = :account_id
+                              AND action = 'complete'
+                              AND occurred_at >= :cutoff
+                            ORDER BY kind
+                            """
+                        ),
+                        {
+                            "account_id": account_id,
+                            "cutoff": cutoff,
+                        },
+                    )
+                ).all()
                 await connection.rollback()
         except (LookupError, ValueError, PersistenceUnavailableError):
             raise
@@ -1265,6 +1314,10 @@ class PostgresPaperPromotionFactRepository:
             unknown_order_count=int(order_counts["unknown_count"]),
             risk_decision_count=int(risk_count or 0),
             kill_switch_drill_dates=tuple(drill_dates),
+            qmt_recovery_drill_kinds=tuple(
+                QmtRecoveryDrillKind(str(value))
+                for value in qmt_drill_kinds
+            ),
         )
 
 

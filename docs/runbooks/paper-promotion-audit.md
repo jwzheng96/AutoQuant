@@ -86,9 +86,10 @@ uv run autoquant promotion-check
 6. 实现并执行 Windows 断线、MiniQMT 重启恢复演练工件；
 7. 最后接入独立合规批准和撤销流程。
 
-当前 `windows_recovery_drills` 与 `compliance_approval` 会显示 `not_persisted`，因为项目尚未
-实现这两类不可变工件。它们是明确的后续开发项，不允许用人工口头确认、截图或数据库
-补值绕过。
+`windows_recovery_drills` 只有在 schema v18 中分别完成断网和 MiniQMT 重启挑战后才通过；
+具体步骤见 [QMT 只读接入准备手册](qmt-read-only-preparation.md)。当前
+`compliance_approval` 仍显示 `not_persisted`，因为项目尚未实现独立合规批准工件。该项
+不能用人工口头确认、截图或数据库补值绕过。
 
 ## 晋级原则
 

@@ -44,6 +44,11 @@ from autoquant.execution.qmt_readonly_store import (
     PostgresQmtReadOnlyAcceptanceRepository,
     QmtReadOnlyAcceptanceEvidence,
 )
+from autoquant.execution.qmt_recovery_drill import (
+    PostgresQmtRecoveryDrillRepository,
+    QmtRecoveryDrillAction,
+    QmtRecoveryDrillKind,
+)
 from autoquant.execution.qmt_session_store import (
     PostgresQmtSessionLeaseRepository,
 )
@@ -111,6 +116,7 @@ async def registry_fixture() -> AsyncIterator[
             "migrations/postgres/015_paper_strategy_registry.sql",
             "migrations/postgres/016_paper_runtime_unlock.sql",
             "migrations/postgres/017_qmt_readonly_acceptance.sql",
+            "migrations/postgres/018_qmt_recovery_drills.sql",
         )
     )
     report = QualityReport(
@@ -593,3 +599,123 @@ async def test_promotion_facts_are_read_from_one_fail_closed_snapshot(
     assert report.live_trading_ready is False
     assert PromotionGateCode.PAPER_SESSION_COUNT in report.blockers
     assert PromotionGateCode.QMT_ACCEPTANCE_FRESH in report.blockers
+
+
+@pytest.mark.asyncio
+async def test_qmt_recovery_drill_requires_failure_and_new_acceptance(
+    registry_fixture: tuple[
+        PostgresPaperStrategyRegistry,
+        ValidatedSmaRegistration,
+        AsyncEngine,
+        str,
+    ],
+) -> None:
+    _, registration, engine, schema = registry_fixture
+    controls = PostgresExecutionControlRepository(
+        engine=engine,
+        schema=schema,
+    )
+    drills = PostgresQmtRecoveryDrillRepository(
+        engine=engine,
+        schema=schema,
+    )
+    now = datetime(2026, 7, 23, 4, tzinfo=UTC)
+    await controls.ensure_fail_closed(
+        account_id=registration.account_id,
+        now=now,
+    )
+    await _insert_qmt_acceptance(
+        engine=engine,
+        schema=schema,
+        account_id=registration.account_id,
+        evidence_hash="8" * 64,
+        observed_at=now,
+    )
+
+    started = await drills.start(
+        account_id=registration.account_id,
+        kind=QmtRecoveryDrillKind.DISCONNECT,
+        actor="operator",
+        now=now + timedelta(seconds=1),
+    )
+    with pytest.raises(ValueError, match="fail-closed event"):
+        await drills.complete(
+            drill_id=started.drill_id,
+            actor="operator",
+            now=now + timedelta(seconds=2),
+        )
+
+    await controls.activate(
+        account_id=registration.account_id,
+        command_id="qmt-disconnect-drill-failure-0001",
+        reason=KillSwitchReason.DEPENDENCY_UNAVAILABLE,
+        actor="resident-paper-runtime",
+        now=now + timedelta(seconds=3),
+    )
+    with pytest.raises(ValueError, match="post-failure acceptance"):
+        await drills.complete(
+            drill_id=started.drill_id,
+            actor="operator",
+            now=now + timedelta(seconds=4),
+        )
+
+    await _insert_qmt_acceptance(
+        engine=engine,
+        schema=schema,
+        account_id=registration.account_id,
+        evidence_hash="9" * 64,
+        observed_at=now + timedelta(seconds=5),
+    )
+    completed = await drills.complete(
+        drill_id=started.drill_id,
+        actor="operator",
+        now=now + timedelta(seconds=6),
+    )
+    replayed = await drills.complete(
+        drill_id=started.drill_id,
+        actor="operator",
+        now=now + timedelta(seconds=7),
+    )
+
+    assert completed.action is QmtRecoveryDrillAction.COMPLETE
+    assert completed.previous_hash == started.event_hash
+    assert completed.recovery_qmt_evidence_hash == "9" * 64
+    assert replayed == completed
+
+
+async def _insert_qmt_acceptance(
+    *,
+    engine: AsyncEngine,
+    schema: str,
+    account_id: str,
+    evidence_hash: str,
+    observed_at: datetime,
+) -> None:
+    async with engine.begin() as connection:
+        await connection.execute(
+            text(
+                f"""
+                INSERT INTO {schema}.qmt_readonly_acceptance_evidence
+                    (evidence_hash, logical_account_id, observed_at,
+                     baseline_evidence_hash, account_snapshot_hash,
+                     package_manifest_hash, position_count, order_count,
+                     trade_count, callback_cursor, lease_session_id,
+                     lease_holder_id, lease_token_hash, lease_generation,
+                     evidence_payload)
+                VALUES
+                    (:evidence_hash, :account_id, :observed_at,
+                     :baseline_hash, :snapshot_hash, :package_hash,
+                     0, 0, 0, 0, 731102, 'windows-qmt-drill',
+                     :token_hash, 1, '{{}}'::jsonb)
+                """
+            ),
+            {
+                "evidence_hash": evidence_hash,
+                "account_id": account_id,
+                "observed_at": observed_at,
+                "baseline_hash": "4" * 64,
+                "snapshot_hash": "5" * 64,
+                "package_hash": "6" * 64,
+                "token_hash": "7" * 64,
+            },
+        )

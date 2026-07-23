@@ -18,6 +18,7 @@ from autoquant.execution.promotion_audit import (
     PromotionGateCode,
     SchedulerPromotionEvidence,
 )
+from autoquant.execution.qmt_recovery_drill import QmtRecoveryDrillKind
 
 CAPTURED_AT = datetime(2026, 7, 23, 8, tzinfo=UTC)
 FIRST_SESSION = date(2026, 5, 1)
@@ -134,6 +135,7 @@ def _facts(
             FIRST_SESSION + timedelta(days=1),
             FIRST_SESSION + timedelta(days=2),
         ),
+        qmt_recovery_drill_kinds=(),
     )
 
 
@@ -182,6 +184,19 @@ def test_complete_paper_evidence_still_requires_external_safety_artifacts() -> N
     assert set(report.blockers) == expected_blockers
     assert report.live_trading_ready is False
     assert report.evidence_gates_passed is False
+
+
+def test_both_qmt_recovery_drills_remove_the_windows_blocker() -> None:
+    sessions = _sessions()
+    facts = replace(
+        _facts(sessions=sessions, scheduler=_scheduler(sessions)),
+        qmt_recovery_drill_kinds=tuple(QmtRecoveryDrillKind),
+    )
+
+    report = PaperPromotionAuditor().evaluate(facts)
+
+    assert report.blockers == (PromotionGateCode.COMPLIANCE_APPROVAL,)
+    assert report.live_trading_ready is False
 
 
 def test_qmt_time_and_scheduler_failures_are_fail_closed() -> None:

@@ -455,6 +455,68 @@ def test_qmt_readonly_accept_emits_only_redacted_evidence() -> None:
     acceptance.assert_awaited_once()
 
 
+def test_qmt_recovery_drill_requires_explicit_confirmation() -> None:
+    start = runner.invoke(
+        app,
+        [
+            "qmt-drill-start",
+            "--kind",
+            "disconnect_recovery",
+            "--actor",
+            "operator",
+        ],
+    )
+    complete = runner.invoke(
+        app,
+        [
+            "qmt-drill-complete",
+            "--drill-id",
+            "5d6bf55d-adf4-41b0-a688-bc65e10f44d0",
+            "--actor",
+            "operator",
+        ],
+    )
+
+    assert start.exit_code == 2
+    assert complete.exit_code == 2
+    assert "confirmation is required" in start.stdout
+    assert "confirmation is required" in complete.stdout
+
+
+def test_qmt_recovery_drill_outputs_only_evidence_hashes() -> None:
+    payload = {
+        "baseline_qmt_evidence_hash": "a" * 64,
+        "drill_id": "5d6bf55d-adf4-41b0-a688-bc65e10f44d0",
+        "event_hash": "b" * 64,
+        "expires_at": "2026-07-23T08:30:00+00:00",
+        "kind": "disconnect_recovery",
+        "live_trading_locked": True,
+        "status": "drill_started",
+    }
+    start = AsyncMock(return_value=payload)
+    with patch(
+        "autoquant.cli.start_qmt_recovery_drill",
+        new=start,
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "qmt-drill-start",
+                "--kind",
+                "disconnect_recovery",
+                "--actor",
+                "operator",
+                "--confirm-controlled-drill",
+            ],
+        )
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == payload
+    assert "account" not in result.stdout.lower()
+    assert "token" not in result.stdout.lower()
+    start.assert_awaited_once()
+
+
 def test_paper_preopen_check_emits_hashes_but_no_marks_or_configuration() -> None:
     payload = {
         "instrument_count": 2,

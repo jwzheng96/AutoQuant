@@ -22,9 +22,11 @@ from autoquant.data.quality import MinuteBarQualityGate
 from autoquant.errors import AutoQuantError, MissingCapabilityError
 from autoquant.execution.control_store import PostgresExecutionControlRepository
 from autoquant.execution.qmt_preflight import inspect_qmt_readiness
+from autoquant.execution.qmt_recovery_drill import QmtRecoveryDrillKind
 from autoquant.execution.qmt_session_store import PostgresQmtSessionLeaseRepository
 from autoquant.operations import (
     approve_paper_sma_strategy,
+    complete_qmt_recovery_drill,
     inspect_paper_pre_open,
     inspect_paper_promotion,
     inspect_paper_runtime_readiness,
@@ -33,6 +35,7 @@ from autoquant.operations import (
     run_qmt_readonly_acceptance,
     run_session_reference_refresh,
     run_trading_calendar_refresh,
+    start_qmt_recovery_drill,
     tushare_source,
     unlock_paper_runtime,
 )
@@ -311,6 +314,62 @@ def qmt_readonly_accept(
         _fail(str(error))
     except (AutoQuantError, LookupError, ValueError):
         _fail("QMT read-only acceptance failed closed")
+    _emit(payload)
+
+
+@app.command("qmt-drill-start")
+def qmt_drill_start(
+    kind: Annotated[QmtRecoveryDrillKind, typer.Option("--kind")],
+    actor: Annotated[str, typer.Option("--actor")],
+    confirm_controlled_drill: Annotated[
+        bool,
+        typer.Option("--confirm-controlled-drill"),
+    ] = False,
+) -> None:
+    """Start a bounded QMT failure-recovery evidence challenge."""
+
+    if not confirm_controlled_drill:
+        _fail("controlled QMT recovery drill confirmation is required")
+    try:
+        payload = asyncio.run(
+            start_qmt_recovery_drill(
+                _settings(),
+                kind=kind,
+                actor=actor,
+            )
+        )
+    except MissingCapabilityError as error:
+        _fail(str(error))
+    except (AutoQuantError, LookupError, ValueError):
+        _fail("QMT recovery drill start failed closed")
+    _emit(payload)
+
+
+@app.command("qmt-drill-complete")
+def qmt_drill_complete(
+    drill_id: Annotated[str, typer.Option("--drill-id")],
+    actor: Annotated[str, typer.Option("--actor")],
+    confirm_intervention_complete: Annotated[
+        bool,
+        typer.Option("--confirm-intervention-complete"),
+    ] = False,
+) -> None:
+    """Complete a drill from observed fail-close and post-failure acceptance."""
+
+    if not confirm_intervention_complete:
+        _fail("QMT recovery intervention confirmation is required")
+    try:
+        payload = asyncio.run(
+            complete_qmt_recovery_drill(
+                _settings(),
+                drill_id=UUID(drill_id),
+                actor=actor,
+            )
+        )
+    except MissingCapabilityError as error:
+        _fail(str(error))
+    except (AutoQuantError, LookupError, ValueError):
+        _fail("QMT recovery drill completion failed closed")
     _emit(payload)
 
 

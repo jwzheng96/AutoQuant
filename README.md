@@ -227,6 +227,10 @@ asset, position, order, and trade queries. It does not persist the broker accoun
 or expose any broker mutation method; live order submission and cancellation remain hard
 locked. The authenticated trading console displays only the latest evidence time and
 redacted record counts, current-host pass/blocked checks, and the remaining recovery gates.
+Schema v18 adds bounded `qmt-drill-start` / `qmt-drill-complete` challenges for disconnect
+and MiniQMT-restart drills. Completion requires a post-start fail-closed control event and
+a distinct QMT acceptance captured after that failure; operator confirmation alone is not
+sufficient.
 
 `autoquant promotion-check` evaluates paper-to-live evidence from one PostgreSQL
 repeatable-read, read-only snapshot. It emits policy, fact, and report hashes plus redacted
