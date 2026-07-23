@@ -60,6 +60,8 @@ from autoquant.web.models import (
     PromotionGateView,
     QmtReadOnlyStatus,
     ResearchManifest,
+    ResearchUniverseSnapshotDetail,
+    ResearchUniverseSnapshotView,
     RiskControlStatus,
     ValidationCampaignComponentView,
     ValidationCampaignView,
@@ -73,6 +75,9 @@ from autoquant.web.portfolio_validation_store import (
 )
 from autoquant.web.risk_store import PostgresRiskDecisionRepository
 from autoquant.web.store import PostgresOperatorRepository
+from autoquant.web.universe_store import (
+    PostgresResearchUniverseRepository,
+)
 from autoquant.web.validation_campaign_store import (
     PostgresValidationCampaignRepository,
     ValidationCampaignStatus,
@@ -127,6 +132,14 @@ class ConsoleServicePort(Protocol):
     async def list_research_manifests(
         self, *, limit: int = 100
     ) -> tuple[ResearchManifest, ...]: ...
+
+    async def list_research_universes(
+        self, *, limit: int = 50
+    ) -> tuple[ResearchUniverseSnapshotView, ...]: ...
+
+    async def research_universe_detail(
+        self, snapshot_hash: str
+    ) -> ResearchUniverseSnapshotDetail: ...
 
     async def create_backtest(
         self, request: BacktestRunRequest, *, requested_by: str
@@ -203,6 +216,9 @@ class ConsoleService:
         validation_campaign_repository: (
             PostgresValidationCampaignRepository | None
         ) = None,
+        universe_repository: (
+            PostgresResearchUniverseRepository | None
+        ) = None,
         risk_repository: PostgresRiskDecisionRepository | None = None,
         execution_repository: PostgresPaperExecutionRepository | None = None,
         execution_control_repository: PostgresExecutionControlRepository | None = None,
@@ -242,6 +258,7 @@ class ConsoleService:
         self._portfolio_validations = portfolio_validation_repository
         self._portfolio_validation_runner = portfolio_validation_runner
         self._validation_campaigns = validation_campaign_repository
+        self._universes = universe_repository
         self._risk = risk_repository
         self._execution = execution_repository
         self._execution_controls = execution_control_repository
@@ -423,6 +440,8 @@ class ConsoleService:
             await self._portfolio_validations.close()
         if self._validation_campaigns is not None:
             await self._validation_campaigns.close()
+        if self._universes is not None:
+            await self._universes.close()
         if self._risk is not None:
             await self._risk.close()
         if self._execution is not None:
@@ -511,6 +530,27 @@ class ConsoleService:
     async def list_research_manifests(self, *, limit: int = 100) -> tuple[ResearchManifest, ...]:
         repository, _ = self._require_backtests()
         return await repository.list_manifests(limit=limit)
+
+    async def list_research_universes(
+        self,
+        *,
+        limit: int = 50,
+    ) -> tuple[ResearchUniverseSnapshotView, ...]:
+        if self._universes is None:
+            raise PersistenceUnavailableError(
+                "Research universe service is unavailable"
+            )
+        return await self._universes.list(limit=limit)
+
+    async def research_universe_detail(
+        self,
+        snapshot_hash: str,
+    ) -> ResearchUniverseSnapshotDetail:
+        if self._universes is None:
+            raise PersistenceUnavailableError(
+                "Research universe service is unavailable"
+            )
+        return await self._universes.detail(snapshot_hash)
 
     async def create_backtest(
         self, request: BacktestRunRequest, *, requested_by: str

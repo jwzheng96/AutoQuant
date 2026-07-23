@@ -31,6 +31,7 @@ from autoquant.operations import (
     approve_paper_sma_strategy,
     complete_qmt_recovery_drill,
     create_portfolio_validation,
+    create_research_universe_snapshot,
     create_validation_campaign,
     inspect_paper_pre_open,
     inspect_paper_promotion,
@@ -809,6 +810,50 @@ def portfolio_validation_status(
         and evidence_status != "research_candidate"
     ):
         raise typer.Exit(code=2)
+
+
+@app.command("universe-snapshot-create")
+def universe_snapshot_create(
+    reference_date: Annotated[str, typer.Option("--reference-date")],
+    requested_by: Annotated[str, typer.Option("--requested-by")],
+    index_code: Annotated[
+        str,
+        typer.Option("--index-code"),
+    ] = "399300.SZ",
+    minimum_turnover_rate_f: Annotated[
+        str,
+        typer.Option("--minimum-turnover-rate-f"),
+    ] = "0",
+    minimum_circulating_market_value: Annotated[
+        str,
+        typer.Option("--minimum-circulating-market-value"),
+    ] = "0",
+) -> None:
+    """Persist one source-backed historical research universe."""
+
+    try:
+        payload = asyncio.run(
+            create_research_universe_snapshot(
+                _settings(),
+                index_code=index_code,
+                reference_date=_parse_date(
+                    reference_date,
+                    name="reference-date",
+                ),
+                minimum_turnover_rate_f=_parse_decimal(
+                    minimum_turnover_rate_f,
+                    name="minimum-turnover-rate-f",
+                ),
+                minimum_circulating_market_value=_parse_decimal(
+                    minimum_circulating_market_value,
+                    name="minimum-circulating-market-value",
+                ),
+                requested_by=requested_by,
+            )
+        )
+    except (AutoQuantError, LookupError, ValueError):
+        _fail("research universe creation failed")
+    _emit(payload)
 
 
 @app.command("revoke-paper-strategy")

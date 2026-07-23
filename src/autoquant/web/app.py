@@ -9,7 +9,18 @@ from pathlib import Path
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
+from fastapi import (
+    Depends,
+    FastAPI,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+    status,
+)
+from fastapi import (
+    Path as ApiPath,
+)
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
@@ -58,6 +69,9 @@ from autoquant.web.portfolio_validation_store import (
 from autoquant.web.risk_store import PostgresRiskDecisionRepository
 from autoquant.web.service import ConsoleService, ConsoleServicePort
 from autoquant.web.store import PostgresOperatorRepository
+from autoquant.web.universe_store import (
+    PostgresResearchUniverseRepository,
+)
 from autoquant.web.validation_campaign_store import (
     PostgresValidationCampaignRepository,
 )
@@ -224,6 +238,41 @@ def create_app(
     ) -> dict[str, object]:
         items = await active_service(request).list_research_manifests(limit=limit)
         return {"items": [item.model_dump(mode="json") for item in items]}
+
+    @app.get("/api/v1/research/universes")
+    async def research_universes(
+        request: Request,
+        limit: Annotated[int, Query(ge=1, le=200)] = 50,
+        _: str = Depends(authenticated_user),
+    ) -> dict[str, object]:
+        items = await active_service(
+            request
+        ).list_research_universes(limit=limit)
+        return {
+            "items": [
+                item.model_dump(mode="json") for item in items
+            ]
+        }
+
+    @app.get("/api/v1/research/universes/{snapshot_hash}")
+    async def research_universe_detail(
+        request: Request,
+        snapshot_hash: Annotated[
+            str,
+            ApiPath(pattern=r"^[0-9a-f]{64}$"),
+        ],
+        _: str = Depends(authenticated_user),
+    ) -> dict[str, object]:
+        try:
+            detail = await active_service(
+                request
+            ).research_universe_detail(snapshot_hash)
+        except LookupError:
+            raise HTTPException(
+                status_code=404,
+                detail="research universe snapshot not found",
+            ) from None
+        return detail.model_dump(mode="json")
 
     @app.get("/api/v1/backtests")
     async def backtests(
@@ -467,6 +516,9 @@ async def _production_service(settings: AppSettings) -> ConsoleService:
             dsn=postgres_dsn
         )
     )
+    universes = PostgresResearchUniverseRepository.connect(
+        dsn=postgres_dsn
+    )
     validation_campaigns = PostgresValidationCampaignRepository.connect(
         dsn=postgres_dsn
     )
@@ -493,6 +545,7 @@ async def _production_service(settings: AppSettings) -> ConsoleService:
         await backtests.close()
         await validations.close()
         await portfolio_validations.close()
+        await universes.close()
         await validation_campaigns.close()
         await risks.close()
         await executions.close()
@@ -532,6 +585,7 @@ async def _production_service(settings: AppSettings) -> ConsoleService:
         validation_runner=validation_runner,
         portfolio_validation_repository=portfolio_validations,
         portfolio_validation_runner=portfolio_validation_runner,
+        universe_repository=universes,
         validation_campaign_repository=validation_campaigns,
         risk_repository=risks,
         execution_repository=executions,

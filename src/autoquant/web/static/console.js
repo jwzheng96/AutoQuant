@@ -303,6 +303,32 @@ async function activateKillSwitch() {
 
 const researchManifests = new Map();
 
+async function loadResearchUniverses() {
+  try {
+    const data = await requestJson("/api/v1/research/universes?limit=50");
+    const table = document.getElementById("universes-table");
+    table.replaceChildren();
+    data.items.forEach(snapshot => {
+      const row = document.createElement("tr");
+      [
+        snapshot.reference_date,
+        snapshot.index_code,
+        snapshot.index_constituent_date,
+        snapshot.liquidity_date,
+        snapshot.member_count,
+        snapshot.snapshot_hash.slice(0, 16),
+      ].forEach(value => {
+        const cell = document.createElement("td");
+        cell.textContent = value;
+        row.append(cell);
+      });
+      table.append(row);
+    });
+  } catch (error) {
+    showToast(`股票池读取失败：${error.message}`);
+  }
+}
+
 async function loadResearchManifests() {
   const select = document.getElementById("backtest-manifest");
   const validationSelect = document.getElementById("validation-manifest");
@@ -763,6 +789,10 @@ if (page === "/") {
   document.getElementById("backtest-manifest").addEventListener("change", syncManifestInstrument);
   document.getElementById("validation-manifest").addEventListener("change", syncValidationManifestInstrument);
   document.getElementById("refresh-backtests").addEventListener("click", loadBacktests);
+  document.getElementById("refresh-universes").addEventListener(
+    "click",
+    loadResearchUniverses,
+  );
   document.getElementById("validation-form").addEventListener("submit", createValidation);
   document.getElementById("portfolio-validation-form").addEventListener(
     "submit",
@@ -782,6 +812,7 @@ if (page === "/") {
     loadValidations(),
     loadValidationCampaigns(),
     loadPortfolioValidations(),
+    loadResearchUniverses(),
   ]));
 } else {
   statusPill(document.getElementById("global-status"), "研究模式");

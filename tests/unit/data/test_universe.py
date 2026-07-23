@@ -8,6 +8,7 @@ from autoquant.data.universe import (
     IndexConstituent,
     PointInTimeUniversePolicy,
     build_point_in_time_universe,
+    point_in_time_universe_from_payload,
 )
 
 AS_OF = datetime(2026, 7, 23, tzinfo=UTC)
@@ -83,6 +84,15 @@ def test_point_in_time_universe_uses_latest_cross_sections_at_cutoff() -> None:
     assert snapshot.snapshot_hash == repeated.snapshot_hash
     assert len(snapshot.members) == 20
     assert snapshot.members[0].instrument == "000020.XSHE"
+    assert (
+        point_in_time_universe_from_payload(snapshot.payload())
+        == snapshot
+    )
+
+    tampered = snapshot.payload()
+    tampered["reference_date"] = "2026-07-21"
+    with pytest.raises(ValueError):
+        point_in_time_universe_from_payload(tampered)
 
 
 def test_point_in_time_universe_fails_on_incomplete_liquidity() -> None:

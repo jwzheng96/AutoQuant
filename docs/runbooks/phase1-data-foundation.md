@@ -40,6 +40,7 @@ Apply `migrations/postgres/001_phase1.sql`,
 `migrations/postgres/020_portfolio_oos_assessment.sql`, then
 `migrations/postgres/021_validation_campaigns.sql`, then
 `migrations/postgres/022_portfolio_validation.sql`, then
+`migrations/postgres/023_research_universes.sql`, then
 `migrations/clickhouse/001_phase1.sql` and
 `migrations/clickhouse/002_tushare_daily.sql` and
 `migrations/clickhouse/003_daily_coverage.sql` in order, only to explicitly authorized
@@ -310,6 +311,24 @@ own hash and always reports `oos_tuning_permitted=false`: it may explain a
 failure or motivate a separately pre-registered strategy version, but must
 never be used to alter the completed experiment or select parameters for the
 same OOS sample.
+
+Build a source-backed historical universe before expanding portfolio research:
+
+```bash
+uv run autoquant universe-snapshot-create \
+  --index-code 399300.SZ \
+  --reference-date 2026-07-22 \
+  --minimum-turnover-rate-f 0 \
+  --minimum-circulating-market-value 0 \
+  --requested-by operator
+```
+
+The command searches only backward for the latest monthly index constituent
+cross-section, requires an exact daily liquidity cross-section no later than
+the reference date, and atomically persists both raw source responses, the
+canonical 250-350 member snapshot and its audit event. PostgreSQL schema v23
+binds both evidence hashes by foreign key and makes the snapshot append-only.
+The artifact is research-only and cannot unlock live trading.
 
 ```bash
 uv run autoquant approve-paper-sma \

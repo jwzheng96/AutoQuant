@@ -217,3 +217,20 @@ def test_portfolio_validation_migration_is_immutable_and_versioned() -> None:
     assert "terminal portfolio validation experiments are immutable" in migration
     assert "portfolio_validation_folds_immutable" in migration
     assert "VALUES ('postgres', 22)" in migration
+
+
+def test_research_universe_migration_binds_source_evidence() -> None:
+    migration = Path(
+        "migrations/postgres/023_research_universes.sql"
+    ).read_text(encoding="utf-8")
+
+    assert (
+        "CREATE TABLE IF NOT EXISTS research_universe_snapshots"
+        in migration
+    )
+    assert (
+        "REFERENCES source_evidence(evidence_hash)"
+        in migration
+    )
+    assert "research_universe_snapshots_immutable" in migration
+    assert "VALUES ('postgres', 23)" in migration

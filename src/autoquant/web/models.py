@@ -227,6 +227,59 @@ class ResearchManifest(BaseModel):
     row_count: int = Field(ge=0)
 
 
+class ResearchUniverseSnapshotView(BaseModel):
+    snapshot_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    policy_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    index_code: str = Field(pattern=r"^[0-9]{6}\.(?:SH|SZ)$")
+    reference_date: date
+    index_constituent_date: date
+    liquidity_date: date
+    knowledge_as_of: datetime
+    member_count: int = Field(ge=20, le=1000)
+    created_at: datetime
+    live_trading_locked: bool = True
+
+    @field_validator("knowledge_as_of", "created_at")
+    @classmethod
+    def require_aware_universe_time(
+        cls,
+        value: datetime,
+    ) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError(
+                "research universe timestamps must be timezone-aware"
+            )
+        return value.astimezone(UTC)
+
+    @model_validator(mode="after")
+    def require_universe_research_lock(self) -> Self:
+        if (
+            not self.live_trading_locked
+            or self.index_constituent_date > self.reference_date
+            or self.liquidity_date > self.reference_date
+        ):
+            raise ValueError("research universe view is inconsistent")
+        return self
+
+
+class ResearchUniverseMemberView(BaseModel):
+    instrument: str = Field(pattern=r"^[0-9]{6}\.(?:XSHG|XSHE)$")
+    index_weight: Decimal = Field(gt=0)
+    turnover_rate_f: Decimal = Field(ge=0)
+    volume_ratio: Decimal | None = Field(default=None, ge=0)
+    circulating_market_value: Decimal = Field(gt=0)
+
+
+class ResearchUniverseSnapshotDetail(BaseModel):
+    snapshot: ResearchUniverseSnapshotView
+    index_response_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    liquidity_response_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    members: tuple[ResearchUniverseMemberView, ...] = Field(
+        min_length=20,
+        max_length=1000,
+    )
+
+
 class SmaCandidateRequest(BaseModel):
     fast_sessions: int = Field(ge=2, le=60)
     slow_sessions: int = Field(ge=5, le=250)

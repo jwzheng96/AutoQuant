@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import (
 from autoquant.clock import to_utc
 from autoquant.data.models import DatasetManifest, SourceEvidence
 from autoquant.data.quality import QualityIssue, QualityReport, QualitySeverity
+from autoquant.data.universe import PointInTimeUniverseSnapshot
 from autoquant.errors import PersistenceUnavailableError
 
 JsonScalar: TypeAlias = str | int | float | bool | None
@@ -197,6 +198,68 @@ class PostgresControlTransaction:
         stored = self._source_evidence_from_row(evidence.response_hash, row)
         if not source_evidence_content_matches(stored, evidence):
             raise ValueError("source evidence hash conflicts with stored content")
+
+    async def save_research_universe(
+        self,
+        snapshot: PointInTimeUniverseSnapshot,
+        *,
+        created_at: datetime,
+    ) -> None:
+        payload = snapshot.payload()
+        await self._execute(
+            """
+            INSERT INTO research_universe_snapshots
+                (snapshot_hash, policy_hash, index_code,
+                 reference_date, index_constituent_date,
+                 liquidity_date, knowledge_as_of,
+                 index_response_hash, liquidity_response_hash,
+                 member_count, payload, created_at)
+            VALUES
+                (:snapshot_hash, :policy_hash, :index_code,
+                 :reference_date, :index_constituent_date,
+                 :liquidity_date, :knowledge_as_of,
+                 :index_response_hash, :liquidity_response_hash,
+                 :member_count, CAST(:payload AS jsonb),
+                 :created_at)
+            ON CONFLICT (snapshot_hash) DO NOTHING
+            """,
+            {
+                "snapshot_hash": snapshot.snapshot_hash,
+                "policy_hash": snapshot.policy.policy_hash,
+                "index_code": snapshot.policy.index_code,
+                "reference_date": snapshot.reference_date,
+                "index_constituent_date": (
+                    snapshot.index_constituent_date
+                ),
+                "liquidity_date": snapshot.liquidity_date,
+                "knowledge_as_of": snapshot.knowledge_as_of,
+                "index_response_hash": snapshot.index_response_hash,
+                "liquidity_response_hash": (
+                    snapshot.liquidity_response_hash
+                ),
+                "member_count": len(snapshot.members),
+                "payload": json.dumps(
+                    payload,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ),
+                "created_at": to_utc(
+                    created_at,
+                    name="research universe created_at",
+                ),
+            },
+        )
+        row = await self._one(
+            """
+            SELECT payload FROM research_universe_snapshots
+            WHERE snapshot_hash = :snapshot_hash
+            """,
+            {"snapshot_hash": snapshot.snapshot_hash},
+        )
+        if row["payload"] != payload:
+            raise ValueError(
+                "research universe hash conflicts with stored payload"
+            )
 
     async def save_quality_report(self, report: QualityReport) -> None:
         payload = quality_report_payload(report)

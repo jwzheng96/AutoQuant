@@ -318,6 +318,81 @@ def build_point_in_time_universe(
     )
 
 
+def point_in_time_universe_from_payload(
+    raw: object,
+) -> PointInTimeUniverseSnapshot:
+    if not isinstance(raw, dict):
+        raise TypeError("universe snapshot payload must be an object")
+    policy_raw = raw.get("policy")
+    members_raw = raw.get("members")
+    if not isinstance(policy_raw, dict) or not isinstance(
+        members_raw,
+        list,
+    ):
+        raise TypeError("universe snapshot payload is malformed")
+    policy = PointInTimeUniversePolicy(
+        index_code=str(policy_raw["index_code"]),
+        minimum_members=int(str(policy_raw["minimum_members"])),
+        maximum_members=int(str(policy_raw["maximum_members"])),
+        minimum_turnover_rate_f=Decimal(
+            str(policy_raw["minimum_turnover_rate_f"])
+        ),
+        minimum_circulating_market_value=Decimal(
+            str(
+                policy_raw[
+                    "minimum_circulating_market_value"
+                ]
+            )
+        ),
+        version=str(policy_raw["version"]),
+    )
+    members = tuple(
+        _member_from_payload(value) for value in members_raw
+    )
+    snapshot = PointInTimeUniverseSnapshot(
+        policy=policy,
+        reference_date=date.fromisoformat(
+            str(raw["reference_date"])
+        ),
+        index_constituent_date=date.fromisoformat(
+            str(raw["index_constituent_date"])
+        ),
+        liquidity_date=date.fromisoformat(
+            str(raw["liquidity_date"])
+        ),
+        knowledge_as_of=datetime.fromisoformat(
+            str(raw["knowledge_as_of"])
+        ),
+        index_response_hash=str(raw["index_response_hash"]),
+        liquidity_response_hash=str(
+            raw["liquidity_response_hash"]
+        ),
+        members=members,
+    )
+    if snapshot.payload() != raw:
+        raise ValueError("universe snapshot payload is not canonical")
+    return snapshot
+
+
+def _member_from_payload(raw: object) -> UniverseMember:
+    if not isinstance(raw, dict):
+        raise TypeError("universe member payload must be an object")
+    volume_ratio = raw.get("volume_ratio")
+    return UniverseMember(
+        instrument=str(raw["instrument"]),
+        index_weight=Decimal(str(raw["index_weight"])),
+        turnover_rate_f=Decimal(str(raw["turnover_rate_f"])),
+        volume_ratio=(
+            None
+            if volume_ratio is None
+            else Decimal(str(volume_ratio))
+        ),
+        circulating_market_value=Decimal(
+            str(raw["circulating_market_value"])
+        ),
+    )
+
+
 def _identity(value: IndexConstituent) -> None:
     if (
         not value.source.strip()

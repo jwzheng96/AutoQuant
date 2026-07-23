@@ -26,6 +26,10 @@ from autoquant.data.daily_ingestion import (
 )
 from autoquant.data.daily_quality import DailyQualityGate
 from autoquant.data.session_reference import SessionReferenceRefreshService
+from autoquant.data.universe import (
+    PointInTimeUniversePolicy,
+    build_point_in_time_universe,
+)
 from autoquant.errors import (
     AutoQuantError,
     MissingCapabilityError,
@@ -105,6 +109,9 @@ from autoquant.web.strategy_promotion import (
     PaperPortfolioPromotionService,
     PaperStrategyPromotionService,
 )
+from autoquant.web.universe_store import (
+    PostgresResearchUniverseRepository,
+)
 from autoquant.web.validation_campaign_store import (
     PostgresValidationCampaignRepository,
     ValidationCampaignSpec,
@@ -179,6 +186,110 @@ async def run_daily_ingestion(
         "quality_hash": result.quality_hash,
         "status": result.status,
     }
+
+
+async def create_research_universe_snapshot(
+    settings: AppSettings,
+    *,
+    index_code: str,
+    reference_date: date,
+    minimum_turnover_rate_f: Decimal,
+    minimum_circulating_market_value: Decimal,
+    requested_by: str,
+) -> dict[str, object]:
+    if settings.live_trading_enabled:
+        raise MissingCapabilityError(
+            "research universe creation requires live trading locked"
+        )
+    if (
+        not requested_by.strip()
+        or requested_by != requested_by.strip()
+        or len(requested_by) > 128
+    ):
+        raise ValueError(
+            "requested_by must contain 1-128 trimmed characters"
+        )
+    source: TushareDailySource | None = None
+    control: PostgresControlRepository | None = None
+    repository: PostgresResearchUniverseRepository | None = None
+    now = datetime.now(UTC)
+    try:
+        source = tushare_source(settings)
+        dsn = configured_dsn(
+            settings.postgres_dsn,
+            capability="PostgreSQL",
+        )
+        control = PostgresControlRepository.connect(dsn=dsn)
+        repository = PostgresResearchUniverseRepository.connect(
+            dsn=dsn
+        )
+        batch = await source.fetch_index_universe(
+            index_code=index_code,
+            reference_date=reference_date,
+        )
+        snapshot = build_point_in_time_universe(
+            policy=PointInTimeUniversePolicy(
+                index_code=index_code,
+                minimum_members=250,
+                maximum_members=350,
+                minimum_turnover_rate_f=(
+                    minimum_turnover_rate_f
+                ),
+                minimum_circulating_market_value=(
+                    minimum_circulating_market_value
+                ),
+            ),
+            reference_date=reference_date,
+            constituents=batch.constituents,
+            liquidity=batch.liquidity,
+        )
+        async with control.transaction() as transaction:
+            for evidence in batch.source_evidence:
+                await transaction.save_source_evidence(evidence)
+            await transaction.save_research_universe(
+                snapshot,
+                created_at=now,
+            )
+            await transaction.append_audit_event(
+                "research.universe.created",
+                now,
+                {
+                    "index_code": index_code,
+                    "member_count": len(snapshot.members),
+                    "policy_hash": snapshot.policy.policy_hash,
+                    "reference_date": reference_date.isoformat(),
+                    "requested_by": requested_by,
+                    "snapshot_hash": snapshot.snapshot_hash,
+                },
+            )
+        detail = await repository.detail(snapshot.snapshot_hash)
+        return {
+            "index_constituent_date": (
+                detail.snapshot.index_constituent_date.isoformat()
+            ),
+            "index_code": detail.snapshot.index_code,
+            "knowledge_as_of": (
+                detail.snapshot.knowledge_as_of.isoformat()
+            ),
+            "liquidity_date": (
+                detail.snapshot.liquidity_date.isoformat()
+            ),
+            "live_trading_locked": True,
+            "member_count": detail.snapshot.member_count,
+            "policy_hash": detail.snapshot.policy_hash,
+            "reference_date": (
+                detail.snapshot.reference_date.isoformat()
+            ),
+            "snapshot_hash": detail.snapshot.snapshot_hash,
+            "status": "created",
+        }
+    finally:
+        if repository is not None:
+            await repository.close()
+        if control is not None:
+            await control.close()
+        if source is not None:
+            await source.close()
 
 
 async def create_validation_campaign(

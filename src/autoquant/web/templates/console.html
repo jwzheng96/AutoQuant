@@ -104,6 +104,11 @@
         <section class="page" aria-labelledby="research-title">
           <div class="section-heading"><div><p class="eyebrow">AUDITED RESEARCH</p><h2 id="research-title">可审计基准回测</h2></div><button id="refresh-backtests" class="secondary-button" type="button">刷新运行</button></div>
           <article class="panel">
+            <div class="panel-title"><div><p class="eyebrow">POINT-IN-TIME UNIVERSES</p><h3>历史时点股票池</h3></div><button id="refresh-universes" class="secondary-button" type="button">刷新股票池</button></div>
+            <p class="form-help">指数成分、流动性截面和原始响应证据共同锁定；这里只读展示，不能解锁实盘。</p>
+            <div class="table-wrap"><table><thead><tr><th>参考日</th><th>指数</th><th>成分日期</th><th>流动性日期</th><th>成员数</th><th>快照哈希</th></tr></thead><tbody id="universes-table"></tbody></table></div>
+          </article>
+          <article class="panel">
             <form id="backtest-form" class="research-form">
               <label>生产数据清单<select id="backtest-manifest" required><option value="">正在读取…</option></select></label>
               <label>证券代码<input id="backtest-instrument" value="000001.XSHE" pattern="[0-9]{6}\.(XSHG|XSHE)" required></label>
