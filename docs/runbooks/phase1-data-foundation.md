@@ -42,6 +42,8 @@ Apply `migrations/postgres/001_phase1.sql`,
 `migrations/postgres/022_portfolio_validation.sql`, then
 `migrations/postgres/023_research_universes.sql`, then
 `migrations/postgres/024_research_data_campaigns.sql`, then
+`migrations/postgres/025_dynamic_research_specs.sql`, then
+`migrations/postgres/026_dynamic_validation_evidence.sql`, then
 `migrations/clickhouse/001_phase1.sql` and
 `migrations/clickhouse/002_tushare_daily.sql` and
 `migrations/clickhouse/003_daily_coverage.sql` in order, only to explicitly authorized
@@ -588,3 +590,11 @@ persisted as point-in-time revisions and included in new validated manifests. On
 created after schema v3 contain those constraints; older manifests remain immutable and must not
 be silently upgraded. Daily OHLC still cannot reproduce limit-order queues; minute or tick replay
 and simulation evidence remain required before any execution gateway is considered.
+
+The frozen dynamic-universe campaign uses `dynamic-market-panel-compile` as a read-only
+integrity rehearsal and `dynamic-validation-run` as the authoritative nested walk-forward job.
+The latter rebuilds the same panel from all immutable shards, evaluates every frozen candidate
+in every training fold, applies the embargo, runs disjoint test folds, compares against the
+point-in-time quarterly equal-weight benchmark, and atomically stores every candidate and fold
+artifact. It always reports `live_trading_locked: true`; even `research_candidate` is only
+permission to begin the minimum 60-session paper observation and never enables real orders.

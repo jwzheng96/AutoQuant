@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import AsyncIterator
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
@@ -14,11 +14,22 @@ from autoquant.adapters.postgres import PostgresControlRepository
 from autoquant.backtest.dynamic_portfolio import (
     DynamicPortfolioResearchSpec,
 )
+from autoquant.backtest.dynamic_validation import (
+    DynamicCandidateEvaluation,
+    DynamicValidationFold,
+    DynamicValidationResult,
+    _selection_score,
+    assess_dynamic_validation,
+)
+from autoquant.backtest.models import AccountSnapshot, BacktestResult
 from autoquant.data.models import DatasetManifest
 from autoquant.data.quality import QualityReport
 from autoquant.data.research_data_campaign import ResearchDataCampaignSpec
 from autoquant.web.dynamic_research_store import (
     PostgresDynamicResearchSpecRepository,
+)
+from autoquant.web.dynamic_validation_store import (
+    PostgresDynamicValidationRepository,
 )
 from autoquant.web.research_data_store import (
     PostgresResearchDataCampaignRepository,
@@ -43,6 +54,7 @@ async def repositories() -> AsyncIterator[
         PostgresControlRepository,
         PostgresResearchDataCampaignRepository,
         PostgresDynamicResearchSpecRepository,
+        PostgresDynamicValidationRepository,
     ]
 ]:
     schema = f"autoquant_test_{uuid4().hex}"
@@ -55,6 +67,10 @@ async def repositories() -> AsyncIterator[
         dsn=POSTGRES_DSN,
         schema=schema,
     )
+    validations = PostgresDynamicValidationRepository.connect(
+        dsn=POSTGRES_DSN,
+        schema=schema,
+    )
     migration = "\n".join(
         Path(path).read_text(encoding="utf-8")
         for path in (
@@ -62,12 +78,14 @@ async def repositories() -> AsyncIterator[
             "migrations/postgres/023_research_universes.sql",
             "migrations/postgres/024_research_data_campaigns.sql",
             "migrations/postgres/025_dynamic_research_specs.sql",
+            "migrations/postgres/026_dynamic_validation_evidence.sql",
         )
     )
     try:
         await control.initialize(migration)
-        yield control, campaigns, specs
+        yield control, campaigns, specs, validations
     finally:
+        await validations.close()
         await specs.close()
         await campaigns.close()
         try:
@@ -112,9 +130,10 @@ async def test_campaign_recovers_retries_and_finalizes_verified_shards(
         PostgresControlRepository,
         PostgresResearchDataCampaignRepository,
         PostgresDynamicResearchSpecRepository,
+        PostgresDynamicValidationRepository,
     ],
 ) -> None:
-    control, campaigns, specs = repositories
+    control, campaigns, specs, validations = repositories
     spec = ResearchDataCampaignSpec(
         campaign_key="integration-csi300-history-v1",
         policy_hash="a" * 64,
@@ -224,6 +243,89 @@ async def test_campaign_recovers_retries_and_finalizes_verified_shards(
 
     assert record == repeated_record
     assert await specs.read(frozen.spec_hash) == record
+
+    candidate_evaluations = tuple(
+        DynamicCandidateEvaluation(
+            parameters=parameters,
+            score=Decimal("0"),
+            result=_empty_backtest(
+                strategy_id=parameters.strategy_id,
+                manifest_hash=manifest.manifest_hash,
+                start=date(2025, 1, 1),
+                end=date(2025, 1, 2),
+            ),
+        )
+        for parameters in frozen.candidates
+    )
+    winner = max(
+        candidate_evaluations,
+        key=lambda value: (
+            value.score,
+            -value.parameters.lookback_sessions,
+            -value.parameters.rebalance_sessions,
+            -value.parameters.selection_count,
+        ),
+    )
+    fold = DynamicValidationFold(
+        sequence=1,
+        train_start=date(2025, 1, 1),
+        train_end=date(2025, 1, 2),
+        test_start=date(2025, 1, 4),
+        test_end=date(2025, 1, 5),
+        selected=winner.parameters,
+        selection_score=winner.score,
+        candidate_evaluations=candidate_evaluations,
+        training_result=winner.result,
+        test_result=_empty_backtest(
+            strategy_id=winner.parameters.strategy_id,
+            manifest_hash=manifest.manifest_hash,
+            start=date(2025, 1, 4),
+            end=date(2025, 1, 5),
+        ),
+        benchmark_result=_empty_backtest(
+            strategy_id=frozen.benchmark_version,
+            manifest_hash=manifest.manifest_hash,
+            start=date(2025, 1, 4),
+            end=date(2025, 1, 5),
+        ),
+    )
+    validation_result = DynamicValidationResult(
+        panel_hash="9" * 64,
+        spec_hash=frozen.spec_hash,
+        dataset_manifest_hash=manifest.manifest_hash,
+        as_of=NOW,
+        folds=(fold,),
+        compounded_oos_return=Decimal("0"),
+        benchmark_compounded_oos_return=Decimal("0"),
+        excess_oos_return=Decimal("0"),
+        profitable_fold_rate=Decimal("0"),
+        worst_oos_drawdown=Decimal("0"),
+        mean_training_return=Decimal("0"),
+        selection_optimism=Decimal("0"),
+        rejected_order_count=0,
+    )
+    evidence = assess_dynamic_validation(
+        validation_result,
+        policy=frozen.evidence_policy,
+    )
+    validation_record = await validations.save(
+        validation_result,
+        evidence,
+        requested_by="test",
+        completed_at=NOW,
+    )
+    repeated_validation = await validations.save(
+        validation_result,
+        evidence,
+        requested_by="another-operator",
+        completed_at=NOW + timedelta(seconds=1),
+    )
+
+    assert repeated_validation == validation_record
+    assert (
+        await validations.read(validation_result.result_hash)
+        == validation_record
+    )
     with pytest.raises(ValueError, match="already frozen"):
         await specs.freeze(
             DynamicPortfolioResearchSpec(
@@ -237,3 +339,43 @@ async def test_campaign_recovers_retries_and_finalizes_verified_shards(
             requested_by="test",
             created_at=NOW,
         )
+
+
+def _empty_backtest(
+    *,
+    strategy_id: str,
+    manifest_hash: str,
+    start: date,
+    end: date,
+) -> BacktestResult:
+    snapshots = tuple(
+        AccountSnapshot(
+            session_date=session_date,
+            cash=Decimal("1000000"),
+            market_value=Decimal("0"),
+            equity=Decimal("1000000"),
+            positions=(),
+            ledger_hash="0" * 64,
+        )
+        for session_date in (start, end)
+    )
+    result = BacktestResult(
+        strategy_id=strategy_id,
+        manifest_hash=manifest_hash,
+        as_of=NOW,
+        initial_cash=Decimal("1000000"),
+        ending_equity=Decimal("1000000"),
+        total_return=Decimal("0"),
+        max_drawdown=Decimal("0"),
+        turnover=Decimal("0"),
+        total_fees=Decimal("0"),
+        reports=(),
+        snapshots=snapshots,
+        events=(),
+        rule_versions=(),
+        fee_version="integration-fees-v1",
+        execution_version="integration-execution-v1",
+        ledger_hash="0" * 64,
+    )
+    assert _selection_score(result) == 0
+    return result

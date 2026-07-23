@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -24,6 +27,13 @@ from autoquant.backtest.portfolio_validation import (
 )
 from autoquant.backtest.rules import AshareRuleBook, SecurityStatus
 from autoquant.data.daily_models import DailyBarRevision
+from autoquant.errors import PersistenceUnavailableError
+from autoquant.web.dynamic_validation_store import (
+    DynamicValidationRecord,
+    _fold_parameters,
+    _record,
+    _run_parameters,
+)
 
 INSTRUMENTS = ("000001.XSHE", "600000.XSHG", "600519.XSHG")
 PARAMETERS = CrossSectionalMomentumParameters(20, 5, 2)
@@ -182,3 +192,56 @@ def test_dynamic_validation_rejects_aggregate_metric_tampering() -> None:
             result,
             rejected_order_count=result.rejected_order_count + 1,
         )
+
+
+def test_dynamic_validation_store_payload_round_trips_and_detects_tampering() -> None:
+    count = 273
+    spec = _spec(count)
+    result = DynamicWalkForwardValidator().run(
+        panel=_panel(count, spec),
+        spec=spec,
+    )
+    evidence = assess_dynamic_validation(
+        result,
+        policy=spec.evidence_policy,
+    )
+    expected = DynamicValidationRecord(
+        result=result,
+        evidence=evidence,
+        requested_by="operator",
+        completed_at=AS_OF,
+    )
+    run = _run_parameters(expected)
+    run["live_trading_locked"] = True
+    folds = tuple(
+        _fold_parameters(result.result_hash, fold)
+        for fold in result.folds
+    )
+
+    assert _record(
+        cast(Any, run),
+        cast(Any, folds),
+    ) == expected
+
+    evaluations = json.loads(
+        str(folds[0]["candidate_evaluations"])
+    )
+    evaluations[0]["evaluation_hash"] = "0" * 64
+    folds[0]["candidate_evaluations"] = json.dumps(evaluations)
+    with pytest.raises(
+        PersistenceUnavailableError,
+        match="integrity",
+    ):
+        _record(cast(Any, run), cast(Any, folds))
+
+
+def test_dynamic_validation_migration_is_additive_and_immutable() -> None:
+    sql = Path(
+        "migrations/postgres/026_dynamic_validation_evidence.sql"
+    ).read_text(encoding="utf-8")
+
+    assert "CREATE TABLE IF NOT EXISTS dynamic_validation_runs" in sql
+    assert "CREATE TABLE IF NOT EXISTS dynamic_validation_folds" in sql
+    assert sql.count("autoquant_reject_immutable_change()") == 2
+    assert "live_trading_locked" in sql
+    assert "VALUES ('postgres', 26)" in sql

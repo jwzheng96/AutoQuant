@@ -15,6 +15,10 @@ from autoquant.backtest.dynamic_panel import DynamicMarketPanelCompiler
 from autoquant.backtest.dynamic_portfolio import (
     DynamicPortfolioResearchSpec,
 )
+from autoquant.backtest.dynamic_validation import (
+    DynamicWalkForwardValidator,
+    assess_dynamic_validation,
+)
 from autoquant.backtest.runner import ManifestMarketCompiler
 from autoquant.backtest.validation import (
     SmaParameters,
@@ -115,6 +119,9 @@ from autoquant.execution.validated_sma_portfolio import (
 )
 from autoquant.web.dynamic_research_store import (
     PostgresDynamicResearchSpecRepository,
+)
+from autoquant.web.dynamic_validation_store import (
+    PostgresDynamicValidationRepository,
 )
 from autoquant.web.models import (
     PortfolioValidationExperiment,
@@ -893,6 +900,143 @@ async def compile_dynamic_market_panel(
         await control.close()
         await universes.close()
         await campaigns.close()
+        await specifications.close()
+
+
+async def run_dynamic_validation(
+    settings: AppSettings,
+    *,
+    spec_hash: str,
+    requested_by: str,
+) -> dict[str, object]:
+    """Run and persist the frozen nested walk-forward validation."""
+
+    if settings.live_trading_enabled:
+        raise MissingCapabilityError(
+            "dynamic validation requires live trading locked"
+        )
+    if (
+        not requested_by.strip()
+        or requested_by != requested_by.strip()
+        or len(requested_by) > 128
+    ):
+        raise ValueError(
+            "requested_by must contain 1-128 trimmed characters"
+        )
+    postgres_dsn = configured_dsn(
+        settings.postgres_dsn,
+        capability="PostgreSQL",
+    )
+    specifications = PostgresDynamicResearchSpecRepository.connect(
+        dsn=postgres_dsn
+    )
+    validations = PostgresDynamicValidationRepository.connect(
+        dsn=postgres_dsn
+    )
+    campaigns = PostgresResearchDataCampaignRepository.connect(
+        dsn=postgres_dsn
+    )
+    universes = PostgresResearchUniverseRepository.connect(
+        dsn=postgres_dsn
+    )
+    control = PostgresControlRepository.connect(dsn=postgres_dsn)
+    dataset_reader: _RecyclingDailyDatasetReader | None = None
+    try:
+        spec_record = await specifications.read(spec_hash)
+        plan = await _load_research_input_plan(
+            campaigns=campaigns,
+            universes=universes,
+            manifest_hash=(
+                spec_record.spec.dataset_manifest_hash
+            ),
+        )
+        dataset_reader = _RecyclingDailyDatasetReader(
+            clickhouse_dsn=configured_dsn(
+                settings.clickhouse_dsn,
+                capability="ClickHouse",
+            ),
+            control_repository=control,
+        )
+        panel = await DynamicMarketPanelCompiler(
+            shard_reader=ValidatedResearchDatasetReader(
+                plan=plan,
+                manifest_reader=control,
+                dataset_reader=dataset_reader,
+            )
+        ).compile(
+            plan=plan,
+            spec=spec_record.spec,
+        )
+        result = DynamicWalkForwardValidator().run(
+            panel=panel,
+            spec=spec_record.spec,
+        )
+        evidence = assess_dynamic_validation(
+            result,
+            policy=spec_record.spec.evidence_policy,
+        )
+        completed_at = datetime.now(UTC)
+        record = await validations.save(
+            result,
+            evidence,
+            requested_by=requested_by,
+            completed_at=completed_at,
+        )
+        payload: dict[str, object] = {
+            "assessment_hash": (
+                record.evidence.assessment_hash
+            ),
+            "benchmark_compounded_oos_return": str(
+                record.result.benchmark_compounded_oos_return
+            ),
+            "compounded_oos_return": str(
+                record.result.compounded_oos_return
+            ),
+            "evidence_status": (
+                record.evidence.evidence_status
+            ),
+            "excess_oos_return": str(
+                record.result.excess_oos_return
+            ),
+            "fold_count": record.evidence.fold_count,
+            "gate_failures": list(
+                record.evidence.gate_failures
+            ),
+            "live_trading_locked": True,
+            "oos_sessions": record.evidence.oos_sessions,
+            "panel_hash": record.result.panel_hash,
+            "profitable_fold_rate": str(
+                record.result.profitable_fold_rate
+            ),
+            "rejected_order_count": (
+                record.evidence.rejected_order_count
+            ),
+            "result_hash": record.result.result_hash,
+            "selection_optimism": str(
+                record.result.selection_optimism
+            ),
+            "spec_hash": record.result.spec_hash,
+            "status": "completed",
+            "worst_oos_drawdown": str(
+                record.result.worst_oos_drawdown
+            ),
+        }
+        await control.append_audit_event(
+            "research.dynamic_validation.completed",
+            completed_at,
+            {
+                **payload,
+                "requested_by": requested_by,
+            },
+        )
+        return payload
+    finally:
+        if dataset_reader is not None:
+            await dataset_reader.close()
+        await control.close()
+        await universes.close()
+        await campaigns.close()
+        await validations.close()
         await specifications.close()
 
 

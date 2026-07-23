@@ -911,6 +911,42 @@ def test_dynamic_market_panel_compilation_is_live_locked() -> None:
     compilation.assert_awaited_once()
 
 
+def test_dynamic_validation_run_is_live_locked_and_redacted() -> None:
+    payload = {
+        "evidence_status": "rejected",
+        "fold_count": 16,
+        "live_trading_locked": True,
+        "result_hash": "a" * 64,
+        "spec_hash": "b" * 64,
+        "status": "completed",
+    }
+    validation = AsyncMock(return_value=payload)
+    with patch(
+        "autoquant.cli.run_dynamic_validation",
+        new=validation,
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "dynamic-validation-run",
+                "--spec-hash",
+                "b" * 64,
+                "--requested-by",
+                "operator",
+            ],
+            env={
+                "AQ_POSTGRES_DSN": (
+                    "postgresql+asyncpg://sensitive"
+                )
+            },
+        )
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == payload
+    assert "sensitive" not in result.stdout
+    validation.assert_awaited_once()
+
+
 def test_research_input_shard_check_is_redacted() -> None:
     payload = {
         "instrument": "000001.XSHE",

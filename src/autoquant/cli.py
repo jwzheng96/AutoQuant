@@ -48,6 +48,7 @@ from autoquant.operations import (
     retry_research_data_campaign_item,
     revoke_paper_strategy,
     run_daily_ingestion,
+    run_dynamic_validation,
     run_qmt_readonly_acceptance,
     run_research_data_campaign,
     run_session_reference_refresh,
@@ -1015,6 +1016,26 @@ def dynamic_market_panel_compile(
         )
     except (AutoQuantError, LookupError, ValueError):
         _fail("dynamic market panel compilation failed")
+    _emit(payload)
+
+
+@app.command("dynamic-validation-run")
+def dynamic_validation_run(
+    spec_hash: Annotated[str, typer.Option("--spec-hash")],
+    requested_by: Annotated[str, typer.Option("--requested-by")],
+) -> None:
+    """Run frozen nested OOS validation; live execution remains locked."""
+
+    try:
+        payload = asyncio.run(
+            run_dynamic_validation(
+                _settings(),
+                spec_hash=spec_hash,
+                requested_by=requested_by,
+            )
+        )
+    except (AutoQuantError, LookupError, ValueError):
+        _fail("dynamic validation failed")
     _emit(payload)
 
 
