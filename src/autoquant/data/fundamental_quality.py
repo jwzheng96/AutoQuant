@@ -56,10 +56,12 @@ class FundamentalQualityGate:
             instrument: str,
             event_date: date,
             message: str,
+            *,
+            severity: QualitySeverity = QualitySeverity.ERROR,
         ) -> None:
             issues.append(
                 QualityIssue(
-                    severity=QualitySeverity.ERROR,
+                    severity=severity,
                     code=code,
                     instrument=instrument,
                     event_time=self._event_time(event_date),
@@ -131,6 +133,18 @@ class FundamentalQualityGate:
                     valuation.session_date,
                     "daily valuation is later than as_of",
                 )
+            if (
+                valuation.circulating_market_value_cny
+                > valuation.total_market_value_cny
+            ):
+                add(
+                    "circulating_market_value_exceeds_total",
+                    valuation.instrument,
+                    valuation.session_date,
+                    "source circulating market value exceeds total "
+                    "market value; original values were preserved",
+                    severity=QualitySeverity.WARNING,
+                )
 
         for indicator in batch.indicators:
             if (
@@ -162,13 +176,17 @@ class FundamentalQualityGate:
                     start,
                     "instrument has no daily valuation history",
                 )
+        has_errors = any(
+            issue.severity is QualitySeverity.ERROR
+            for issue in issues
+        )
         return QualityReport(
             requested_instruments=instruments,
             start=self._start_time(start),
             end=self._event_time(end),
             as_of=cutoff,
             issues=tuple(issues),
-            production_complete=not issues,
+            production_complete=not has_errors,
         )
 
     @staticmethod

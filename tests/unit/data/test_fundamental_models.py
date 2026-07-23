@@ -86,12 +86,14 @@ def test_fundamental_revisions_are_canonical_and_preserve_nulls() -> None:
     ).content_hash
 
 
-def test_valuation_rejects_impossible_market_value_relationship() -> None:
-    with pytest.raises(ValueError, match="circulating_market_value"):
-        valuation(
-            total_market_value_cny="100",
-            circulating_market_value_cny="101",
-        )
+def test_valuation_preserves_vendor_market_value_mismatch() -> None:
+    value = valuation(
+        total_market_value_cny="100",
+        circulating_market_value_cny="101",
+    )
+
+    assert value.total_market_value_cny == Decimal("100")
+    assert value.circulating_market_value_cny == Decimal("101")
 
 
 def test_indicator_rejects_lookback_dated_announcement() -> None:

@@ -125,10 +125,6 @@ class DailyValuationRevision:
             name="circulating_market_value_cny",
             positive=True,
         )
-        if self.circulating_market_value_cny > self.total_market_value_cny:
-            raise ValueError(
-                "circulating_market_value_cny cannot exceed total_market_value_cny"
-            )
         object.__setattr__(self, "content_hash", _canonical_hash(self.payload()))
 
     def payload(self) -> dict[str, object]:
