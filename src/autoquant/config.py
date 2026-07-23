@@ -72,6 +72,16 @@ class AppSettings(BaseSettings):
         ge=Decimal("0.1"),
         le=Decimal("60"),
     )
+    research_data_max_inactive_bytes: int = Field(
+        default=6 * 1024 * 1024 * 1024,
+        ge=256 * 1024 * 1024,
+        le=1024 * 1024 * 1024 * 1024,
+    )
+    research_data_max_inactive_parts: int = Field(
+        default=24_000,
+        ge=1_000,
+        le=1_000_000,
+    )
     paper_scheduler_lease_ttl_seconds: int = Field(default=30, ge=5, le=300)
     paper_scheduler_renewal_seconds: int = Field(default=10, ge=1, le=299)
     qmt_userdata_path: Path | None = None

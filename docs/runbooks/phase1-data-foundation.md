@@ -384,6 +384,13 @@ next invocation. Vendor response-shape and quality failures stop in a terminal
 state instead of being skipped. After the cause is understood and corrected,
 explicitly audit a bounded retry:
 
+Before claiming each shard, the worker measures inactive MergeTree parts for
+the six AutoQuant daily tables. It returns `maintenance_wait=true` without
+claiming another item when either `AQ_RESEARCH_DATA_MAX_INACTIVE_BYTES`
+(default 6 GiB) or `AQ_RESEARCH_DATA_MAX_INACTIVE_PARTS` (default 24,000) is
+reached. Let ClickHouse remove old parts before rerunning; do not bypass the
+guard by deleting storage directories or weakening merge durability.
+
 ```bash
 uv run autoquant research-data-campaign-retry \
   --campaign-hash <campaign-hash> \

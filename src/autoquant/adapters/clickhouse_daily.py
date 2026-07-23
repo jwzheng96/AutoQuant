@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
@@ -89,6 +90,16 @@ _LIMIT_INSERT_COLUMNS = (
     "record_id", "source", "instrument", "session_date", "pre_close", "up_limit",
     "down_limit", "available_at", "response_hash", "content_hash",
 )
+
+
+@dataclass(frozen=True, slots=True)
+class ClickHouseMergePressure:
+    inactive_bytes: int
+    inactive_parts: int
+
+    def __post_init__(self) -> None:
+        if self.inactive_bytes < 0 or self.inactive_parts < 0:
+            raise ValueError("ClickHouse merge pressure cannot be negative")
 
 
 class ClickHouseDailyRepository:
@@ -191,6 +202,50 @@ class ClickHouseDailyRepository:
             raise PersistenceUnavailableError("ClickHouse daily schema is unavailable")
         if not isinstance(version, int) or version < 3:
             raise PersistenceUnavailableError("ClickHouse daily schema version is unavailable")
+
+    async def merge_pressure(self) -> ClickHouseMergePressure:
+        """Measure obsolete business-table parts without changing merge settings."""
+
+        tables = (
+            self._bar_table,
+            self._factor_table,
+            self._session_table,
+            self._lifecycle_table,
+            self._suspension_table,
+            self._limit_table,
+        )
+        sql = """
+SELECT
+    toUInt64(coalesce(sum(bytes_on_disk), 0)) AS inactive_bytes,
+    toUInt64(count()) AS inactive_parts
+FROM system.parts
+WHERE database = currentDatabase()
+  AND table IN {tables:Array(String)}
+  AND active = 0
+""".strip()
+        try:
+            result = await self._client.query(
+                query=sql,
+                parameters={"tables": list(tables)},
+            )
+            rows = tuple(tuple(row) for row in result.result_rows)
+            if (
+                tuple(result.column_names)
+                != ("inactive_bytes", "inactive_parts")
+                or len(rows) != 1
+                or len(rows[0]) != 2
+            ):
+                raise ValueError("unexpected merge pressure result")
+            inactive_bytes = int(rows[0][0])
+            inactive_parts = int(rows[0][1])
+            return ClickHouseMergePressure(
+                inactive_bytes=inactive_bytes,
+                inactive_parts=inactive_parts,
+            )
+        except Exception:
+            raise PersistenceUnavailableError(
+                "ClickHouse merge pressure check failed"
+            ) from None
 
     async def append_bars(self, records: tuple[DailyBarRevision, ...]) -> int:
         rows: list[tuple[Any, ...]] = []

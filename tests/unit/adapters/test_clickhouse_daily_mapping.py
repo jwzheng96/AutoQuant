@@ -10,7 +10,10 @@ from unittest.mock import AsyncMock
 import pytest
 from clickhouse_connect.driver.asyncclient import AsyncClient
 
-from autoquant.adapters.clickhouse_daily import ClickHouseDailyRepository
+from autoquant.adapters.clickhouse_daily import (
+    ClickHouseDailyRepository,
+    ClickHouseMergePressure,
+)
 from autoquant.data.daily_models import AdjustmentFactorRevision, DailyBarRevision
 from autoquant.errors import PersistenceUnavailableError
 
@@ -279,3 +282,41 @@ async def test_connection_check_requires_all_tables_and_schema_version_three() -
     client.command.side_effect = [1, 1, 1, 1, 1, 0, 1, 3]
     with pytest.raises(PersistenceUnavailableError, match="schema"):
         await repository(client).check_connection()
+
+
+@pytest.mark.asyncio
+async def test_merge_pressure_counts_only_inactive_business_parts() -> None:
+    client = RecordingClient()
+    client.query.return_value = SimpleNamespace(
+        column_names=("inactive_bytes", "inactive_parts"),
+        result_rows=[(6_000_000_000, 23_000)],
+    )
+
+    pressure = await repository(client).merge_pressure()
+
+    assert pressure == ClickHouseMergePressure(
+        inactive_bytes=6_000_000_000,
+        inactive_parts=23_000,
+    )
+    call = client.query.await_args
+    assert "active = 0" in call.kwargs["query"]
+    assert set(call.kwargs["parameters"]["tables"]) == {
+        "daily_bar_revisions",
+        "adjustment_factor_revisions",
+        "trading_session_revisions",
+        "instrument_lifecycle_revisions",
+        "daily_suspension_revisions",
+        "daily_price_limit_revisions",
+    }
+
+
+@pytest.mark.asyncio
+async def test_merge_pressure_fails_closed_on_malformed_result() -> None:
+    client = RecordingClient()
+    client.query.return_value = SimpleNamespace(
+        column_names=("wrong",),
+        result_rows=[(-1,)],
+    )
+
+    with pytest.raises(PersistenceUnavailableError, match="pressure"):
+        await repository(client).merge_pressure()

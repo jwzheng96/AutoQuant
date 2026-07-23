@@ -33,6 +33,8 @@ def test_defaults_are_non_live_and_fail_closed(monkeypatch: pytest.MonkeyPatch) 
     assert settings.environment is RuntimeEnvironment.BACKTEST
     assert settings.live_trading_enabled is False
     assert settings.paper_initial_cash == Decimal("1000000")
+    assert settings.research_data_max_inactive_bytes == 6 * 1024**3
+    assert settings.research_data_max_inactive_parts == 24_000
     assert settings.qmt_userdata_path is None
     assert settings.qmt_account_id is None
     assert settings.qmt_session_id is None
@@ -46,6 +48,21 @@ def test_defaults_are_non_live_and_fail_closed(monkeypatch: pytest.MonkeyPatch) 
         settings.require_paper_runtime()
     with pytest.raises(MissingCapabilityError, match="QMT session lease"):
         settings.require_qmt_runtime()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("research_data_max_inactive_bytes", 1),
+        ("research_data_max_inactive_parts", 1),
+    ],
+)
+def test_research_data_merge_pressure_limits_are_bounded(
+    field: str,
+    value: int,
+) -> None:
+    with pytest.raises(ValueError):
+        AppSettings(_env_file=None, **{field: value})
 
 
 def test_rqdata_credentials_are_secret_values() -> None:

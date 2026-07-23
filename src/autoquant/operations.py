@@ -586,6 +586,9 @@ async def run_research_data_campaign(
     requeued = 0
     failed = 0
     recovered = 0
+    maintenance_wait = False
+    last_inactive_bytes = 0
+    last_inactive_parts = 0
     try:
         status = await repository.status(campaign_hash=campaign_hash)
         recovered = await repository.recover_running(
@@ -607,6 +610,17 @@ async def run_research_data_campaign(
             now=lambda: datetime.now(UTC),
         )
         for _ in range(max_items):
+            pressure = await market.merge_pressure()
+            last_inactive_bytes = pressure.inactive_bytes
+            last_inactive_parts = pressure.inactive_parts
+            if (
+                pressure.inactive_bytes
+                >= settings.research_data_max_inactive_bytes
+                or pressure.inactive_parts
+                >= settings.research_data_max_inactive_parts
+            ):
+                maintenance_wait = True
+                break
             item = await repository.claim_next(
                 campaign_hash=status.spec.campaign_hash,
                 now=datetime.now(UTC),
@@ -681,15 +695,21 @@ async def run_research_data_campaign(
                 "manifest_hash": (
                     None if manifest is None else manifest.manifest_hash
                 ),
+                "maintenance_wait": maintenance_wait,
                 "processed_count": processed,
                 "recovered_count": recovered,
                 "requeued_count": requeued,
+                "inactive_bytes": last_inactive_bytes,
+                "inactive_parts": last_inactive_parts,
             },
         )
         payload = _research_data_campaign_payload(final_status)
         payload["batch"] = {
             "completed_count": completed,
             "failed_count": failed,
+            "inactive_bytes": last_inactive_bytes,
+            "inactive_parts": last_inactive_parts,
+            "maintenance_wait": maintenance_wait,
             "processed_count": processed,
             "recovered_count": recovered,
             "requeued_count": requeued,
