@@ -491,8 +491,7 @@ class ConsoleService:
                 "session_risk_daily_initializer",
                 "continuous_quote_source",
                 "coordinator_scheduler",
-                "broker_disconnect_drill",
-                "kill_switch_drill",
+                "operational_kill_switch_reset_drill",
                 "paper_evidence_period",
             ),
         )

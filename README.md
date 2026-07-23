@@ -66,6 +66,11 @@ Database crash drills cover restart before broker dispatch and restart after bro
 before internal callbacks. Operational market-phase/quote adapters and scheduling remain absent,
 so this core is still not callable from the console.
 
+Failure injection now also covers broker submission loss and an explicit broker `unknown` state.
+Dependency loss leaves the approved local intent recoverable but activates the durable kill
+switch. An `unknown` order activates `order_state_unknown` even when both account projections
+otherwise reconcile, so numerical equality cannot falsely authorize another order.
+
 All dependency, test, lint, type-check, migration, and Git mutation commands for this
 checkout must run on `rlocal`; see [the phase-1 runbook](docs/runbooks/phase1-data-foundation.md).
 

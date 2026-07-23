@@ -260,9 +260,16 @@ class PaperOrderCoordinator:
         post_report, post_evidence = await self._reconcile(marks=request.marks, now=request.now)
         await self._observe_session(evidence=post_evidence, now=request.now)
         control = await self._guard_reconciliation(post_report, now=request.now)
+        control = await self._guard_unknown_state(
+            projection=projection,
+            control=control,
+            now=request.now,
+        )
         return PaperCoordinationResult(
             status=(
-                PaperCoordinationStatus.RECONCILIATION_FAILED
+                PaperCoordinationStatus.BLOCKED
+                if projection.state is PaperOrderState.UNKNOWN
+                else PaperCoordinationStatus.RECONCILIATION_FAILED
                 if not post_report.reconciled
                 else PaperCoordinationStatus.FILLED
                 if projection.state is PaperOrderState.FILLED
@@ -337,9 +344,16 @@ class PaperOrderCoordinator:
         post_report, post_evidence = await self._reconcile(marks=request.marks, now=request.now)
         await self._observe_session(evidence=post_evidence, now=request.now)
         control = await self._guard_reconciliation(post_report, now=request.now)
+        control = await self._guard_unknown_state(
+            projection=projection,
+            control=control,
+            now=request.now,
+        )
         return PaperCoordinationResult(
             status=(
-                PaperCoordinationStatus.RECOVERED
+                PaperCoordinationStatus.BLOCKED
+                if projection.state is PaperOrderState.UNKNOWN
+                else PaperCoordinationStatus.RECOVERED
                 if post_report.reconciled
                 else PaperCoordinationStatus.RECONCILIATION_FAILED
             ),
@@ -473,6 +487,24 @@ class PaperOrderCoordinator:
             actor="paper-order-coordinator",
             now=now,
             evidence_hash=report.report_hash,
+        )
+
+    async def _guard_unknown_state(
+        self,
+        *,
+        projection: PaperOrderProjection,
+        control: KillSwitchControl,
+        now: datetime,
+    ) -> KillSwitchControl:
+        if projection.state is not PaperOrderState.UNKNOWN:
+            return control
+        return await self._controls.activate(
+            account_id=self._account_id,
+            command_id=f"coord-order-unknown-{uuid4()}",
+            reason=KillSwitchReason.ORDER_STATE_UNKNOWN,
+            actor="paper-order-coordinator",
+            now=max(now, control.changed_at),
+            evidence_hash=projection.projection_hash,
         )
 
     def _risk_account(

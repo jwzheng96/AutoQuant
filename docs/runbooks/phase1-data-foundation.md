@@ -159,6 +159,11 @@ needs an exchange-calendar-aware scheduler. PostgreSQL integration drills verify
 before initial broker dispatch and after broker facts are committed but before callbacks reach
 the internal order chain.
 
+Broker-disconnect injection verifies that a failed submit activates
+`dependency_unavailable` while preserving the approved intent for audit. An injected broker
+`unknown` fact is consumed and reconciled, then independently activates `order_state_unknown`;
+operators must never reset that state merely because cash and positions happen to match.
+
 ## Research execution boundary
 
 `autoquant.backtest` provides the deterministic cash-account ledger used by the research

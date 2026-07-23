@@ -264,6 +264,36 @@ class PersistentSimulatedBroker:
         ):
             raise SimulatedBrokerControlError("simulated broker control fence rejected submission")
 
+    async def report_unknown(
+        self, *, order_hash: str, now: datetime
+    ) -> BrokerOrderUpdate:
+        occurred_at = to_utc(now, name="simulated unknown time")
+        try:
+            async with self._engine.begin() as connection:
+                await _lock(connection, order_hash)
+                row = await self._select_order(connection, order_hash)
+                if row is None:
+                    raise LookupError("simulated broker order not found")
+                current = _state_from_row(row)
+                update = BrokerOrderUpdate(
+                    account_id=current.order.account_id,
+                    client_order_id=current.order.client_order_id,
+                    broker_order_id=current.broker_order_id,
+                    broker_sequence=current.last_broker_sequence + 1,
+                    state=PaperOrderState.UNKNOWN,
+                    cumulative_filled_quantity=current.cumulative_filled_quantity,
+                    average_fill_price=current.average_fill_price,
+                    occurred_at=occurred_at,
+                )
+                await self._append_update(connection, current, update)
+                return update
+        except (LookupError, ValueError, PersistenceUnavailableError):
+            raise
+        except Exception:
+            raise PersistenceUnavailableError(
+                "Simulated broker unknown-state report failed"
+            ) from None
+
     async def replay(self, *, order_hash: str) -> SimulatedBrokerOrder:
         try:
             async with self._engine.connect() as connection:

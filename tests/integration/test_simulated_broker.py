@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
@@ -183,6 +184,7 @@ def _submission_request(
     now: datetime = NOW,
     quantity: int = 100,
     policy: RiskPolicy | None = None,
+    limit_price: str | None = None,
 ) -> PaperSubmissionRequest:
     return PaperSubmissionRequest(
         order=ProposedOrder(
@@ -191,6 +193,7 @@ def _submission_request(
             side=OrderSide.BUY,
             quantity=quantity,
             submitted_at=NOW,
+            limit_price=None if limit_price is None else Decimal(limit_price),
         ),
         quote=_quote(),
         rules=AshareRuleBook().resolve(
@@ -806,3 +809,100 @@ async def test_coordinator_recovers_broker_facts_after_callback_crash(
     assert recovered.post_reconciliation.reconciled is True
     assert (await broker.verify_recovery()).fact_count == 2
     assert (await executions.verify_recovery()).event_count == 2
+
+
+@pytest.mark.asyncio
+async def test_broker_disconnect_activates_dependency_kill_switch(
+    repositories: Repositories,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    risks, executions, controls, broker, sessions, _, _ = repositories
+    await _reset_kill_switch(
+        executions=executions,
+        controls=controls,
+        sessions=sessions,
+    )
+    coordinator = PaperOrderCoordinator(
+        account_id="paper-main",
+        initial_cash=Decimal("100000"),
+        risks=risks,
+        executions=executions,
+        controls=controls,
+        broker=broker,
+        sessions=sessions,
+    )
+    monkeypatch.setattr(
+        broker,
+        "submit",
+        AsyncMock(
+            side_effect=PersistenceUnavailableError(
+                "injected simulated broker disconnect"
+            )
+        ),
+    )
+
+    with pytest.raises(PersistenceUnavailableError, match="injected"):
+        await coordinator.submit(
+            _submission_request(order_id="broker-disconnect-order-0001")
+        )
+
+    control = await controls.get(account_id="paper-main")
+    assert control.active is True
+    assert control.reason is KillSwitchReason.DEPENDENCY_UNAVAILABLE
+    order_summary = await executions.verify_recovery()
+    assert order_summary.order_count == 1
+    assert order_summary.open_order_count == 1
+
+
+@pytest.mark.asyncio
+async def test_unknown_broker_state_is_reconciled_but_still_stops_new_orders(
+    repositories: Repositories,
+) -> None:
+    risks, executions, controls, broker, sessions, _, _ = repositories
+    await _reset_kill_switch(
+        executions=executions,
+        controls=controls,
+        sessions=sessions,
+    )
+    order = await _persist_order(
+        risks,
+        executions,
+        order_id="unknown-broker-state-order-0001",
+        limit_price="10.00",
+    )
+    control = await controls.get(account_id="paper-main")
+    await broker.submit(
+        order=order,
+        quote=_quote(),
+        now=NOW,
+        control_fence=control,
+    )
+    await broker.report_unknown(
+        order_hash=order.order_hash,
+        now=NOW + timedelta(seconds=1),
+    )
+    restarted = PaperOrderCoordinator(
+        account_id="paper-main",
+        initial_cash=Decimal("100000"),
+        risks=risks,
+        executions=executions,
+        controls=controls,
+        broker=broker,
+        sessions=sessions,
+    )
+
+    result = await restarted.submit(
+        _submission_request(
+            order_id=order.client_order_id,
+            now=NOW + timedelta(seconds=1),
+            limit_price="10.00",
+        )
+    )
+
+    assert result.status is PaperCoordinationStatus.BLOCKED
+    assert result.projection is not None
+    assert result.projection.state is PaperOrderState.UNKNOWN
+    assert result.post_reconciliation is not None
+    assert result.post_reconciliation.reconciled is True
+    assert result.control.active is True
+    assert result.control.reason is KillSwitchReason.ORDER_STATE_UNKNOWN
