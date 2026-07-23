@@ -19,6 +19,7 @@ from autoquant.execution.coordinator import PaperCoordinationStatus
 from autoquant.execution.market_clock import AShareTradingPhase
 from autoquant.execution.paper_scheduler import (
     PaperSchedulerStatus,
+    PaperStrategyEvaluation,
     PaperStrategyIntent,
     PaperTradingScheduler,
     PreOpenMarks,
@@ -96,6 +97,28 @@ def _intent(*, submitted_at: datetime = OPEN, order_id: str = "paper-signal-0001
     )
 
 
+def _evaluation(
+    *,
+    intents: tuple[PaperStrategyIntent, ...] = (),
+    evaluated_at: datetime = OPEN,
+    strategy_id: str = "test-strategy-v1",
+    signal_evidence_hash: str = "f" * 64,
+) -> PaperStrategyEvaluation:
+    return PaperStrategyEvaluation(
+        strategy_id=strategy_id,
+        strategy_version="test-strategy-implementation-v1",
+        evaluated_at=evaluated_at,
+        quote_evidence_hash=_quote_book().snapshot(
+            instruments=(INSTRUMENT,),
+            now=OPEN,
+            max_age=timedelta(seconds=3),
+            require_market_open=True,
+        ).evidence_hash,
+        signal_evidence_hash=signal_evidence_hash,
+        intents=intents,
+    )
+
+
 def _scheduler(
     *,
     now_control: KillSwitchControl,
@@ -124,7 +147,7 @@ def _scheduler(
         active_coordinator.submit = AsyncMock()
     active_intents = MagicMock() if intent_source is None else intent_source
     if intent_source is None:
-        active_intents.generate = AsyncMock(return_value=())
+        active_intents.evaluate = AsyncMock(return_value=_evaluation())
     active_calendar = (
         AsyncMock(return_value=_session()) if calendar_reader is None else calendar_reader
     )
@@ -163,7 +186,7 @@ async def test_closed_or_auction_phase_is_idle_and_never_calls_strategy() -> Non
 
     assert cycle.phase is AShareTradingPhase.OPENING_AUCTION
     assert cycle.status is PaperSchedulerStatus.IDLE
-    dependencies["intents"].generate.assert_not_awaited()  # type: ignore[union-attr]
+    dependencies["intents"].evaluate.assert_not_awaited()  # type: ignore[union-attr]
     dependencies["coordinator"].submit.assert_not_awaited()  # type: ignore[union-attr]
 
 
@@ -213,7 +236,7 @@ async def test_active_control_blocks_continuous_cycle_before_quotes_or_strategy(
 
     assert cycle.status is PaperSchedulerStatus.LOCKED
     dependencies["sessions"].replay.assert_not_awaited()  # type: ignore[union-attr]
-    dependencies["intents"].generate.assert_not_awaited()  # type: ignore[union-attr]
+    dependencies["intents"].evaluate.assert_not_awaited()  # type: ignore[union-attr]
 
 
 @pytest.mark.asyncio
@@ -224,14 +247,25 @@ async def test_continuous_cycle_with_no_intents_commits_quote_evidence() -> None
 
     assert cycle.status is PaperSchedulerStatus.NO_INTENTS
     assert cycle.quote_evidence_hash is not None
+    assert cycle.strategy_evaluation_hash is not None
     assert len(cycle.cycle_hash) == 64
     dependencies["sessions"].replay.assert_awaited_once()  # type: ignore[union-attr]
+
+
+def test_strategy_evaluation_hash_commits_no_intent_signal_evidence() -> None:
+    first = _evaluation(signal_evidence_hash="e" * 64)
+    second = _evaluation(signal_evidence_hash="f" * 64)
+
+    assert first.intents == ()
+    assert first.evaluation_hash != second.evaluation_hash
 
 
 @pytest.mark.asyncio
 async def test_continuous_cycle_routes_bounded_intent_through_coordinator() -> None:
     intent_source = MagicMock()
-    intent_source.generate = AsyncMock(return_value=(_intent(),))
+    intent_source.evaluate = AsyncMock(
+        return_value=_evaluation(intents=(_intent(),))
+    )
     projection = MagicMock()
     projection.projection_hash = "d" * 64
     result = MagicMock()
@@ -253,6 +287,7 @@ async def test_continuous_cycle_routes_bounded_intent_through_coordinator() -> N
     cycle = await scheduler.tick(now=OPEN)
 
     assert cycle.status is PaperSchedulerStatus.COMPLETED
+    assert cycle.strategy_evaluation_hash is not None
     assert cycle.coordination_results == (result,)
     request = coordinator.submit.await_args.args[0]
     assert request.order.client_order_id == "paper-signal-0001"
@@ -283,15 +318,17 @@ async def test_stale_quote_or_invalid_strategy_fails_closed() -> None:
     assert controls.activate.await_args.kwargs["reason"] is (
         KillSwitchReason.DEPENDENCY_UNAVAILABLE
     )
-    dependencies["intents"].generate.assert_not_awaited()  # type: ignore[union-attr]
+    dependencies["intents"].evaluate.assert_not_awaited()  # type: ignore[union-attr]
 
     controls.activate.reset_mock()
     controls.ensure_fail_closed.return_value = inactive
     invalid_intents = MagicMock()
-    invalid_intents.generate = AsyncMock(
-        return_value=(
-            _intent(order_id="duplicate-order"),
-            _intent(order_id="duplicate-order"),
+    invalid_intents.evaluate = AsyncMock(
+        return_value=_evaluation(
+            intents=(
+                _intent(order_id="duplicate-order"),
+                _intent(order_id="duplicate-order"),
+            )
         )
     )
     valid_book = _quote_book()
@@ -305,6 +342,25 @@ async def test_stale_quote_or_invalid_strategy_fails_closed() -> None:
 
     assert invalid.status is PaperSchedulerStatus.FAILED
     assert invalid.error_code == "invalid_scheduler_input"
+    controls.activate.assert_awaited_once()
+
+    controls.activate.reset_mock()
+    controls.ensure_fail_closed.return_value = inactive
+    wrong_strategy = MagicMock()
+    wrong_strategy.evaluate = AsyncMock(
+        return_value=_evaluation(strategy_id="unapproved-strategy")
+    )
+    mismatch_scheduler, _ = _scheduler(
+        now_control=inactive,
+        controls=controls,
+        quotes=_quote_book(),
+        intent_source=wrong_strategy,
+    )
+
+    mismatch = await mismatch_scheduler.tick(now=OPEN)
+
+    assert mismatch.status is PaperSchedulerStatus.FAILED
+    assert mismatch.error_code == "invalid_scheduler_input"
     controls.activate.assert_awaited_once()
 
 

@@ -164,6 +164,12 @@ fresh quote snapshot, replayed daily session state, bounded strategy output and 
 evidence sink are required. The console replays this chain at startup. External real-time quotes
 and the resident scheduler runtime remain separate release gates.
 
+The intent source boundary returns a `PaperStrategyEvaluation`, not a bare order tuple. It must
+commit the registered strategy ID and implementation version, scheduler timestamp, exact quote
+evidence hash, signal/state evidence hash and canonical intent fingerprints. The scheduler saves
+the resulting evaluation hash for both `no_intents` and `completed` cycles. Missing or mismatched
+strategy evidence is an invalid scheduler input and fails closed.
+
 Before assembling a resident paper runtime, set `AQ_ENVIRONMENT=paper`, leave
 `AQ_LIVE_TRADING_ENABLED=false`, keep the account kill switch active, and run the read-only
 calendar refresh ahead of the session:

@@ -55,7 +55,7 @@ CycleSink = Callable[["PaperSchedulerCycle"], Awaitable[None]]
 
 
 class PaperIntentSource(Protocol):
-    async def generate(self, context: PaperStrategyContext) -> tuple[PaperStrategyIntent, ...]: ...
+    async def evaluate(self, context: PaperStrategyContext) -> PaperStrategyEvaluation: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,6 +138,54 @@ class PaperStrategyContext:
         return self.quote_snapshot.quotes
 
 
+@dataclass(frozen=True, slots=True)
+class PaperStrategyEvaluation:
+    strategy_id: str
+    strategy_version: str
+    evaluated_at: datetime
+    quote_evidence_hash: str
+    signal_evidence_hash: str
+    intents: tuple[PaperStrategyIntent, ...]
+    evaluation_hash: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        _require_nonblank(self.strategy_id, name="strategy evaluation strategy_id")
+        _require_nonblank(self.strategy_version, name="strategy_version")
+        evaluated_at = to_utc(
+            self.evaluated_at,
+            name="strategy evaluation time",
+        )
+        _require_lowercase_sha256(
+            self.quote_evidence_hash,
+            name="strategy quote_evidence_hash",
+        )
+        _require_lowercase_sha256(
+            self.signal_evidence_hash,
+            name="signal_evidence_hash",
+        )
+        intents = tuple(self.intents)
+        if any(not isinstance(intent, PaperStrategyIntent) for intent in intents):
+            raise TypeError("strategy evaluation intents are invalid")
+        object.__setattr__(self, "evaluated_at", evaluated_at)
+        object.__setattr__(self, "intents", intents)
+        object.__setattr__(
+            self,
+            "evaluation_hash",
+            _canonical_hash(
+                {
+                    "evaluated_at": evaluated_at.isoformat(timespec="microseconds"),
+                    "intent_hashes": [
+                        _strategy_intent_hash(intent) for intent in intents
+                    ],
+                    "quote_evidence_hash": self.quote_evidence_hash,
+                    "signal_evidence_hash": self.signal_evidence_hash,
+                    "strategy_id": self.strategy_id,
+                    "strategy_version": self.strategy_version,
+                }
+            ),
+        )
+
+
 class PaperSchedulerStatus(StrEnum):
     IDLE = "idle"
     LOCKED = "locked"
@@ -161,6 +209,7 @@ class PaperSchedulerCycle:
     calendar_hash: str | None = None
     mark_evidence_hash: str | None = None
     quote_evidence_hash: str | None = None
+    strategy_evaluation_hash: str | None = None
     initialization: PaperSessionInitializationResult | None = None
     coordination_results: tuple[PaperCoordinationResult, ...] = ()
     error_code: str | None = None
@@ -182,6 +231,7 @@ class PaperSchedulerCycle:
             ("calendar_hash", self.calendar_hash),
             ("mark_evidence_hash", self.mark_evidence_hash),
             ("quote_evidence_hash", self.quote_evidence_hash),
+            ("strategy_evaluation_hash", self.strategy_evaluation_hash),
         ):
             if value is not None:
                 _require_lowercase_sha256(value, name=name)
@@ -207,13 +257,28 @@ class PaperSchedulerCycle:
         elif results:
             raise ValueError("only completed scheduler cycles can contain order results")
         if self.status is PaperSchedulerStatus.NO_INTENTS:
-            if self.quote_evidence_hash is None:
-                raise ValueError("no-intent scheduler cycle requires quote evidence")
+            if (
+                self.quote_evidence_hash is None
+                or self.strategy_evaluation_hash is None
+            ):
+                raise ValueError(
+                    "no-intent scheduler cycle requires quote and strategy evidence"
+                )
         elif (
             self.quote_evidence_hash is not None
             and self.status is not PaperSchedulerStatus.COMPLETED
         ):
             raise ValueError("quote evidence is only valid for evaluated strategy cycles")
+        if self.status is PaperSchedulerStatus.COMPLETED:
+            if self.strategy_evaluation_hash is None:
+                raise ValueError("completed scheduler cycle requires strategy evidence")
+        elif (
+            self.strategy_evaluation_hash is not None
+            and self.status is not PaperSchedulerStatus.NO_INTENTS
+        ):
+            raise ValueError(
+                "strategy evidence is only valid for evaluated strategy cycles"
+            )
         if self.status is PaperSchedulerStatus.LOCKED and not self.control.active:
             raise ValueError("locked scheduler cycle requires an active control")
         object.__setattr__(
@@ -390,7 +455,9 @@ class PaperTradingScheduler:
                 phase=phase,
                 quote_snapshot=snapshot,
             )
-            intents = tuple(await self._intent_source.generate(context))
+            evaluation = await self._intent_source.evaluate(context)
+            self._validate_evaluation(evaluation=evaluation, context=context)
+            intents = evaluation.intents
             self._validate_intents(intents=intents, context=context)
             if not intents:
                 return PaperSchedulerCycle(
@@ -404,6 +471,7 @@ class PaperTradingScheduler:
                     clock_rule_version=self._clock.rule_version,
                     calendar_hash=calendar_hash,
                     quote_evidence_hash=snapshot.evidence_hash,
+                    strategy_evaluation_hash=evaluation.evaluation_hash,
                 )
             results: list[PaperCoordinationResult] = []
             for intent in intents:
@@ -431,6 +499,7 @@ class PaperTradingScheduler:
                 clock_rule_version=self._clock.rule_version,
                 calendar_hash=calendar_hash,
                 quote_evidence_hash=snapshot.evidence_hash,
+                strategy_evaluation_hash=evaluation.evaluation_hash,
                 coordination_results=tuple(results),
             )
         except asyncio.CancelledError:
@@ -520,6 +589,21 @@ class PaperTradingScheduler:
                 raise ValueError("strategy intent is outside the scheduler universe")
             if intent.order.submitted_at != context.now:
                 raise ValueError("strategy order timestamp must equal the scheduler tick")
+
+    def _validate_evaluation(
+        self,
+        *,
+        evaluation: PaperStrategyEvaluation,
+        context: PaperStrategyContext,
+    ) -> None:
+        if not isinstance(evaluation, PaperStrategyEvaluation):
+            raise TypeError("intent source must return PaperStrategyEvaluation")
+        if evaluation.strategy_id != self._strategy_id:
+            raise ValueError("strategy evaluation belongs to another strategy")
+        if evaluation.evaluated_at != context.now:
+            raise ValueError("strategy evaluation timestamp must equal the scheduler tick")
+        if evaluation.quote_evidence_hash != context.quote_snapshot.evidence_hash:
+            raise ValueError("strategy evaluation does not bind the quote snapshot")
 
     async def _activate_dependency_failure(
         self, *, current: KillSwitchControl, now: datetime
@@ -752,5 +836,49 @@ def scheduler_cycle_payload(cycle: PaperSchedulerCycle) -> dict[str, object]:
         "quote_evidence_hash": cycle.quote_evidence_hash,
         "session_date": cycle.session_date.isoformat(),
         "status": cycle.status.value,
+        "strategy_evaluation_hash": cycle.strategy_evaluation_hash,
         "strategy_id": cycle.strategy_id,
     }
+
+
+def _strategy_intent_hash(intent: PaperStrategyIntent) -> str:
+    order = intent.order
+    rules = intent.rules
+    limit = rules.price_limit
+    return _canonical_hash(
+        {
+            "order": {
+                "client_order_id": order.client_order_id,
+                "instrument": order.instrument,
+                "limit_price": (
+                    None
+                    if order.limit_price is None
+                    else _decimal_text(order.limit_price)
+                ),
+                "quantity": order.quantity,
+                "side": order.side.value,
+                "submitted_at": order.submitted_at.isoformat(timespec="microseconds"),
+            },
+            "policy_hash": intent.policy.policy_hash,
+            "rules": {
+                "buy_minimum": rules.buy_minimum,
+                "buy_step": rules.buy_step,
+                "effective_from": rules.effective_from.isoformat(),
+                "instrument": rules.instrument,
+                "max_order_quantity": rules.max_order_quantity,
+                "price_limit": {
+                    "rate": (
+                        None
+                        if limit.rate is None
+                        else _decimal_text(limit.rate)
+                    ),
+                    "reason": limit.reason,
+                    "rule_version": limit.rule_version,
+                },
+                "price_tick": _decimal_text(rules.price_tick),
+                "rule_version": rules.rule_version,
+                "sell_step": rules.sell_step,
+                "t_plus_one": rules.t_plus_one,
+            },
+        }
+    )

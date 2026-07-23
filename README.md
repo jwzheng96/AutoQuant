@@ -117,6 +117,14 @@ immutable acquire/release events prevent two scheduler processes from driving on
 resident runner activates the durable kill switch and stops if heartbeat ownership or clean
 release cannot be proven.
 
+Every continuous-auction strategy call now returns a versioned `PaperStrategyEvaluation`.
+The evaluation binds the exact quote snapshot, strategy signal/state evidence and canonical
+intent fingerprints. Its hash is mandatory for both order-producing and no-intent scheduler
+cycles and is stored inside the immutable scheduler payload. A source that returns raw intents,
+uses another strategy ID, changes the evaluation timestamp or fails to bind the quote snapshot
+is rejected and activates the dependency kill switch. This makes “why nothing traded” auditable,
+not only filled orders.
+
 The production pre-open reader now selects the latest single open session whose Tushare daily
 close is point-in-time visible for every configured instrument. It rejects mixed-session marks,
 future visibility, post-cutoff ingestion, stale valuation dates, unknown availability policies
