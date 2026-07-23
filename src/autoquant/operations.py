@@ -9,6 +9,7 @@ from autoquant.adapters.postgres import PostgresControlRepository
 from autoquant.adapters.tushare import TushareDailySource, TushareHttpClient
 from autoquant.clock import to_shanghai
 from autoquant.config import AppSettings
+from autoquant.data.calendar_refresh import TradingCalendarRefreshService
 from autoquant.data.daily_ingestion import DailyIngestionRequest, DailyIngestionService
 from autoquant.data.daily_quality import DailyQualityGate
 from autoquant.errors import MissingCapabilityError
@@ -140,3 +141,43 @@ async def inspect_paper_pre_open(
             await evidence.close()
         if clickhouse is not None:
             await clickhouse.client.close()
+
+
+async def run_trading_calendar_refresh(
+    settings: AppSettings,
+    start: date,
+    end: date,
+) -> dict[str, object]:
+    """Refresh exact Tushare calendar evidence without requesting incomplete daily bars."""
+
+    source: TushareDailySource | None = None
+    clickhouse: ClickHouseDailyRepository | None = None
+    postgres: PostgresControlRepository | None = None
+    try:
+        source = tushare_source(settings)
+        clickhouse = await ClickHouseDailyRepository.connect(
+            dsn=configured_dsn(settings.clickhouse_dsn, capability="ClickHouse"),
+            source="tushare",
+        )
+        postgres = PostgresControlRepository.connect(
+            dsn=configured_dsn(settings.postgres_dsn, capability="PostgreSQL")
+        )
+        result = await TradingCalendarRefreshService(
+            source=source,
+            market_repository=clickhouse,
+            control_repository=postgres,
+            now=lambda: datetime.now(UTC),
+        ).run(start=start, end=end)
+    finally:
+        if source is not None:
+            await source.close()
+        if postgres is not None:
+            await postgres.close()
+        if clickhouse is not None:
+            await clickhouse.client.close()
+    return {
+        "audit_event_hash": result.audit_event_hash,
+        "session_count": result.session_count,
+        "source_evidence_hash": result.source_evidence_hash,
+        "status": result.status,
+    }

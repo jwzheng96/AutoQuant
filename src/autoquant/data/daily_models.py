@@ -440,6 +440,39 @@ class DailyCoverageEvidence:
 
 
 @dataclass(frozen=True, slots=True)
+class TradingCalendarBatch:
+    sessions: tuple[TradingSession, ...]
+    source_evidence: tuple[SourceEvidence, ...]
+
+    def __post_init__(self) -> None:
+        sessions = tuple(self.sessions)
+        source_evidence = tuple(self.source_evidence)
+        object.__setattr__(self, "sessions", sessions)
+        object.__setattr__(self, "source_evidence", source_evidence)
+        if not sessions or any(
+            not isinstance(value, TradingSession) for value in sessions
+        ):
+            raise ValueError("sessions must contain TradingSession values")
+        if len(source_evidence) != 1 or not isinstance(
+            source_evidence[0], SourceEvidence
+        ):
+            raise ValueError("calendar batch requires exactly one source evidence")
+        evidence = source_evidence[0]
+        if evidence.method != "trade_cal":
+            raise ValueError("calendar source evidence must use trade_cal")
+        if any(
+            value.source != evidence.source
+            or value.response_hash != evidence.response_hash
+            for value in sessions
+        ):
+            raise ValueError("calendar sessions are not backed by source evidence")
+        _reject_conflicts(
+            sessions,
+            key=lambda value: (value.source, value.session_date),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class DailyDatasetBatch:
     bars: tuple[DailyBarRevision, ...]
     factors: tuple[AdjustmentFactorRevision, ...]

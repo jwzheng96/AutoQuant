@@ -6,6 +6,7 @@ from autoquant.data.daily_models import (
     DailyBarRevision,
     DailyCoverageEvidence,
     DailyDatasetBatch,
+    TradingCalendarBatch,
 )
 
 
@@ -13,6 +14,14 @@ class DailyDataSource(Protocol):
     async def fetch_daily_dataset(
         self, instruments: tuple[str, ...], start: date, end: date
     ) -> DailyDatasetBatch: ...
+
+
+class TradingCalendarSource(Protocol):
+    async def fetch_trading_calendar(
+        self,
+        start: date,
+        end: date,
+    ) -> TradingCalendarBatch: ...
 
 
 class DailyMarketRepository(Protocol):

@@ -198,6 +198,50 @@ async def test_fetch_maps_daily_units_factor_coverage_and_next_open_visibility()
 
 
 @pytest.mark.asyncio
+async def test_calendar_refresh_fetches_only_exact_trade_calendar_interval() -> None:
+    client = FakeClient(
+        {
+            "trade_cal": [
+                [
+                    {"exchange": "SSE", "cal_date": "20260722", "is_open": "1"},
+                    {"exchange": "SSE", "cal_date": "20260723", "is_open": "1"},
+                ]
+            ]
+        }
+    )
+
+    batch = await source(client).fetch_trading_calendar(
+        date(2026, 7, 22),
+        date(2026, 7, 23),
+    )
+
+    assert [value.session_date for value in batch.sessions] == [
+        date(2026, 7, 22),
+        date(2026, 7, 23),
+    ]
+    assert [value.is_open for value in batch.sessions] == [True, True]
+    assert len(batch.source_evidence) == 1
+    assert [call[0] for call in client.calls] == ["trade_cal"]
+
+
+@pytest.mark.asyncio
+async def test_calendar_refresh_rejects_missing_calendar_dates() -> None:
+    client = FakeClient(
+        {
+            "trade_cal": [
+                [{"exchange": "SSE", "cal_date": "20260722", "is_open": "1"}]
+            ]
+        }
+    )
+
+    with pytest.raises(VendorResponseError, match="exactly cover"):
+        await source(client).fetch_trading_calendar(
+            date(2026, 7, 22),
+            date(2026, 7, 23),
+        )
+
+
+@pytest.mark.asyncio
 async def test_stock_basic_ignores_out_of_scope_bse_rows_before_symbol_mapping() -> None:
     responses = base_responses()
     listed = responses["stock_basic"][0]

@@ -129,6 +129,12 @@ this path without returning prices and only while the durable kill switch is act
 process assembly and an authorized Windows QMT quote process remain deployment gates; neither
 paper submission nor live trading is enabled.
 
+`refresh-trading-calendar` is a separate evidence path for an upcoming session. It calls only
+Tushare `trade_cal`, requires exact day-by-day coverage, persists the redacted source response
+hash and ClickHouse session revisions, then appends a PostgreSQL audit event. This avoids
+requesting or blessing an unfinished current-day daily bar. Run it before the target pre-open
+window; a calendar fetched after the fact cannot be backdated into an earlier check.
+
 All dependency, test, lint, type-check, migration, and Git mutation commands for this
 checkout must run on `rlocal`; see [the phase-1 runbook](docs/runbooks/phase1-data-foundation.md).
 
@@ -139,6 +145,9 @@ cd AutoQuant
 /Users/zjw/.local/bin/uv run autoquant config-check
 /Users/zjw/.local/bin/uv run autoquant tushare-check
 /Users/zjw/.local/bin/uv run autoquant qmt-check
+# Refresh an upcoming session before its pre-open window:
+/Users/zjw/.local/bin/uv run autoquant refresh-trading-calendar \
+  --start 2026-07-24 --end 2026-07-24
 # Run during the target Shanghai pre-open window with the exact strategy universe:
 /Users/zjw/.local/bin/uv run autoquant paper-preopen-check \
   --instrument 000001.XSHE --instrument 600000.XSHG \

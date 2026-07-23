@@ -25,6 +25,7 @@ from autoquant.execution.qmt_session_store import PostgresQmtSessionLeaseReposit
 from autoquant.operations import (
     inspect_paper_pre_open,
     run_daily_ingestion,
+    run_trading_calendar_refresh,
     tushare_source,
 )
 
@@ -305,6 +306,27 @@ def paper_preopen_check(
     except (AutoQuantError, LookupError, ValueError):
         _fail("paper pre-open check failed")
     _emit(payload)
+
+
+@app.command("refresh-trading-calendar")
+def refresh_trading_calendar(
+    start: Annotated[str, typer.Option("--start")],
+    end: Annotated[str, typer.Option("--end")],
+) -> None:
+    """Persist an exact read-only Tushare calendar interval with audit evidence."""
+
+    settings = _settings()
+    start_date = _parse_date(start, name="start")
+    end_date = _parse_date(end, name="end")
+    try:
+        payload = asyncio.run(
+            run_trading_calendar_refresh(settings, start_date, end_date)
+        )
+    except (AutoQuantError, ValueError):
+        _fail("trading calendar refresh failed")
+    _emit(payload)
+    if payload["status"] != "completed":
+        raise typer.Exit(code=2)
 
 
 async def _ingest(

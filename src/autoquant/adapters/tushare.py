@@ -25,6 +25,7 @@ from autoquant.data.daily_models import (
     DailyPriceLimit,
     DailySuspensionStatus,
     InstrumentLifecycle,
+    TradingCalendarBatch,
     TradingSession,
 )
 from autoquant.data.models import SourceEvidence
@@ -487,6 +488,39 @@ class TushareDailySource:
                 ),
             ),
             source_evidence=tuple(evidence),
+        )
+
+    async def fetch_trading_calendar(
+        self,
+        start: date,
+        end: date,
+    ) -> TradingCalendarBatch:
+        if start > end:
+            raise ValueError("calendar start cannot follow end")
+        if (end - start).days > 31:
+            raise ValueError("calendar refresh cannot exceed 32 calendar days")
+        result = await self._client.post(
+            "trade_cal",
+            params={
+                "exchange": "SSE",
+                "start_date": self._date_text(start),
+                "end_date": self._date_text(end),
+            },
+            fields=self.CALENDAR_FIELDS,
+        )
+        sessions = self._map_sessions(result)
+        expected_dates = {
+            start + timedelta(days=offset)
+            for offset in range((end - start).days + 1)
+        }
+        observed_dates = {value.session_date for value in sessions}
+        if len(sessions) != len(observed_dates) or observed_dates != expected_dates:
+            raise VendorResponseError(
+                "Tushare trade_cal did not exactly cover the requested calendar interval"
+            )
+        return TradingCalendarBatch(
+            sessions=tuple(sorted(sessions, key=lambda value: value.session_date)),
+            source_evidence=(result.evidence,),
         )
 
     async def probe_capabilities(

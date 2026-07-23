@@ -35,6 +35,13 @@ class ControlTransaction(Protocol):
 class ControlRepository(Protocol):
     async def save_source_evidence(self, evidence: SourceEvidence) -> None: ...
 
+    async def append_audit_event(
+        self,
+        event_type: str,
+        occurred_at: datetime,
+        payload: object,
+    ) -> str: ...
+
     def transaction(self) -> AbstractAsyncContextManager[ControlTransaction]: ...
 
     async def read_manifest(self, manifest_hash: str) -> DatasetManifest: ...

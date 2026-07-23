@@ -166,7 +166,21 @@ and the resident scheduler runtime remain separate release gates.
 
 Before assembling a resident paper runtime, set `AQ_ENVIRONMENT=paper`, leave
 `AQ_LIVE_TRADING_ENABLED=false`, keep the account kill switch active, and run the read-only
-pre-open evidence gate during the target Shanghai pre-open window:
+calendar refresh ahead of the session:
+
+```bash
+uv run autoquant refresh-trading-calendar \
+  --start 2026-07-24 \
+  --end 2026-07-24
+```
+
+The refresh interval is bounded to 32 calendar days and must contain exactly one vendor row per
+calendar day. It calls no daily-price endpoint. Its source response, ClickHouse revisions and
+PostgreSQL audit event must all persist before it reports `completed`. Run it before the target
+pre-open; its real request timestamp is retained and cannot prove that a late refresh was known
+earlier.
+
+Then run the pre-open evidence gate during the target Shanghai pre-open window:
 
 ```bash
 uv run autoquant paper-preopen-check \

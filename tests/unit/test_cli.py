@@ -323,3 +323,30 @@ def test_paper_preopen_check_emits_hashes_but_no_marks_or_configuration() -> Non
     assert "sensitive" not in result.stdout
     assert '"marks":' not in result.stdout
     inspection.assert_awaited_once()
+
+
+def test_calendar_refresh_emits_only_audit_metadata() -> None:
+    payload = {
+        "audit_event_hash": "a" * 64,
+        "session_count": 1,
+        "source_evidence_hash": "b" * 64,
+        "status": "completed",
+    }
+    refresh = AsyncMock(return_value=payload)
+    with patch("autoquant.cli.run_trading_calendar_refresh", new=refresh):
+        result = runner.invoke(
+            app,
+            [
+                "refresh-trading-calendar",
+                "--start",
+                "2026-07-23",
+                "--end",
+                "2026-07-23",
+            ],
+            env={"AQ_TUSHARE_TOKEN": "sensitive-token"},
+        )
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == payload
+    assert "sensitive" not in result.stdout
+    refresh.assert_awaited_once()
