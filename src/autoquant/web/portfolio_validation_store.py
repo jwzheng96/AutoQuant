@@ -15,6 +15,9 @@ from autoquant.backtest.codec import (
     encode_backtest_result,
 )
 from autoquant.backtest.models import BacktestResult, backtest_artifact_hash
+from autoquant.backtest.portfolio_diagnostics import (
+    diagnose_portfolio_validation,
+)
 from autoquant.backtest.portfolio_validation import (
     CrossSectionalMomentumParameters,
     PortfolioValidationEvidencePolicy,
@@ -28,6 +31,7 @@ from autoquant.web.models import (
     BacktestMetrics,
     MomentumCandidateRequest,
     OperatorJobState,
+    PortfolioValidationDiagnosticsView,
     PortfolioValidationExperiment,
     PortfolioValidationExperimentDetail,
     PortfolioValidationFoldView,
@@ -497,7 +501,14 @@ class PostgresPortfolioValidationRepository:
             decoded = tuple(_fold_from_row(row) for row in fold_rows)
             domain_folds = tuple(value[0] for value in decoded)
             views = tuple(value[1] for value in decoded)
-            _verify_experiment(experiment, domain_folds)
+            result = _verify_experiment(experiment, domain_folds)
+            diagnostics = (
+                None
+                if result is None
+                else PortfolioValidationDiagnosticsView.model_validate(
+                    diagnose_portfolio_validation(result).payload()
+                )
+            )
         except (KeyError, TypeError, ValueError):
             raise PersistenceUnavailableError(
                 "stored portfolio validation failed integrity verification"
@@ -505,6 +516,7 @@ class PostgresPortfolioValidationRepository:
         return PortfolioValidationExperimentDetail(
             experiment=experiment,
             folds=views,
+            diagnostics=diagnostics,
         )
 
     @staticmethod
@@ -653,13 +665,13 @@ def _fold_from_row(
 def _verify_experiment(
     experiment: PortfolioValidationExperiment,
     folds: tuple[PortfolioWalkForwardFold, ...],
-) -> None:
+) -> PortfolioWalkForwardResult | None:
     if experiment.state is not OperatorJobState.COMPLETED:
         if folds:
             raise ValueError(
                 "incomplete portfolio experiment cannot contain folds"
             )
-        return
+        return None
     if (
         experiment.summary is None
         or experiment.as_of is None
@@ -703,6 +715,7 @@ def _verify_experiment(
     policy = PortfolioValidationEvidencePolicy()
     if summary.policy_hash != policy.policy_hash:
         raise ValueError("portfolio validation policy hash mismatch")
+    return result
 
 
 def _metrics(result: BacktestResult) -> BacktestMetrics:

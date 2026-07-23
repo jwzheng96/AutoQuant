@@ -302,6 +302,15 @@ The status command exits nonzero when the experiment fails or its evidence is
 not a `research_candidate`. A candidate still cannot approve paper or live
 trading; real trading remains hard locked.
 
+Completed portfolio details also derive a versioned diagnostic artifact from
+the immutable folds. It reports per-fold benchmark hit rate, median and
+positive/nonpositive excess magnitude, first-half versus second-half excess,
+turnover, fee drag and parameter-selection frequency. The diagnostic has its
+own hash and always reports `oos_tuning_permitted=false`: it may explain a
+failure or motivate a separately pre-registered strategy version, but must
+never be used to alter the completed experiment or select parameters for the
+same OOS sample.
+
 ```bash
 uv run autoquant approve-paper-sma \
   --experiment-id <completed-experiment-uuid> \

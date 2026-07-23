@@ -484,6 +484,45 @@ class PortfolioValidationSummary(BaseModel):
     assessment_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
+class MomentumSelectionFrequencyView(BaseModel):
+    parameters: MomentumCandidateRequest
+    count: int = Field(ge=1)
+    share: Decimal = Field(gt=0, le=1)
+
+
+class PortfolioValidationDiagnosticsView(BaseModel):
+    result_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    fold_count: int = Field(ge=1)
+    positive_excess_fold_rate: Decimal = Field(ge=0, le=1)
+    median_fold_excess_return: Decimal
+    mean_positive_fold_excess: Decimal
+    mean_nonpositive_fold_excess: Decimal
+    first_half_excess_return: Decimal
+    second_half_excess_return: Decimal
+    mean_strategy_turnover: Decimal = Field(ge=0)
+    mean_benchmark_turnover: Decimal = Field(ge=0)
+    strategy_fee_rate: Decimal = Field(ge=0)
+    benchmark_fee_rate: Decimal = Field(ge=0)
+    selection_frequencies: tuple[
+        MomentumSelectionFrequencyView,
+        ...,
+    ] = Field(min_length=1)
+    maximum_selection_share: Decimal = Field(gt=0, le=1)
+    assessment_gate_failures: tuple[str, ...]
+    diagnostic_codes: tuple[str, ...]
+    version: str
+    diagnostic_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    oos_tuning_permitted: bool = False
+
+    @model_validator(mode="after")
+    def require_diagnostic_read_only_boundary(self) -> Self:
+        if self.oos_tuning_permitted:
+            raise ValueError(
+                "portfolio OOS diagnostics cannot authorize tuning"
+            )
+        return self
+
+
 class PortfolioValidationExperiment(BaseModel):
     experiment_id: UUID
     state: OperatorJobState
@@ -545,6 +584,7 @@ class PortfolioValidationFoldView(BaseModel):
 class PortfolioValidationExperimentDetail(BaseModel):
     experiment: PortfolioValidationExperiment
     folds: tuple[PortfolioValidationFoldView, ...]
+    diagnostics: PortfolioValidationDiagnosticsView | None = None
 
 
 class ValidationCampaignComponentView(BaseModel):

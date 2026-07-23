@@ -399,6 +399,11 @@ async def inspect_portfolio_validation(
         return _portfolio_validation_payload(
             detail.experiment,
             fold_count=len(detail.folds),
+            diagnostics=(
+                None
+                if detail.diagnostics is None
+                else detail.diagnostics.model_dump(mode="json")
+            ),
         )
     finally:
         await repository.close()
@@ -498,6 +503,7 @@ def _portfolio_validation_payload(
     experiment: PortfolioValidationExperiment,
     *,
     fold_count: int,
+    diagnostics: dict[str, object] | None = None,
 ) -> dict[str, object]:
     return {
         "assessment": (
@@ -510,6 +516,7 @@ def _portfolio_validation_payload(
             if experiment.completed_at is None
             else experiment.completed_at.isoformat()
         ),
+        "diagnostics": diagnostics,
         "error_code": experiment.error_code,
         "experiment_id": str(experiment.experiment_id),
         "fold_count": fold_count,

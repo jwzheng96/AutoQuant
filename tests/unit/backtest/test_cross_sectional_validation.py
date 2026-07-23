@@ -8,6 +8,9 @@ from decimal import Decimal
 import pytest
 
 from autoquant.backtest.models import MarketState, OrderSide
+from autoquant.backtest.portfolio_diagnostics import (
+    diagnose_portfolio_validation,
+)
 from autoquant.backtest.portfolio_validation import (
     CrossSectionalMomentumParameters,
     PortfolioWalkForwardConfig,
@@ -287,7 +290,23 @@ async def test_portfolio_walk_forward_is_deterministic_and_disjoint() -> None:
     )
     evidence = assess_portfolio_validation(first)
     repeated_evidence = assess_portfolio_validation(second)
+    diagnostics = diagnose_portfolio_validation(first)
+    repeated_diagnostics = diagnose_portfolio_validation(second)
     assert evidence.assessment_hash == repeated_evidence.assessment_hash
     assert evidence.fold_count == 3
     assert evidence.oos_sessions == 60
     assert "minimum_fold_count" in evidence.gate_failures
+    assert (
+        diagnostics.diagnostic_hash
+        == repeated_diagnostics.diagnostic_hash
+    )
+    assert diagnostics.result_hash == first.result_hash
+    assert diagnostics.fold_count == len(first.folds)
+    assert sum(
+        value.count for value in diagnostics.selection_frequencies
+    ) == len(first.folds)
+    assert (
+        diagnostics.assessment_gate_failures
+        == evidence.gate_failures
+    )
+    assert "small_universe" in diagnostics.diagnostic_codes

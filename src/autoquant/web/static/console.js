@@ -555,6 +555,37 @@ async function loadPortfolioValidationDetail(experimentId) {
     setText("portfolio-profitable-rate", formatPercent(summary?.profitable_fold_rate));
     setText("portfolio-optimism", formatPercent(summary?.selection_optimism));
     setText("portfolio-rejections", summary?.rejected_order_count ?? "—");
+    const diagnostics = detail.diagnostics;
+    setText(
+      "portfolio-positive-excess-rate",
+      formatPercent(diagnostics?.positive_excess_fold_rate),
+    );
+    setText(
+      "portfolio-mean-positive-excess",
+      formatPercent(diagnostics?.mean_positive_fold_excess),
+    );
+    setText(
+      "portfolio-mean-nonpositive-excess",
+      formatPercent(diagnostics?.mean_nonpositive_fold_excess),
+    );
+    setText(
+      "portfolio-first-half-excess",
+      formatPercent(diagnostics?.first_half_excess_return),
+    );
+    setText(
+      "portfolio-second-half-excess",
+      formatPercent(diagnostics?.second_half_excess_return),
+    );
+    setText(
+      "portfolio-selection-share",
+      formatPercent(diagnostics?.maximum_selection_share),
+    );
+    setText(
+      "portfolio-diagnostic-codes",
+      diagnostics?.diagnostic_codes?.length
+        ? diagnostics.diagnostic_codes.join(", ")
+        : "未发现预定义诊断标签；仍禁止使用 OOS 调参",
+    );
     const table = document.getElementById("portfolio-validation-folds-table");
     table.replaceChildren();
     detail.folds.forEach(fold => {
