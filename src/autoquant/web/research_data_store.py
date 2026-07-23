@@ -74,6 +74,85 @@ class PostgresResearchDataCampaignRepository:
     async def close(self) -> None:
         await self._engine.dispose()
 
+    async def read_manifest(
+        self,
+        manifest_hash: str,
+    ) -> ResearchDatasetManifest:
+        _require_lowercase_sha256(
+            manifest_hash,
+            name="research dataset manifest hash",
+        )
+        try:
+            async with self._engine.connect() as connection:
+                row = (
+                    (
+                        await connection.execute(
+                            text(
+                                f"""
+                                SELECT manifest_hash, campaign_hash, payload
+                                FROM {self._schema}.research_dataset_manifests
+                                WHERE manifest_hash = :manifest_hash
+                                """
+                            ),
+                            {"manifest_hash": manifest_hash},
+                        )
+                    )
+                    .mappings()
+                    .one_or_none()
+                )
+                shard_rows = (
+                    ()
+                    if row is None
+                    else (
+                        (
+                            await connection.execute(
+                                text(
+                                    f"""
+                                    SELECT sequence, instrument,
+                                           shard_manifest_hash
+                                    FROM {self._schema}.research_dataset_manifest_shards
+                                    WHERE manifest_hash = :manifest_hash
+                                    ORDER BY sequence
+                                    """
+                                ),
+                                {"manifest_hash": manifest_hash},
+                            )
+                        )
+                        .mappings()
+                        .all()
+                    )
+                )
+            if row is None:
+                raise LookupError(
+                    "research dataset manifest does not exist"
+                )
+            manifest = ResearchDatasetManifest.from_payload(
+                _object(row["payload"])
+            )
+            stored_shards = tuple(
+                ResearchDatasetShard(
+                    sequence=int(value["sequence"]),
+                    instrument=str(value["instrument"]),
+                    manifest_hash=str(value["shard_manifest_hash"]),
+                )
+                for value in shard_rows
+            )
+            if (
+                manifest.manifest_hash != str(row["manifest_hash"])
+                or manifest.campaign_hash != str(row["campaign_hash"])
+                or manifest.shards != stored_shards
+            ):
+                raise PersistenceUnavailableError(
+                    "research dataset manifest failed integrity verification"
+                )
+            return manifest
+        except (LookupError, PersistenceUnavailableError):
+            raise
+        except Exception:
+            raise PersistenceUnavailableError(
+                "research dataset manifest lookup failed"
+            ) from None
+
     async def create(
         self,
         spec: ResearchDataCampaignSpec,

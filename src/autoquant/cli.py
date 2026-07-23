@@ -30,6 +30,7 @@ from autoquant.operations import (
     approve_paper_sma_portfolio_strategy,
     approve_paper_sma_strategy,
     backfill_research_universe_snapshots,
+    compile_research_input,
     complete_qmt_recovery_drill,
     create_portfolio_validation,
     create_research_data_campaign,
@@ -946,6 +947,26 @@ def research_data_campaign_status(
     _emit(payload)
     if payload["status"] == "failed":
         raise typer.Exit(code=2)
+
+
+@app.command("research-input-plan-compile")
+def research_input_plan_compile(
+    manifest_hash: Annotated[str, typer.Option("--manifest-hash")],
+    requested_by: Annotated[str, typer.Option("--requested-by")],
+) -> None:
+    """Compile and audit strict point-in-time aggregate research inputs."""
+
+    try:
+        payload = asyncio.run(
+            compile_research_input(
+                _settings(),
+                manifest_hash=manifest_hash,
+                requested_by=requested_by,
+            )
+        )
+    except (AutoQuantError, LookupError, ValueError):
+        _fail("research input plan compilation failed")
+    _emit(payload)
 
 
 @app.command("research-data-campaign-run")

@@ -182,3 +182,6 @@ async def test_campaign_recovers_retries_and_finalizes_verified_shards(
         first_manifest.manifest_hash,
         second_manifest.manifest_hash,
     )
+    assert await campaigns.read_manifest(manifest.manifest_hash) == manifest
+    with pytest.raises(LookupError):
+        await campaigns.read_manifest("0" * 64)

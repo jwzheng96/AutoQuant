@@ -404,6 +404,23 @@ research manifest binding the policy hash, all monthly snapshot hashes and all
 daily shard manifest hashes. Until that aggregate exists, expanded portfolio
 validation must not start.
 
+Compile the completed aggregate into a deterministic point-in-time input plan:
+
+```bash
+uv run autoquant research-input-plan-compile \
+  --manifest-hash <aggregate-research-manifest-hash> \
+  --requested-by operator
+```
+
+The compiler cross-checks the aggregate payload against its normalized shard
+rows, reloads every immutable universe snapshot, requires exactly one snapshot
+per calendar month, and requires the union of historical members to equal the
+shard instruments. Membership activates only when
+`session_date > snapshot.reference_date`; the snapshot date itself is excluded
+to prevent same-day constituent and liquidity lookahead. The deterministic
+plan hash and rule version are appended to the immutable audit log. This
+command never enables paper or live execution.
+
 ```bash
 uv run autoquant approve-paper-sma \
   --experiment-id <completed-experiment-uuid> \

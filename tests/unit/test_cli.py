@@ -780,6 +780,44 @@ def test_validation_campaign_rejects_invalid_candidate_syntax() -> None:
     assert creation.await_count == 0
 
 
+def test_research_input_plan_compilation_stays_live_locked_and_redacted() -> None:
+    payload = {
+        "activation_rule": "session_date>snapshot.reference_date",
+        "campaign_hash": "a" * 64,
+        "instrument_count": 493,
+        "live_trading_locked": True,
+        "manifest_hash": "b" * 64,
+        "plan_hash": "c" * 64,
+        "snapshot_count": 79,
+        "status": "compiled",
+    }
+    compilation = AsyncMock(return_value=payload)
+    with patch(
+        "autoquant.cli.compile_research_input",
+        new=compilation,
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "research-input-plan-compile",
+                "--manifest-hash",
+                "b" * 64,
+                "--requested-by",
+                "operator",
+            ],
+            env={
+                "AQ_POSTGRES_DSN": (
+                    "postgresql+asyncpg://sensitive"
+                )
+            },
+        )
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == payload
+    assert "sensitive" not in result.stdout
+    compilation.assert_awaited_once()
+
+
 def test_portfolio_validation_cli_queues_live_locked_request() -> None:
     payload = {
         "assessment": None,

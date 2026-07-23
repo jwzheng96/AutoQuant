@@ -27,6 +27,10 @@ from autoquant.data.daily_ingestion import (
 )
 from autoquant.data.daily_quality import DailyQualityGate
 from autoquant.data.research_data_campaign import ResearchDataCampaignSpec
+from autoquant.data.research_input import (
+    ResearchUniverseBinding,
+    compile_research_input_plan,
+)
 from autoquant.data.session_reference import SessionReferenceRefreshService
 from autoquant.data.universe import (
     PointInTimeUniversePolicy,
@@ -557,6 +561,96 @@ async def inspect_research_data_campaign(
         )
     finally:
         await repository.close()
+
+
+async def compile_research_input(
+    settings: AppSettings,
+    *,
+    manifest_hash: str,
+    requested_by: str,
+) -> dict[str, object]:
+    """Compile an immutable aggregate manifest into a point-in-time plan."""
+
+    if settings.live_trading_enabled:
+        raise MissingCapabilityError(
+            "research input compilation requires live trading locked"
+        )
+    if (
+        not requested_by.strip()
+        or requested_by != requested_by.strip()
+        or len(requested_by) > 128
+    ):
+        raise ValueError(
+            "requested_by must contain 1-128 trimmed characters"
+        )
+    dsn = configured_dsn(
+        settings.postgres_dsn,
+        capability="PostgreSQL",
+    )
+    campaigns = PostgresResearchDataCampaignRepository.connect(dsn=dsn)
+    universes = PostgresResearchUniverseRepository.connect(dsn=dsn)
+    control = PostgresControlRepository.connect(dsn=dsn)
+    try:
+        manifest = await campaigns.read_manifest(manifest_hash)
+        details = tuple(
+            [
+                await universes.detail(snapshot_hash)
+                for snapshot_hash in manifest.snapshot_hashes
+            ]
+        )
+        bindings = tuple(
+            ResearchUniverseBinding(
+                sequence=sequence,
+                snapshot_hash=detail.snapshot.snapshot_hash,
+                policy_hash=detail.snapshot.policy_hash,
+                reference_date=detail.snapshot.reference_date,
+                knowledge_as_of=detail.snapshot.knowledge_as_of,
+                members=tuple(
+                    sorted(
+                        member.instrument
+                        for member in detail.members
+                    )
+                ),
+            )
+            for sequence, detail in enumerate(details, start=1)
+        )
+        plan = compile_research_input_plan(
+            manifest=manifest,
+            universes=bindings,
+        )
+        payload: dict[str, object] = {
+            "activation_rule": plan.activation_rule,
+            "campaign_hash": plan.campaign_hash,
+            "end_date": plan.end_date.isoformat(),
+            "first_reference_date": (
+                plan.universes[0].reference_date.isoformat()
+            ),
+            "instrument_count": len(plan.shards),
+            "last_reference_date": (
+                plan.universes[-1].reference_date.isoformat()
+            ),
+            "live_trading_locked": True,
+            "manifest_hash": plan.dataset_manifest_hash,
+            "plan_hash": plan.plan_hash,
+            "policy_hash": plan.policy_hash,
+            "snapshot_count": len(plan.universes),
+            "start_date": plan.start_date.isoformat(),
+            "status": "compiled",
+            "version": plan.version,
+        }
+        await control.append_audit_event(
+            "research.input.plan.compiled",
+            datetime.now(UTC),
+            {
+                **payload,
+                "requested_by": requested_by,
+            },
+        )
+        return payload
+    finally:
+        await control.close()
+        await universes.close()
+        await campaigns.close()
 
 
 async def run_research_data_campaign(
