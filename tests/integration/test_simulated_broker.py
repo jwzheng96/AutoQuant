@@ -31,6 +31,11 @@ from autoquant.execution.reconciliation import (
     AccountReconciler,
     ReconciliationCode,
 )
+from autoquant.execution.session_initializer import (
+    MarketPhase,
+    PaperSessionInitializationRequest,
+    PaperSessionInitializer,
+)
 from autoquant.execution.session_risk import (
     SessionRiskObservation,
     derive_session_turnover,
@@ -339,6 +344,53 @@ async def test_simulated_broker_is_persistent_idempotent_and_independently_repla
 
 
 @pytest.mark.asyncio
+async def test_preopen_initializer_freezes_one_reconciled_opening_state(
+    repositories: Repositories,
+) -> None:
+    _, executions, controls, broker, sessions, _, _ = repositories
+    initializer = PaperSessionInitializer(
+        account_id="paper-main",
+        initial_cash=Decimal("100000"),
+        executions=executions,
+        controls=controls,
+        broker=broker,
+        sessions=sessions,
+    )
+    request = PaperSessionInitializationRequest(
+        session_date=date(2026, 7, 22),
+        as_of=NOW,
+        market_phase=MarketPhase.PRE_OPEN,
+        marks={},
+    )
+
+    first = await initializer.initialize(request)
+    repeated = await initializer.initialize(request)
+
+    assert first == repeated
+    assert first.reconciliation.reconciled is True
+    assert first.state.day_start_equity == Decimal("100000")
+    assert first.state.cumulative_turnover == 0
+    assert first.control.active is True
+    assert first.control.reason is KillSwitchReason.INITIALIZING
+    assert (
+        await sessions.replay(
+            account_id="paper-main",
+            session_date=date(2026, 7, 22),
+        )
+    ) == first.state
+
+    with pytest.raises(ValueError, match="pre-open"):
+        await initializer.initialize(
+            PaperSessionInitializationRequest(
+                session_date=date(2026, 7, 22),
+                as_of=NOW,
+                market_phase=MarketPhase.OPEN,
+                marks={},
+            )
+        )
+
+
+@pytest.mark.asyncio
 async def test_independent_account_projections_detect_and_close_callback_gap(
     repositories: Repositories,
 ) -> None:
@@ -619,9 +671,7 @@ async def test_coordinator_fails_closed_without_preinitialized_session_risk(
     )
 
     with pytest.raises(PersistenceUnavailableError, match="not initialized"):
-        await coordinator.submit(
-            _submission_request(order_id="missing-session-risk-order-0001")
-        )
+        await coordinator.submit(_submission_request(order_id="missing-session-risk-order-0001"))
 
     control = await controls.get(account_id="paper-main")
     assert control.active is True
@@ -670,3 +720,89 @@ async def test_coordinator_blocks_stale_unsubmitted_intent_and_activates_kill_sw
     assert result.post_reconciliation is not None
     assert result.post_reconciliation.reconciled is False
     assert (await broker.verify_recovery()).order_count == 0
+
+
+@pytest.mark.asyncio
+async def test_coordinator_recovers_fresh_local_intent_after_pre_dispatch_crash(
+    repositories: Repositories,
+) -> None:
+    risks, executions, controls, broker, sessions, _, _ = repositories
+    await _reset_kill_switch(
+        executions=executions,
+        controls=controls,
+        sessions=sessions,
+    )
+    order = await _persist_order(
+        risks,
+        executions,
+        order_id="pre-dispatch-crash-order-0001",
+    )
+    coordinator = PaperOrderCoordinator(
+        account_id="paper-main",
+        initial_cash=Decimal("100000"),
+        risks=risks,
+        executions=executions,
+        controls=controls,
+        broker=broker,
+        sessions=sessions,
+    )
+
+    recovered = await coordinator.submit(
+        _submission_request(order_id=order.client_order_id)
+    )
+
+    assert recovered.status is PaperCoordinationStatus.RECOVERED
+    assert recovered.projection is not None
+    assert recovered.projection.state is PaperOrderState.FILLED
+    assert recovered.post_reconciliation is not None
+    assert recovered.post_reconciliation.reconciled is True
+    assert (await broker.verify_recovery()).fact_count == 2
+
+
+@pytest.mark.asyncio
+async def test_coordinator_recovers_broker_facts_after_callback_crash(
+    repositories: Repositories,
+) -> None:
+    risks, executions, controls, broker, sessions, engine, schema = repositories
+    await _reset_kill_switch(
+        executions=executions,
+        controls=controls,
+        sessions=sessions,
+    )
+    order = await _persist_order(
+        risks,
+        executions,
+        order_id="post-dispatch-crash-order-0001",
+    )
+    await broker.submit(
+        order=order,
+        quote=_quote(),
+        now=NOW,
+        control_fence=await controls.get(account_id="paper-main"),
+    )
+    async with engine.connect() as connection:
+        internal_event_count = await connection.scalar(
+            text(f"SELECT count(*) FROM {schema}.paper_order_events")
+        )
+    assert internal_event_count == 0
+
+    restarted = PaperOrderCoordinator(
+        account_id="paper-main",
+        initial_cash=Decimal("100000"),
+        risks=PostgresRiskDecisionRepository(engine=engine, schema=schema),
+        executions=PostgresPaperExecutionRepository(engine=engine, schema=schema),
+        controls=PostgresExecutionControlRepository(engine=engine, schema=schema),
+        broker=PersistentSimulatedBroker(engine=engine, schema=schema),
+        sessions=PostgresPaperSessionRiskRepository(engine=engine, schema=schema),
+    )
+    recovered = await restarted.submit(
+        _submission_request(order_id=order.client_order_id)
+    )
+
+    assert recovered.status is PaperCoordinationStatus.RECOVERED
+    assert recovered.projection is not None
+    assert recovered.projection.state is PaperOrderState.FILLED
+    assert recovered.post_reconciliation is not None
+    assert recovered.post_reconciliation.reconciled is True
+    assert (await broker.verify_recovery()).fact_count == 2
+    assert (await executions.verify_recovery()).event_count == 2

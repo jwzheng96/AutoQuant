@@ -152,6 +152,13 @@ persisted internal snapshots; callers cannot supply those three risk metrics. Un
 initializer and scheduler exist, a missing daily state intentionally activates the kill switch
 and aborts submission.
 
+The internal `PaperSessionInitializer` accepts only `pre_open`, requires a reconciled broker and
+internal snapshot plus zero current-session fill turnover, and freezes the opening state
+idempotently. It is not a manual bypass: no CLI or Web route exposes it, and production still
+needs an exchange-calendar-aware scheduler. PostgreSQL integration drills verify recovery both
+before initial broker dispatch and after broker facts are committed but before callbacks reach
+the internal order chain.
+
 ## Research execution boundary
 
 `autoquant.backtest` provides the deterministic cash-account ledger used by the research

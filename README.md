@@ -60,6 +60,12 @@ The coordinator refuses to create a decision or order when that daily state is m
 pre-market initializer and continuous scheduler are still required before the paper gateway can
 be exposed.
 
+The pre-market initializer core now accepts only an explicit `pre_open` phase, reconciles both
+account sources, proves zero current-session turnover, and freezes one idempotent opening state.
+Database crash drills cover restart before broker dispatch and restart after broker facts but
+before internal callbacks. Operational market-phase/quote adapters and scheduling remain absent,
+so this core is still not callable from the console.
+
 All dependency, test, lint, type-check, migration, and Git mutation commands for this
 checkout must run on `rlocal`; see [the phase-1 runbook](docs/runbooks/phase1-data-foundation.md).
 
