@@ -7,10 +7,13 @@ from pydantic import SecretStr
 from autoquant.adapters.clickhouse_daily import ClickHouseDailyRepository
 from autoquant.adapters.postgres import PostgresControlRepository
 from autoquant.adapters.tushare import TushareDailySource, TushareHttpClient
+from autoquant.clock import to_shanghai
 from autoquant.config import AppSettings
 from autoquant.data.daily_ingestion import DailyIngestionRequest, DailyIngestionService
 from autoquant.data.daily_quality import DailyQualityGate
 from autoquant.errors import MissingCapabilityError
+from autoquant.execution.control_store import PostgresExecutionControlRepository
+from autoquant.execution.pre_open_marks import DailyClosePreOpenMarkReader
 
 
 def configured_dsn(value: SecretStr | None, *, capability: str) -> str:
@@ -79,3 +82,61 @@ async def run_daily_ingestion(
         "quality_hash": result.quality_hash,
         "status": result.status,
     }
+
+
+async def inspect_paper_pre_open(
+    settings: AppSettings,
+    instruments: tuple[str, ...],
+    as_of: datetime,
+    manifest_hash: str,
+) -> dict[str, object]:
+    """Prove the database-backed pre-open valuation boundary without enabling trading."""
+
+    if settings.environment.value != "paper":
+        raise MissingCapabilityError("paper environment is not configured")
+    clickhouse: ClickHouseDailyRepository | None = None
+    evidence: PostgresControlRepository | None = None
+    controls: PostgresExecutionControlRepository | None = None
+    try:
+        clickhouse = await ClickHouseDailyRepository.connect(
+            dsn=configured_dsn(settings.clickhouse_dsn, capability="ClickHouse"),
+            source="tushare",
+        )
+        controls = PostgresExecutionControlRepository.connect(
+            dsn=configured_dsn(settings.postgres_dsn, capability="PostgreSQL")
+        )
+        evidence = PostgresControlRepository.connect(
+            dsn=configured_dsn(settings.postgres_dsn, capability="PostgreSQL")
+        )
+        await clickhouse.check_connection()
+        control = await controls.replay(account_id=settings.paper_account_id)
+        if not control.active:
+            raise MissingCapabilityError(
+                "paper pre-open inspection requires the kill switch to remain active"
+            )
+        marks = await DailyClosePreOpenMarkReader(
+            repository=clickhouse,
+            evidence_repository=evidence,
+            manifest_hash=manifest_hash,
+            source="tushare",
+        )(
+            to_shanghai(as_of, name="paper pre-open inspection time").date(),
+            instruments,
+            as_of,
+        )
+        return {
+            "instrument_count": len(marks.marks),
+            "kill_switch_active": control.active,
+            "marks_hash": marks.marks_hash,
+            "session_date": marks.session_date.isoformat(),
+            "source_evidence_hash": marks.source_evidence_hash,
+            "status": "ok",
+            "valuation_session_date": marks.valuation_session_date.isoformat(),
+        }
+    finally:
+        if controls is not None:
+            await controls.close()
+        if evidence is not None:
+            await evidence.close()
+        if clickhouse is not None:
+            await clickhouse.client.close()

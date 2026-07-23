@@ -284,3 +284,42 @@ def test_qmt_check_is_read_only_blocked_and_does_not_emit_configuration() -> Non
     assert payload["live_trading_ready"] is False
     assert "sensitive" not in result.stdout
     assert "123456" not in result.stdout
+
+
+def test_paper_preopen_check_emits_hashes_but_no_marks_or_configuration() -> None:
+    payload = {
+        "instrument_count": 2,
+        "kill_switch_active": True,
+        "marks_hash": "a" * 64,
+        "session_date": "2026-07-23",
+        "source_evidence_hash": "b" * 64,
+        "status": "ok",
+        "valuation_session_date": "2026-07-22",
+    }
+    inspection = AsyncMock(return_value=payload)
+    with patch("autoquant.cli.inspect_paper_pre_open", new=inspection):
+        result = runner.invoke(
+            app,
+            [
+                "paper-preopen-check",
+                "--instrument",
+                "000001.XSHE",
+                "--instrument",
+                "600000.XSHG",
+                "--manifest-hash",
+                "c" * 64,
+                "--as-of",
+                "2026-07-23T09:00:00+08:00",
+            ],
+            env={
+                "AQ_ENVIRONMENT": "paper",
+                "AQ_POSTGRES_DSN": "postgresql+asyncpg://sensitive-postgres",
+                "AQ_CLICKHOUSE_DSN": "http://sensitive-clickhouse",
+            },
+        )
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == payload
+    assert "sensitive" not in result.stdout
+    assert '"marks":' not in result.stdout
+    inspection.assert_awaited_once()

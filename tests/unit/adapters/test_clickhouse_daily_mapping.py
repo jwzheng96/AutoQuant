@@ -245,6 +245,30 @@ async def test_query_factors_maps_exact_revision() -> None:
 
 
 @pytest.mark.asyncio
+async def test_empty_driver_results_are_valid_empty_daily_and_coverage_queries() -> None:
+    client = RecordingClient()
+    repo = repository(client)
+
+    assert await repo.query_bars_as_of(
+        ("000001.XSHE",),
+        date(2026, 7, 20),
+        date(2026, 7, 20),
+        AVAILABLE,
+    ) == ()
+    coverage = await repo.query_coverage_as_of(
+        ("000001.XSHE",),
+        date(2026, 7, 20),
+        date(2026, 7, 20),
+        AVAILABLE,
+    )
+
+    assert coverage.sessions == ()
+    assert coverage.lifecycles == ()
+    assert coverage.suspensions == ()
+    assert coverage.price_limits == ()
+
+
+@pytest.mark.asyncio
 async def test_connection_check_requires_all_tables_and_schema_version_three() -> None:
     client = RecordingClient()
 

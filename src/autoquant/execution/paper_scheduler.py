@@ -61,6 +61,7 @@ class PaperIntentSource(Protocol):
 @dataclass(frozen=True, slots=True)
 class PreOpenMarks:
     session_date: date
+    valuation_session_date: date
     as_of: datetime
     marks: dict[str, Decimal]
     source_evidence_hash: str
@@ -68,6 +69,8 @@ class PreOpenMarks:
 
     def __post_init__(self) -> None:
         as_of = to_utc(self.as_of, name="pre-open marks as_of")
+        if self.valuation_session_date >= self.session_date:
+            raise ValueError("pre-open marks must use a prior valuation session")
         if as_of.astimezone(SHANGHAI).date() > self.session_date:
             raise ValueError("pre-open marks cannot come from after the session date")
         marks = dict(self.marks)
@@ -91,6 +94,7 @@ class PreOpenMarks:
                     },
                     "session_date": self.session_date.isoformat(),
                     "source_evidence_hash": self.source_evidence_hash,
+                    "valuation_session_date": self.valuation_session_date.isoformat(),
                 }
             ),
         )

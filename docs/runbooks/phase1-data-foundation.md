@@ -164,6 +164,29 @@ fresh quote snapshot, replayed daily session state, bounded strategy output and 
 evidence sink are required. The console replays this chain at startup. External real-time quotes
 and the resident scheduler runtime remain separate release gates.
 
+Before assembling a resident paper runtime, set `AQ_ENVIRONMENT=paper`, leave
+`AQ_LIVE_TRADING_ENABLED=false`, keep the account kill switch active, and run the read-only
+pre-open evidence gate during the target Shanghai pre-open window:
+
+```bash
+uv run autoquant paper-preopen-check \
+  --instrument 000001.XSHE \
+  --instrument 600000.XSHG \
+  --manifest-hash <production-complete-tushare-manifest-hash>
+```
+
+Use the exact, complete strategy universe. The command reports only the instrument count,
+valuation/session dates and evidence hashes; it never prints prices or credentials. A failure
+means no scheduler should be started. The gate accepts only one prior open valuation session
+covering the full universe and rejects future-visible or post-cutoff-ingested revisions. Because
+the research availability policy may make the immediately preceding close unavailable before
+09:30, the command can select an older complete visible session within the bounded four-day
+calendar lag; it records that date explicitly rather than mixing dates or crossing the cutoff.
+The supplied manifest must have passed a production-complete quality report for the exact
+instrument set. Selected bars and the prior-session calendar must occur in its immutable record
+hash set, and their persisted Tushare response evidence must replay successfully. Do not use a
+quality-rejected ingestion result or a manifest from another universe.
+
 The internal `PaperSessionInitializer` accepts only `pre_open`, requires a reconciled broker and
 internal snapshot plus zero current-session fill turnover, and freezes the opening state
 idempotently. It is not a manual bypass: no CLI or Web route exposes it, and production still

@@ -22,7 +22,11 @@ from autoquant.errors import AutoQuantError, MissingCapabilityError
 from autoquant.execution.control_store import PostgresExecutionControlRepository
 from autoquant.execution.qmt_preflight import inspect_qmt_readiness
 from autoquant.execution.qmt_session_store import PostgresQmtSessionLeaseRepository
-from autoquant.operations import run_daily_ingestion, tushare_source
+from autoquant.operations import (
+    inspect_paper_pre_open,
+    run_daily_ingestion,
+    tushare_source,
+)
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
 
@@ -273,6 +277,34 @@ def qmt_check() -> None:
     )
     if not report.order_drill_ready:
         raise typer.Exit(code=2)
+
+
+@app.command("paper-preopen-check")
+def paper_preopen_check(
+    instrument: Annotated[list[str], typer.Option("--instrument")],
+    manifest_hash: Annotated[str, typer.Option("--manifest-hash")],
+    as_of: Annotated[str | None, typer.Option("--as-of")] = None,
+) -> None:
+    """Inspect trusted pre-open marks while the paper kill switch remains active."""
+
+    settings = _settings()
+    instant = (
+        datetime.now(UTC)
+        if as_of is None
+        else _parse_instant(as_of, name="as-of")
+    )
+    try:
+        payload = asyncio.run(
+            inspect_paper_pre_open(
+                settings,
+                tuple(instrument),
+                instant,
+                manifest_hash,
+            )
+        )
+    except (AutoQuantError, LookupError, ValueError):
+        _fail("paper pre-open check failed")
+    _emit(payload)
 
 
 async def _ingest(

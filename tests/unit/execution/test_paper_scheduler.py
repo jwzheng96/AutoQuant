@@ -179,6 +179,7 @@ async def test_pre_open_initializes_once_then_replays_existing_session() -> None
     initializer.initialize = AsyncMock(return_value=initialization)
     marks = PreOpenMarks(
         session_date=SESSION_DATE,
+        valuation_session_date=date(2026, 7, 22),
         as_of=datetime(2026, 7, 22, 7, tzinfo=UTC),
         marks={INSTRUMENT: Decimal("10")},
         source_evidence_hash="c" * 64,

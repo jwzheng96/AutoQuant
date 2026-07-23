@@ -115,8 +115,19 @@ PostgreSQL schema v14 adds a separate single-owner paper-scheduler process lease
 acquisition, short heartbeats, hashed bearer tokens, generation fencing, expiry takeover and
 immutable acquire/release events prevent two scheduler processes from driving one account. The
 resident runner activates the durable kill switch and stops if heartbeat ownership or clean
-release cannot be proven. The remaining gate is deployment wiring to an authorized Windows QMT
-quote process plus a production pre-open mark reader; neither paper nor live trading is enabled.
+release cannot be proven.
+
+The production pre-open reader now selects the latest single open session whose Tushare daily
+close is point-in-time visible for every configured instrument. It rejects mixed-session marks,
+future visibility, post-cutoff ingestion, stale valuation dates, unknown availability policies
+and a current session that is not independently proven open. Its evidence hash commits the
+calendar revisions, source revisions, ingestion times, valuation session and exact universe.
+Every selected close and prior calendar revision must also belong to the exact
+production-complete PostgreSQL manifest supplied to `paper-preopen-check`; the report and
+underlying source-response hashes are replayed before marks are accepted. The command exercises
+this path without returning prices and only while the durable kill switch is active. Resident
+process assembly and an authorized Windows QMT quote process remain deployment gates; neither
+paper submission nor live trading is enabled.
 
 All dependency, test, lint, type-check, migration, and Git mutation commands for this
 checkout must run on `rlocal`; see [the phase-1 runbook](docs/runbooks/phase1-data-foundation.md).
@@ -128,6 +139,10 @@ cd AutoQuant
 /Users/zjw/.local/bin/uv run autoquant config-check
 /Users/zjw/.local/bin/uv run autoquant tushare-check
 /Users/zjw/.local/bin/uv run autoquant qmt-check
+# Run during the target Shanghai pre-open window with the exact strategy universe:
+/Users/zjw/.local/bin/uv run autoquant paper-preopen-check \
+  --instrument 000001.XSHE --instrument 600000.XSHG \
+  --manifest-hash <production-complete-tushare-manifest-hash>
 ```
 
 For local infrastructure and the operator console:

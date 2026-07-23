@@ -483,9 +483,13 @@ ORDER BY instrument, session_date
             result = await self._client.query(
                 query=sql, parameters=parameters, tz_mode="aware"
             )
-            if tuple(result.column_names) != columns:
+            rows = tuple(tuple(row) for row in result.result_rows)
+            result_columns = tuple(result.column_names)
+            if not rows and not result_columns:
+                return ()
+            if result_columns != columns:
                 raise ValueError("unexpected columns")
-            return tuple(tuple(row) for row in result.result_rows)
+            return rows
         except Exception:
             raise PersistenceUnavailableError(
                 "ClickHouse daily coverage query failed"
@@ -541,9 +545,13 @@ ORDER BY instrument, session_date
             result = await self._client.query(
                 query=sql, parameters=parameters, tz_mode="aware"
             )
-            if tuple(result.column_names) != result_columns:
+            rows = tuple(tuple(row) for row in result.result_rows)
+            actual_columns = tuple(result.column_names)
+            if not rows and not actual_columns:
+                return ()
+            if actual_columns != result_columns:
                 raise ValueError("unexpected columns")
-            return tuple(tuple(row) for row in result.result_rows)
+            return rows
         except Exception:
             raise PersistenceUnavailableError(
                 "ClickHouse returned malformed daily rows"
