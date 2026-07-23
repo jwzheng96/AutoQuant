@@ -499,6 +499,11 @@ class TushareDailySource:
                     start=start,
                     end=end,
                     sessions=sessions,
+                    bar_dates=frozenset(
+                        value.session_date
+                        for value in bars
+                        if value.instrument == instrument
+                    ),
                 )
             )
             limit_result = await self._client.post(
@@ -1087,6 +1092,7 @@ class TushareDailySource:
         start: date,
         end: date,
         sessions: tuple[TradingSession, ...],
+        bar_dates: frozenset[date] | None = None,
     ) -> tuple[DailySuspensionStatus, ...]:
         events: list[tuple[date, str, object]] = []
         for row in result.rows:
@@ -1111,13 +1117,23 @@ class TushareDailySource:
             if value.is_open and start <= value.session_date <= end
         )
         for session_date in requested_sessions:
+            full_day_suspension_today = False
             while event_index < len(events) and events[event_index][0] <= session_date:
-                _, event_type, timing = events[event_index]
+                event_date, event_type, timing = events[event_index]
                 if event_type == "R":
                     active = False
                 elif timing in (None, ""):
                     active = True
+                    if event_date == session_date:
+                        full_day_suspension_today = True
                 event_index += 1
+            has_bar = bar_dates is not None and session_date in bar_dates
+            if has_bar:
+                if full_day_suspension_today:
+                    raise VendorResponseError(
+                        "Tushare daily conflicts with full-day suspension"
+                    )
+                active = False
             values.append(
                 DailySuspensionStatus(
                     source=_SOURCE,

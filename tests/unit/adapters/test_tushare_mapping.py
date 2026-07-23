@@ -498,6 +498,62 @@ async def test_fetch_sorts_descending_vendor_rows_and_tracks_suspension_interval
 
 
 @pytest.mark.asyncio
+async def test_daily_bar_resets_stale_suspension_without_resume_event() -> None:
+    responses = base_responses(
+        suspend=[
+            {
+                "ts_code": "000001.SZ",
+                "trade_date": "20200101",
+                "suspend_type": "S",
+                "suspend_timing": None,
+            },
+            {
+                "ts_code": "000001.SZ",
+                "trade_date": "20260719",
+                "suspend_type": "S",
+                "suspend_timing": "09:31-10:31",
+            },
+        ],
+    )
+
+    batch = await source(FakeClient(responses)).fetch_daily_dataset(
+        ("000001.XSHE",),
+        date(2026, 7, 20),
+        date(2026, 7, 20),
+    )
+
+    assert batch.coverage.suspensions[0].suspended is False
+    assert DailyQualityGate().evaluate(
+        batch=batch,
+        requested_instruments=("000001.XSHE",),
+        start=date(2026, 7, 20),
+        end=date(2026, 7, 20),
+        as_of=NOW,
+    ).passed is True
+
+
+@pytest.mark.asyncio
+async def test_daily_bar_rejects_same_day_full_suspension_conflict() -> None:
+    responses = base_responses(
+        suspend=[
+            {
+                "ts_code": "000001.SZ",
+                "trade_date": "20260720",
+                "suspend_type": "S",
+                "suspend_timing": None,
+            }
+        ],
+    )
+
+    with pytest.raises(VendorResponseError, match="conflicts"):
+        await source(FakeClient(responses)).fetch_daily_dataset(
+            ("000001.XSHE",),
+            date(2026, 7, 20),
+            date(2026, 7, 20),
+        )
+
+
+@pytest.mark.asyncio
 async def test_fractional_normalized_shares_are_rejected_instead_of_rounded() -> None:
     responses = base_responses()
     daily = responses["daily"][0]
