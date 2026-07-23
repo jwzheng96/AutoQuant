@@ -105,6 +105,7 @@ AQ_WEB_PORT=8000
 AQ_WEB_USERNAME=operator
 AQ_WEB_PASSWORD=<at least 16 characters; enter locally>
 AQ_PAPER_ACCOUNT_ID=paper-main
+AQ_PAPER_STRATEGY_ID=validated-sma-paper
 AQ_PAPER_INITIAL_CASH=1000000
 ```
 

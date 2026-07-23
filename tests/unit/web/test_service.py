@@ -14,6 +14,7 @@ from autoquant.web.models import (
     OperatorJob,
     OperatorJobState,
     PaperExecutionStatus,
+    PaperStrategyStatus,
     RiskControlStatus,
     ValidationExperiment,
     WalkForwardJobRequest,
@@ -57,6 +58,7 @@ def _service(
     execution_controls: MagicMock | None = None,
     simulated_broker: MagicMock | None = None,
     scheduler: MagicMock | None = None,
+    strategy_registry: MagicMock | None = None,
 ) -> ConsoleService:
     market = MagicMock()
     market.client = MagicMock()
@@ -75,6 +77,7 @@ def _service(
         execution_control_repository=execution_controls,
         simulated_broker=simulated_broker,
         scheduler_repository=scheduler,
+        strategy_registry=strategy_registry,
         now=lambda: NOW,
         poll_interval=0.01,
     )
@@ -244,6 +247,51 @@ async def test_scheduler_evidence_recovery_failure_also_aborts_startup() -> None
     )
 
     with pytest.raises(PersistenceUnavailableError, match="scheduler chain mismatch"):
+        await service.start()
+
+    assert controls.activate.await_args.kwargs["reason"] is KillSwitchReason.RECOVERY_FAILED
+
+
+@pytest.mark.asyncio
+async def test_strategy_registry_status_is_inactive_without_approval() -> None:
+    registry = MagicMock()
+    registry.active = AsyncMock(return_value=None)
+    service = _service(
+        operator=MagicMock(),
+        control=MagicMock(),
+        runner=AsyncMock(),
+        strategy_registry=registry,
+    )
+
+    status = await service.paper_strategy_status()
+
+    assert isinstance(status, PaperStrategyStatus)
+    assert status.active is False
+    assert status.live_trading_locked is True
+    assert "explicit_paper_approval" in status.remaining_gates
+
+
+@pytest.mark.asyncio
+async def test_strategy_registry_recovery_failure_aborts_startup() -> None:
+    registry = MagicMock()
+    registry.active = AsyncMock(
+        side_effect=PersistenceUnavailableError("strategy chain mismatch")
+    )
+    controls = MagicMock()
+    controls.ensure_fail_closed = AsyncMock()
+    controls.activate = AsyncMock()
+    scheduler = MagicMock()
+    scheduler.replay = AsyncMock()
+    service = _service(
+        operator=MagicMock(),
+        control=MagicMock(),
+        runner=AsyncMock(),
+        execution_controls=controls,
+        scheduler=scheduler,
+        strategy_registry=registry,
+    )
+
+    with pytest.raises(PersistenceUnavailableError, match="strategy chain mismatch"):
         await service.start()
 
     assert controls.activate.await_args.kwargs["reason"] is KillSwitchReason.RECOVERY_FAILED

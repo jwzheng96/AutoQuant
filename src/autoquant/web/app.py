@@ -28,6 +28,7 @@ from autoquant.execution.control_store import PostgresExecutionControlRepository
 from autoquant.execution.paper_scheduler_store import PostgresPaperSchedulerRepository
 from autoquant.execution.simulated_broker import PersistentSimulatedBroker
 from autoquant.execution.store import PostgresPaperExecutionRepository
+from autoquant.execution.strategy_registry_store import PostgresPaperStrategyRegistry
 from autoquant.operations import configured_dsn
 from autoquant.web.backtest_store import PostgresBacktestRepository
 from autoquant.web.models import (
@@ -284,16 +285,18 @@ def create_app(
     ) -> dict[str, object]:
         risk = await active_service(request).risk_status()
         execution = await active_service(request).execution_status()
+        strategy = await active_service(request).paper_strategy_status()
         return {
             "status": "unavailable",
             "orders": [],
             "positions": [],
             "risk": risk.model_dump(mode="json"),
             "execution": execution.model_dump(mode="json"),
+            "strategy": strategy.model_dump(mode="json"),
             "reason": (
-                "Pre-trade risk controls are implemented and live mode remains "
-                "hard-locked. Strategy evidence, paper-account reconciliation, "
-                "failure drills, and the QMT gateway have not passed release gates"
+                "Paper risk, reconciliation, simulation, and approval evidence are "
+                "audited. Live mode remains hard-locked until the remaining runtime, "
+                "Windows QMT, and continuous-evidence gates pass"
             ),
         }
 
@@ -311,6 +314,14 @@ def create_app(
         _: str = Depends(authenticated_user),
     ) -> dict[str, object]:
         result = await active_service(request).execution_status()
+        return result.model_dump(mode="json")
+
+    @app.get("/api/v1/execution/strategy")
+    async def paper_strategy_status(
+        request: Request,
+        _: str = Depends(authenticated_user),
+    ) -> dict[str, object]:
+        result = await active_service(request).paper_strategy_status()
         return result.model_dump(mode="json")
 
     @app.post("/api/v1/execution/kill-switch/activate")
@@ -347,6 +358,7 @@ async def _production_service(settings: AppSettings) -> ConsoleService:
     execution_controls = PostgresExecutionControlRepository.connect(dsn=postgres_dsn)
     simulated_broker = PersistentSimulatedBroker.connect(dsn=postgres_dsn)
     scheduler = PostgresPaperSchedulerRepository.connect(dsn=postgres_dsn)
+    strategy_registry = PostgresPaperStrategyRegistry.connect(dsn=postgres_dsn)
     control = PostgresControlRepository.connect(dsn=postgres_dsn)
     try:
         market = await ClickHouseDailyRepository.connect(dsn=clickhouse_dsn, source="tushare")
@@ -359,6 +371,7 @@ async def _production_service(settings: AppSettings) -> ConsoleService:
         await execution_controls.close()
         await simulated_broker.close()
         await scheduler.close()
+        await strategy_registry.close()
         await control.close()
         raise
     reader = ValidatedDailyDatasetReader(
@@ -387,6 +400,7 @@ async def _production_service(settings: AppSettings) -> ConsoleService:
         execution_control_repository=execution_controls,
         simulated_broker=simulated_broker,
         scheduler_repository=scheduler,
+        strategy_registry=strategy_registry,
     )
 
 

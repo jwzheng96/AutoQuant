@@ -428,6 +428,73 @@ class PaperExecutionStatus(BaseModel):
         return value.astimezone(UTC)
 
 
+class PaperStrategyStatus(BaseModel):
+    status: str
+    active: bool
+    live_trading_locked: bool = True
+    account_id: str
+    strategy_id: str
+    registration_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    strategy_version: str | None = None
+    experiment_id: UUID | None = None
+    instrument: str | None = None
+    fast_sessions: int | None = Field(default=None, ge=2)
+    slow_sessions: int | None = Field(default=None, ge=3)
+    allocation: Decimal | None = None
+    validation_result_hash: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    signal_manifest_hash: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    approved_by: str | None = None
+    approved_at: datetime | None = None
+    remaining_gates: tuple[str, ...]
+
+    @field_validator("approved_at")
+    @classmethod
+    def require_aware_strategy_time(
+        cls,
+        value: datetime | None,
+    ) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("strategy approval time must be timezone-aware")
+        return value.astimezone(UTC)
+
+    @model_validator(mode="after")
+    def require_consistent_strategy_state(self) -> Self:
+        details = (
+            self.registration_hash,
+            self.strategy_version,
+            self.experiment_id,
+            self.instrument,
+            self.fast_sessions,
+            self.slow_sessions,
+            self.allocation,
+            self.validation_result_hash,
+            self.signal_manifest_hash,
+            self.approved_by,
+            self.approved_at,
+        )
+        if self.active != all(value is not None for value in details):
+            raise ValueError("paper strategy status details do not match active state")
+        if self.active and self.status != "approved":
+            raise ValueError("active paper strategy status must be approved")
+        if not self.active and self.status != "inactive":
+            raise ValueError("inactive paper strategy status must be inactive")
+        if (
+            self.fast_sessions is not None
+            and self.slow_sessions is not None
+            and self.fast_sessions >= self.slow_sessions
+        ):
+            raise ValueError("paper strategy windows are invalid")
+        return self
+
+
 class KillSwitchActivationRequest(BaseModel):
     command_id: str
     reason: str

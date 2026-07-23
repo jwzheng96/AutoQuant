@@ -17,6 +17,7 @@ from autoquant.execution.control_store import PostgresExecutionControlRepository
 from autoquant.execution.paper_scheduler_store import PostgresPaperSchedulerRepository
 from autoquant.execution.simulated_broker import PersistentSimulatedBroker
 from autoquant.execution.store import PostgresPaperExecutionRepository
+from autoquant.execution.strategy_registry_store import PostgresPaperStrategyRegistry
 from autoquant.operations import run_daily_ingestion
 from autoquant.web.backtest_store import PostgresBacktestRepository
 from autoquant.web.models import (
@@ -28,6 +29,7 @@ from autoquant.web.models import (
     OperatorJob,
     OperatorOverview,
     PaperExecutionStatus,
+    PaperStrategyStatus,
     ResearchManifest,
     RiskControlStatus,
     ValidationExperiment,
@@ -95,6 +97,8 @@ class ConsoleServicePort(Protocol):
 
     async def execution_status(self) -> PaperExecutionStatus: ...
 
+    async def paper_strategy_status(self) -> PaperStrategyStatus: ...
+
     async def activate_kill_switch(
         self, *, command_id: str, reason: str, requested_by: str
     ) -> PaperExecutionStatus: ...
@@ -126,6 +130,7 @@ class ConsoleService:
         execution_control_repository: PostgresExecutionControlRepository | None = None,
         simulated_broker: PersistentSimulatedBroker | None = None,
         scheduler_repository: PostgresPaperSchedulerRepository | None = None,
+        strategy_registry: PostgresPaperStrategyRegistry | None = None,
         ingestion_runner: IngestionRunner = run_daily_ingestion,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
         poll_interval: float = 1.0,
@@ -147,6 +152,7 @@ class ConsoleService:
         self._execution_controls = execution_control_repository
         self._simulated_broker = simulated_broker
         self._scheduler = scheduler_repository
+        self._strategy_registry = strategy_registry
         self._ingestion_runner = ingestion_runner
         self._now = now
         self._poll_interval = poll_interval
@@ -199,6 +205,22 @@ class ConsoleService:
                     await self._execution_controls.activate(
                         account_id=self._settings.paper_account_id,
                         command_id=f"scheduler-recovery-{uuid4()}",
+                        reason=KillSwitchReason.RECOVERY_FAILED,
+                        actor="console-startup",
+                        now=self._now(),
+                    )
+                raise
+        if self._strategy_registry is not None:
+            try:
+                await self._strategy_registry.active(
+                    account_id=self._settings.paper_account_id,
+                    strategy_id=self._settings.paper_strategy_id,
+                )
+            except Exception:
+                if self._execution_controls is not None:
+                    await self._execution_controls.activate(
+                        account_id=self._settings.paper_account_id,
+                        command_id=f"strategy-registry-recovery-{uuid4()}",
                         reason=KillSwitchReason.RECOVERY_FAILED,
                         actor="console-startup",
                         now=self._now(),
@@ -261,6 +283,8 @@ class ConsoleService:
             await self._simulated_broker.close()
         if self._scheduler is not None:
             await self._scheduler.close()
+        if self._strategy_registry is not None:
+            await self._strategy_registry.close()
         await self._operators.close()
         await self._control.close()
         await self._market.client.close()
@@ -535,6 +559,59 @@ class ConsoleService:
                 "operational_kill_switch_reset_drill",
                 "paper_evidence_period",
                 "qmt_windows_read_only_reconciliation",
+            ),
+        )
+
+    async def paper_strategy_status(self) -> PaperStrategyStatus:
+        account_id = self._settings.paper_account_id
+        strategy_id = self._settings.paper_strategy_id
+        if self._strategy_registry is None:
+            return PaperStrategyStatus(
+                status="inactive",
+                active=False,
+                account_id=account_id,
+                strategy_id=strategy_id,
+                remaining_gates=(
+                    "strategy_registry",
+                    "sample_out_candidate",
+                    "explicit_paper_approval",
+                ),
+            )
+        registration = await self._strategy_registry.active(
+            account_id=account_id,
+            strategy_id=strategy_id,
+        )
+        if registration is None:
+            return PaperStrategyStatus(
+                status="inactive",
+                active=False,
+                account_id=account_id,
+                strategy_id=strategy_id,
+                remaining_gates=(
+                    "sample_out_candidate",
+                    "explicit_paper_approval",
+                ),
+            )
+        return PaperStrategyStatus(
+            status="approved",
+            active=True,
+            account_id=account_id,
+            strategy_id=strategy_id,
+            registration_hash=registration.registration_hash,
+            strategy_version=registration.strategy_version,
+            experiment_id=registration.experiment_id,
+            instrument=registration.instrument,
+            fast_sessions=registration.fast_sessions,
+            slow_sessions=registration.slow_sessions,
+            allocation=registration.allocation,
+            validation_result_hash=registration.validation_result_hash,
+            signal_manifest_hash=registration.signal_manifest_hash,
+            approved_by=registration.approved_by,
+            approved_at=registration.approved_at,
+            remaining_gates=(
+                "resident_scheduler_runtime",
+                "windows_qmt_readonly_reconciliation",
+                "continuous_paper_evidence",
             ),
         )
 

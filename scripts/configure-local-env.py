@@ -70,6 +70,11 @@ def render_app_env(
         "AQ_WEB_PASSWORD": web_password,
         "AQ_PAPER_ACCOUNT_ID": source.get("AQ_PAPER_ACCOUNT_ID", "paper-main")
         or "paper-main",
+        "AQ_PAPER_STRATEGY_ID": source.get(
+            "AQ_PAPER_STRATEGY_ID",
+            "validated-sma-paper",
+        )
+        or "validated-sma-paper",
         "AQ_PAPER_INITIAL_CASH": source.get("AQ_PAPER_INITIAL_CASH", "1000000")
         or "1000000",
     }

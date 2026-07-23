@@ -18,6 +18,7 @@ from autoquant.web.models import (
     OperatorJobState,
     OperatorOverview,
     PaperExecutionStatus,
+    PaperStrategyStatus,
     ResearchManifest,
     RiskControlStatus,
     ValidationExperiment,
@@ -191,6 +192,15 @@ class FakeConsoleService:
             remaining_gates=("paper_broker_adapter", "kill_switch_drill"),
         )
 
+    async def paper_strategy_status(self) -> PaperStrategyStatus:
+        return PaperStrategyStatus(
+            status="inactive",
+            active=False,
+            account_id="paper-main",
+            strategy_id="validated-sma-paper",
+            remaining_gates=("sample_out_candidate", "explicit_paper_approval"),
+        )
+
     async def activate_kill_switch(
         self, *, command_id: str, reason: str, requested_by: str
     ) -> PaperExecutionStatus:
@@ -318,6 +328,7 @@ def test_trading_endpoint_is_explicitly_unavailable() -> None:
     assert response.json()["positions"] == []
     assert response.json()["risk"]["live_trading_locked"] is True
     assert response.json()["execution"]["recovery_verified"] is True
+    assert response.json()["strategy"]["active"] is False
 
 
 def test_risk_endpoint_is_authenticated_and_read_only() -> None:
@@ -343,6 +354,17 @@ def test_execution_endpoint_reports_verified_recovery_without_order_actions() ->
     assert response.json()["recovery_verified"] is True
     assert response.json()["gateway_available"] is False
     assert "submit" not in response.text.casefold()
+
+
+def test_strategy_endpoint_reports_paper_only_approval_state() -> None:
+    app = create_app(_settings(), service=FakeConsoleService())
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/execution/strategy", auth=_auth())
+
+    assert response.status_code == 200
+    assert response.json()["active"] is False
+    assert response.json()["live_trading_locked"] is True
 
 
 def test_kill_switch_activation_is_authenticated_and_csrf_protected() -> None:

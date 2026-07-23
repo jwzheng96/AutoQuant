@@ -48,6 +48,7 @@ class AppSettings(BaseSettings):
     web_username: str = "operator"
     web_password: SecretStr | None = None
     paper_account_id: str = "paper-main"
+    paper_strategy_id: str = "validated-sma-paper"
     paper_initial_cash: Decimal = Field(
         default=Decimal("1000000"), ge=Decimal("10000"), le=Decimal("1000000000")
     )
@@ -76,9 +77,9 @@ class AppSettings(BaseSettings):
             raise ValueError("live trading is hard-locked in this release")
         return self
 
-    @field_validator("paper_account_id")
+    @field_validator("paper_account_id", "paper_strategy_id")
     @classmethod
-    def require_safe_paper_account_id(cls, value: str) -> str:
+    def require_safe_paper_runtime_id(cls, value: str) -> str:
         normalized = value.strip()
         if (
             not 1 <= len(normalized) <= 64
@@ -88,7 +89,10 @@ class AppSettings(BaseSettings):
                 for character in normalized
             )
         ):
-            raise ValueError("paper_account_id must be a 1-64 character safe identifier")
+            raise ValueError(
+                "paper_account_id and paper_strategy_id must be 1-64 character "
+                "safe identifiers"
+            )
         return normalized
 
     def require_rqdata(self) -> RqdataCredentials:

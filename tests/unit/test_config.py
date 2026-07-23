@@ -162,6 +162,12 @@ def test_paper_account_id_must_be_safe(account_id: str) -> None:
         AppSettings(_env_file=None, paper_account_id=account_id)
 
 
+@pytest.mark.parametrize("strategy_id", ["", " strategy id ", "../strategy", "x" * 65])
+def test_paper_strategy_id_must_be_safe(strategy_id: str) -> None:
+    with pytest.raises(ValueError, match="paper_strategy_id"):
+        AppSettings(_env_file=None, paper_strategy_id=strategy_id)
+
+
 @pytest.mark.parametrize("initial_cash", ["9999.99", "1000000000.01", "NaN"])
 def test_paper_initial_cash_is_bounded(initial_cash: str) -> None:
     with pytest.raises(ValueError):

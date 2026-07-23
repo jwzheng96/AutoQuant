@@ -213,6 +213,15 @@ async function loadTrading() {
     setText("simulated-broker-state", data.execution?.simulated_broker_recovery_verified ? "持久化模拟券商事实链已验证" : "模拟券商不可用");
     setText("scheduler-evidence-state", data.execution?.scheduler_recovery_verified ? "调度周期哈希链已验证" : "调度证据不可用");
     setText("scheduler-cycle-count", data.execution?.scheduler_cycle_count ?? 0);
+    setText("paper-strategy-state", data.strategy?.active ? "样本外证据已批准（仅模拟盘）" : "未批准");
+    setText("paper-strategy-version", data.strategy?.strategy_version ?? data.strategy?.strategy_id ?? "—");
+    setText(
+      "paper-strategy-evidence",
+      data.strategy?.active
+        ? `${data.strategy.instrument} · SMA ${data.strategy.fast_sessions}/${data.strategy.slow_sessions} · ${(Number(data.strategy.allocation) * 100).toFixed(2)}%`
+        : "当前没有可进入调度器的策略工件",
+    );
+    setText("paper-strategy-gates", data.strategy?.remaining_gates?.join(", ") ?? "—");
   }
   catch (error) { showToast(`能力读取失败：${error.message}`); }
 }
