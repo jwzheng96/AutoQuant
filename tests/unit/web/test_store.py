@@ -1,4 +1,5 @@
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import cast
 from uuid import uuid4
@@ -7,6 +8,9 @@ from sqlalchemy.engine import RowMapping
 
 from autoquant.web.backtest_store import PostgresBacktestRepository
 from autoquant.web.models import BacktestRunRequest, OperatorJobState
+from autoquant.web.portfolio_validation_store import (
+    PostgresPortfolioValidationRepository,
+)
 from autoquant.web.store import PostgresOperatorRepository
 from autoquant.web.validation_store import PostgresValidationRepository
 
@@ -155,3 +159,61 @@ def test_validation_migration_persists_full_selected_fold_artifacts() -> None:
     )
     assert "benchmark_payload jsonb" in benchmark
     assert "VALUES ('postgres', 6)" in benchmark
+
+
+def test_portfolio_validation_row_mapping_is_typed_and_locked() -> None:
+    experiment_id = uuid4()
+    row = cast(
+        RowMapping,
+        {
+            "experiment_id": experiment_id,
+            "state": "queued",
+            "validator_id": (
+                "cross_sectional_momentum_walk_forward_v1"
+            ),
+            "request_payload": {
+                "manifest_hash": "a" * 64,
+                "idempotency_key": (
+                    "portfolio-row-mapping-0001"
+                ),
+            },
+            "requested_by": "operator",
+            "created_at": datetime(2025, 1, 1, tzinfo=UTC),
+            "started_at": None,
+            "completed_at": None,
+            "as_of": None,
+            "result_hash": None,
+            "summary_payload": None,
+            "error_code": None,
+        },
+    )
+
+    experiment = (
+        PostgresPortfolioValidationRepository
+        ._experiment_from_row(row)
+    )
+
+    assert experiment.experiment_id == experiment_id
+    assert experiment.state is OperatorJobState.QUEUED
+    assert experiment.request.gross_allocation == Decimal("0.29")
+    assert experiment.live_trading_locked is True
+
+
+def test_portfolio_validation_migration_is_immutable_and_versioned() -> None:
+    migration = Path(
+        "migrations/postgres/022_portfolio_validation.sql"
+    ).read_text(encoding="utf-8")
+
+    assert (
+        "CREATE TABLE IF NOT EXISTS "
+        "portfolio_validation_experiments"
+    ) in migration
+    assert (
+        "CREATE TABLE IF NOT EXISTS portfolio_validation_folds"
+        in migration
+    )
+    assert "benchmark_payload jsonb NOT NULL" in migration
+    assert "portfolio_validation_experiment_guard" in migration
+    assert "terminal portfolio validation experiments are immutable" in migration
+    assert "portfolio_validation_folds_immutable" in migration
+    assert "VALUES ('postgres', 22)" in migration

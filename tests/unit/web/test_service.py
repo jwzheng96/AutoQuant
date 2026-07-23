@@ -25,6 +25,8 @@ from autoquant.web.models import (
     OperatorJobState,
     PaperExecutionStatus,
     PaperStrategyStatus,
+    PortfolioValidationExperiment,
+    PortfolioWalkForwardJobRequest,
     QmtReadOnlyStatus,
     RiskControlStatus,
     ValidationExperiment,
@@ -64,6 +66,8 @@ def _service(
     backtest_runner: MagicMock | None = None,
     validations: MagicMock | None = None,
     validation_runner: MagicMock | None = None,
+    portfolio_validations: MagicMock | None = None,
+    portfolio_validation_runner: MagicMock | None = None,
     risks: MagicMock | None = None,
     executions: MagicMock | None = None,
     execution_controls: MagicMock | None = None,
@@ -85,6 +89,8 @@ def _service(
         backtest_runner=backtest_runner,
         validation_repository=validations,
         validation_runner=validation_runner,
+        portfolio_validation_repository=portfolio_validations,
+        portfolio_validation_runner=portfolio_validation_runner,
         risk_repository=risks,
         execution_repository=executions,
         execution_control_repository=execution_controls,
@@ -130,6 +136,23 @@ def _validation_experiment() -> ValidationExperiment:
             test_sessions=20,
             candidates=({"fast_sessions": 5, "slow_sessions": 20},),
             idempotency_key="service-validation-request-0001",
+        ),
+        requested_by="operator",
+        created_at=NOW,
+        started_at=NOW,
+    )
+
+
+def _portfolio_validation_experiment() -> PortfolioValidationExperiment:
+    return PortfolioValidationExperiment(
+        experiment_id=uuid4(),
+        state=OperatorJobState.RUNNING,
+        validator_id="cross_sectional_momentum_walk_forward_v1",
+        request=PortfolioWalkForwardJobRequest(
+            manifest_hash="a" * 64,
+            idempotency_key=(
+                "service-portfolio-validation-0001"
+            ),
         ),
         requested_by="operator",
         created_at=NOW,
@@ -745,3 +768,59 @@ async def test_validation_worker_uses_stable_failure_code() -> None:
     )
     audit = control.append_audit_event.await_args_list[-1].args[2]
     assert "do not expose this detail" not in str(audit)
+
+
+@pytest.mark.asyncio
+async def test_portfolio_validation_worker_retries_and_audits_hashes() -> None:
+    repository = MagicMock()
+    repository.complete_experiment = AsyncMock()
+    repository.fail_experiment = AsyncMock()
+    result = MagicMock()
+    result.result_hash = "b" * 64
+    result.manifest_hash = "a" * 64
+    result.instruments = (
+        "000333.XSHE",
+        "600276.XSHG",
+        "601899.XSHG",
+    )
+    result.folds = (MagicMock(), MagicMock(), MagicMock())
+    runner = MagicMock()
+    runner.run = AsyncMock(
+        side_effect=(
+            PersistenceUnavailableError(
+                "temporary portfolio dependency failure"
+            ),
+            result,
+        )
+    )
+    control = MagicMock()
+    control.append_audit_event = AsyncMock(
+        return_value="d" * 64
+    )
+    service = _service(
+        operator=MagicMock(),
+        control=control,
+        runner=AsyncMock(),
+        portfolio_validations=repository,
+        portfolio_validation_runner=runner,
+    )
+    experiment = _portfolio_validation_experiment()
+
+    await service._run_portfolio_validation(experiment)
+
+    assert runner.run.await_count == 2
+    repository.complete_experiment.assert_awaited_once_with(
+        experiment.experiment_id,
+        result=result,
+        now=NOW,
+    )
+    repository.fail_experiment.assert_not_awaited()
+    audit = control.append_audit_event.await_args_list[-1].args[2]
+    assert set(audit) == {
+        "job_id",
+        "result_hash",
+        "manifest_hash",
+        "instrument_count",
+        "fold_count",
+    }
+    assert audit["instrument_count"] == 3

@@ -214,7 +214,8 @@ scripts/local-db.sh migrate
 
 The console binds only to `127.0.0.1` and requires `AQ_WEB_USERNAME` plus a password of at
 least 16 characters in the untracked root `.env`. It can inspect trusted daily data and
-submit bounded ingestion and fixed baseline backtest jobs. The execution core now includes
+submit bounded ingestion, fixed baseline backtests, single-security walk-forward
+validations, and immutable cross-sectional portfolio validations. The execution core now includes
 paper risk, reconciliation, persistent simulation, fenced scheduling, read-only QMT
 convergence, and an immutable paper-strategy approval registry. Live trading remains hard
 locked. No strategy may enter the paper scheduler until a completed walk-forward experiment

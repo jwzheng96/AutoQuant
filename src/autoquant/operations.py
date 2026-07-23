@@ -27,6 +27,7 @@ from autoquant.data.daily_ingestion import (
 from autoquant.data.daily_quality import DailyQualityGate
 from autoquant.data.session_reference import SessionReferenceRefreshService
 from autoquant.errors import (
+    AutoQuantError,
     MissingCapabilityError,
     PersistenceUnavailableError,
 )
@@ -91,6 +92,13 @@ from autoquant.execution.strategy_portfolio_store import (
 from autoquant.execution.strategy_registry_store import PostgresPaperStrategyRegistry
 from autoquant.execution.validated_sma_portfolio import (
     ValidatedSmaPortfolioRegistration,
+)
+from autoquant.web.models import (
+    PortfolioValidationExperiment,
+    PortfolioWalkForwardJobRequest,
+)
+from autoquant.web.portfolio_validation_store import (
+    PostgresPortfolioValidationRepository,
 )
 from autoquant.web.strategy_promotion import (
     PaperPortfolioComponentApproval,
@@ -298,6 +306,104 @@ async def inspect_validation_campaign(
         await repository.close()
 
 
+async def create_portfolio_validation(
+    settings: AppSettings,
+    *,
+    request: PortfolioWalkForwardJobRequest,
+    requested_by: str,
+) -> dict[str, object]:
+    """Queue one live-locked, immutable portfolio validation."""
+
+    if settings.live_trading_enabled:
+        raise MissingCapabilityError(
+            "portfolio validation requires live trading to remain locked"
+        )
+    dsn = configured_dsn(
+        settings.postgres_dsn,
+        capability="PostgreSQL",
+    )
+    control = PostgresControlRepository.connect(dsn=dsn)
+    repository = PostgresPortfolioValidationRepository.connect(
+        dsn=dsn
+    )
+    try:
+        manifest = await control.read_manifest(request.manifest_hash)
+        if not manifest.production_complete:
+            raise ValueError(
+                "portfolio validation requires a "
+                "production-complete manifest"
+            )
+        if len(manifest.instruments) < 3:
+            raise ValueError(
+                "portfolio validation requires at least three instruments"
+            )
+        if any(
+            candidate.selection_count > len(manifest.instruments)
+            for candidate in request.candidates
+        ):
+            raise ValueError(
+                "portfolio candidate selects more instruments "
+                "than the manifest contains"
+            )
+        experiment = await repository.create_experiment(
+            request,
+            requested_by=requested_by,
+            now=datetime.now(UTC),
+        )
+        try:
+            await control.append_audit_event(
+                "operator.portfolio_validation.requested",
+                datetime.now(UTC),
+                {
+                    "job_id": str(experiment.experiment_id),
+                    "manifest_hash": request.manifest_hash,
+                    "instrument_count": len(manifest.instruments),
+                    "validator_id": experiment.validator_id,
+                    "requested_by": requested_by,
+                },
+            )
+        except AutoQuantError:
+            await repository.fail_experiment(
+                experiment.experiment_id,
+                error_code="audit_unavailable",
+                now=datetime.now(UTC),
+                queued=True,
+            )
+            raise PersistenceUnavailableError(
+                "portfolio validation audit is unavailable"
+            ) from None
+        return _portfolio_validation_payload(
+            experiment,
+            fold_count=0,
+        )
+    finally:
+        await repository.close()
+        await control.close()
+
+
+async def inspect_portfolio_validation(
+    settings: AppSettings,
+    *,
+    experiment_id: UUID,
+) -> dict[str, object]:
+    """Verify and return one redacted portfolio experiment."""
+
+    repository = PostgresPortfolioValidationRepository.connect(
+        dsn=configured_dsn(
+            settings.postgres_dsn,
+            capability="PostgreSQL",
+        )
+    )
+    try:
+        detail = await repository.detail(experiment_id)
+        return _portfolio_validation_payload(
+            detail.experiment,
+            fold_count=len(detail.folds),
+        )
+    finally:
+        await repository.close()
+
+
 def _validate_campaign_dataset(
     *,
     dataset: ValidatedDailyDataset,
@@ -385,6 +491,33 @@ def _validation_campaign_payload(
         "live_trading_locked": True,
         "manifest_hash": status.spec.manifest_hash,
         "status": status.status,
+    }
+
+
+def _portfolio_validation_payload(
+    experiment: PortfolioValidationExperiment,
+    *,
+    fold_count: int,
+) -> dict[str, object]:
+    return {
+        "assessment": (
+            None
+            if experiment.summary is None
+            else experiment.summary.model_dump(mode="json")
+        ),
+        "completed_at": (
+            None
+            if experiment.completed_at is None
+            else experiment.completed_at.isoformat()
+        ),
+        "error_code": experiment.error_code,
+        "experiment_id": str(experiment.experiment_id),
+        "fold_count": fold_count,
+        "live_trading_locked": True,
+        "manifest_hash": experiment.request.manifest_hash,
+        "result_hash": experiment.result_hash,
+        "state": experiment.state.value,
+        "validator_id": experiment.validator_id,
     }
 
 

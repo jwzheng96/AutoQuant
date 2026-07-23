@@ -9,6 +9,10 @@ from uuid import UUID, uuid4
 from autoquant.adapters.clickhouse_daily import ClickHouseDailyRepository
 from autoquant.adapters.postgres import PostgresControlRepository
 from autoquant.backtest.models import BacktestResult
+from autoquant.backtest.portfolio_validation import (
+    PortfolioWalkForwardConfig,
+    PortfolioWalkForwardResult,
+)
 from autoquant.backtest.validation import WalkForwardConfig, WalkForwardResult
 from autoquant.config import AppSettings
 from autoquant.errors import AutoQuantError, PersistenceUnavailableError
@@ -50,6 +54,9 @@ from autoquant.web.models import (
     PaperPromotionStatus,
     PaperStrategyComponentStatus,
     PaperStrategyStatus,
+    PortfolioValidationExperiment,
+    PortfolioValidationExperimentDetail,
+    PortfolioWalkForwardJobRequest,
     PromotionGateView,
     QmtReadOnlyStatus,
     ResearchManifest,
@@ -59,6 +66,10 @@ from autoquant.web.models import (
     ValidationExperiment,
     ValidationExperimentDetail,
     WalkForwardJobRequest,
+)
+from autoquant.web.portfolio_validation_store import (
+    PostgresPortfolioValidationRepository,
+    portfolio_validation_config,
 )
 from autoquant.web.risk_store import PostgresRiskDecisionRepository
 from autoquant.web.store import PostgresOperatorRepository
@@ -87,6 +98,15 @@ class WalkForwardRunnerPort(Protocol):
         instrument: str,
         config: WalkForwardConfig,
     ) -> WalkForwardResult: ...
+
+
+class PortfolioWalkForwardRunnerPort(Protocol):
+    async def run(
+        self,
+        *,
+        manifest_hash: str,
+        config: PortfolioWalkForwardConfig,
+    ) -> PortfolioWalkForwardResult: ...
 
 
 class ConsoleServicePort(Protocol):
@@ -121,6 +141,18 @@ class ConsoleServicePort(Protocol):
     ) -> ValidationExperiment: ...
 
     async def validation_detail(self, experiment_id: UUID) -> ValidationExperimentDetail: ...
+
+    async def list_portfolio_validations(
+        self, *, limit: int = 50
+    ) -> tuple[PortfolioValidationExperiment, ...]: ...
+
+    async def create_portfolio_validation(
+        self, request: PortfolioWalkForwardJobRequest, *, requested_by: str
+    ) -> PortfolioValidationExperiment: ...
+
+    async def portfolio_validation_detail(
+        self, experiment_id: UUID
+    ) -> PortfolioValidationExperimentDetail: ...
 
     async def list_validation_campaigns(
         self, *, limit: int = 50
@@ -162,6 +194,12 @@ class ConsoleService:
         backtest_runner: BacktestRunnerPort | None = None,
         validation_repository: PostgresValidationRepository | None = None,
         validation_runner: WalkForwardRunnerPort | None = None,
+        portfolio_validation_repository: (
+            PostgresPortfolioValidationRepository | None
+        ) = None,
+        portfolio_validation_runner: (
+            PortfolioWalkForwardRunnerPort | None
+        ) = None,
         validation_campaign_repository: (
             PostgresValidationCampaignRepository | None
         ) = None,
@@ -194,6 +232,15 @@ class ConsoleService:
             raise ValueError("validation repository and runner must be configured together")
         self._validations = validation_repository
         self._validation_runner = validation_runner
+        if (portfolio_validation_repository is None) != (
+            portfolio_validation_runner is None
+        ):
+            raise ValueError(
+                "portfolio validation repository and runner "
+                "must be configured together"
+            )
+        self._portfolio_validations = portfolio_validation_repository
+        self._portfolio_validation_runner = portfolio_validation_runner
         self._validation_campaigns = validation_campaign_repository
         self._risk = risk_repository
         self._execution = execution_repository
@@ -219,6 +266,8 @@ class ConsoleService:
         self._backtest_worker: asyncio.Task[None] | None = None
         self._validation_wake = asyncio.Event()
         self._validation_worker: asyncio.Task[None] | None = None
+        self._portfolio_validation_wake = asyncio.Event()
+        self._portfolio_validation_worker: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
         if self._execution_controls is not None:
@@ -323,6 +372,15 @@ class ConsoleService:
                 self._validation_worker = asyncio.create_task(
                     self._validation_work_loop(), name="validation-experiment-worker"
                 )
+        if self._portfolio_validations is not None:
+            await self._portfolio_validations.interrupt_running_experiments(
+                now=self._now()
+            )
+            if self._portfolio_validation_worker is None:
+                self._portfolio_validation_worker = asyncio.create_task(
+                    self._portfolio_validation_work_loop(),
+                    name="portfolio-validation-experiment-worker",
+                )
 
     async def stop(self) -> None:
         worker = self._worker
@@ -353,6 +411,16 @@ class ConsoleService:
                 pass
         if self._validations is not None:
             await self._validations.close()
+        portfolio_validation_worker = self._portfolio_validation_worker
+        self._portfolio_validation_worker = None
+        if portfolio_validation_worker is not None:
+            portfolio_validation_worker.cancel()
+            try:
+                await portfolio_validation_worker
+            except asyncio.CancelledError:
+                pass
+        if self._portfolio_validations is not None:
+            await self._portfolio_validations.close()
         if self._validation_campaigns is not None:
             await self._validation_campaigns.close()
         if self._risk is not None:
@@ -520,6 +588,77 @@ class ConsoleService:
 
     async def validation_detail(self, experiment_id: UUID) -> ValidationExperimentDetail:
         repository, _ = self._require_validations()
+        return await repository.detail(experiment_id)
+
+    async def list_portfolio_validations(
+        self,
+        *,
+        limit: int = 50,
+    ) -> tuple[PortfolioValidationExperiment, ...]:
+        repository, _ = self._require_portfolio_validations()
+        return await repository.list_experiments(limit=limit)
+
+    async def create_portfolio_validation(
+        self,
+        request: PortfolioWalkForwardJobRequest,
+        *,
+        requested_by: str,
+    ) -> PortfolioValidationExperiment:
+        repository, _ = self._require_portfolio_validations()
+        manifest = await self._control.read_manifest(
+            request.manifest_hash
+        )
+        if not manifest.production_complete:
+            raise ValueError(
+                "portfolio validation requires a "
+                "production-complete manifest"
+            )
+        if len(manifest.instruments) < 3:
+            raise ValueError(
+                "portfolio validation requires at least three instruments"
+            )
+        if any(
+            candidate.selection_count > len(manifest.instruments)
+            for candidate in request.candidates
+        ):
+            raise ValueError(
+                "portfolio candidate selects more instruments "
+                "than the manifest contains"
+            )
+        experiment = await repository.create_experiment(
+            request,
+            requested_by=requested_by,
+            now=self._now(),
+        )
+        try:
+            await self._audit(
+                "operator.portfolio_validation.requested",
+                experiment.experiment_id,
+                {
+                    "manifest_hash": request.manifest_hash,
+                    "instrument_count": len(manifest.instruments),
+                    "validator_id": experiment.validator_id,
+                    "requested_by": requested_by,
+                },
+            )
+        except AutoQuantError:
+            await repository.fail_experiment(
+                experiment.experiment_id,
+                error_code="audit_unavailable",
+                now=self._now(),
+                queued=True,
+            )
+            raise PersistenceUnavailableError(
+                "Operator audit is unavailable"
+            ) from None
+        self._portfolio_validation_wake.set()
+        return experiment
+
+    async def portfolio_validation_detail(
+        self,
+        experiment_id: UUID,
+    ) -> PortfolioValidationExperimentDetail:
+        repository, _ = self._require_portfolio_validations()
         return await repository.detail(experiment_id)
 
     async def list_validation_campaigns(
@@ -1011,6 +1150,28 @@ class ConsoleService:
                 continue
             await self._run_validation(experiment)
 
+    async def _portfolio_validation_work_loop(self) -> None:
+        repository, _ = self._require_portfolio_validations()
+        while True:
+            try:
+                experiment = await repository.claim_next_experiment(
+                    now=self._now()
+                )
+            except AutoQuantError:
+                await asyncio.sleep(self._poll_interval)
+                continue
+            if experiment is None:
+                self._portfolio_validation_wake.clear()
+                try:
+                    await asyncio.wait_for(
+                        self._portfolio_validation_wake.wait(),
+                        timeout=self._poll_interval,
+                    )
+                except TimeoutError:
+                    pass
+                continue
+            await self._run_portfolio_validation(experiment)
+
     async def _run_backtest(self, run: BacktestRun) -> None:
         repository, runner = self._require_backtests()
         try:
@@ -1096,6 +1257,74 @@ class ConsoleService:
             except AutoQuantError:
                 pass
 
+    async def _run_portfolio_validation(
+        self,
+        experiment: PortfolioValidationExperiment,
+    ) -> None:
+        repository, runner = self._require_portfolio_validations()
+        try:
+            await self._audit(
+                "operator.portfolio_validation.started",
+                experiment.experiment_id,
+                {},
+            )
+            result = await self._run_portfolio_validation_with_retry(
+                runner=runner,
+                experiment=experiment,
+            )
+            await repository.complete_experiment(
+                experiment.experiment_id,
+                result=result,
+                now=self._now(),
+            )
+        except ValueError:
+            error_code = "invalid_portfolio_validation_input"
+            await repository.fail_experiment(
+                experiment.experiment_id,
+                error_code=error_code,
+                now=self._now(),
+            )
+            await self._best_effort_portfolio_validation_failure_audit(
+                experiment.experiment_id,
+                error_code,
+            )
+        except AutoQuantError:
+            error_code = "portfolio_validation_dependency_failed"
+            await repository.fail_experiment(
+                experiment.experiment_id,
+                error_code=error_code,
+                now=self._now(),
+            )
+            await self._best_effort_portfolio_validation_failure_audit(
+                experiment.experiment_id,
+                error_code,
+            )
+        except Exception:
+            error_code = "internal_error"
+            await repository.fail_experiment(
+                experiment.experiment_id,
+                error_code=error_code,
+                now=self._now(),
+            )
+            await self._best_effort_portfolio_validation_failure_audit(
+                experiment.experiment_id,
+                error_code,
+            )
+        else:
+            try:
+                await self._audit(
+                    "operator.portfolio_validation.completed",
+                    experiment.experiment_id,
+                    {
+                        "result_hash": result.result_hash,
+                        "manifest_hash": result.manifest_hash,
+                        "instrument_count": len(result.instruments),
+                        "fold_count": len(result.folds),
+                    },
+                )
+            except AutoQuantError:
+                pass
+
     async def _run_validation_with_retry(
         self,
         *,
@@ -1117,6 +1346,29 @@ class ConsoleService:
                     self._poll_interval * attempt
                 )
         raise AssertionError("validation retry loop exhausted")
+
+    async def _run_portfolio_validation_with_retry(
+        self,
+        *,
+        runner: PortfolioWalkForwardRunnerPort,
+        experiment: PortfolioValidationExperiment,
+    ) -> PortfolioWalkForwardResult:
+        maximum_attempts = 3
+        for attempt in range(1, maximum_attempts + 1):
+            try:
+                return await runner.run(
+                    manifest_hash=experiment.request.manifest_hash,
+                    config=portfolio_validation_config(
+                        experiment.request
+                    ),
+                )
+            except AutoQuantError:
+                if attempt == maximum_attempts:
+                    raise
+                await asyncio.sleep(self._poll_interval * attempt)
+        raise AssertionError(
+            "portfolio validation retry loop exhausted"
+        )
 
     async def _run_job(self, job: OperatorJob) -> None:
         try:
@@ -1172,6 +1424,20 @@ class ConsoleService:
         except AutoQuantError:
             pass
 
+    async def _best_effort_portfolio_validation_failure_audit(
+        self,
+        experiment_id: UUID,
+        error_code: str,
+    ) -> None:
+        try:
+            await self._audit(
+                "operator.portfolio_validation.failed",
+                experiment_id,
+                {"error_code": error_code},
+            )
+        except AutoQuantError:
+            pass
+
     def _require_backtests(
         self,
     ) -> tuple[PostgresBacktestRepository, BacktestRunnerPort]:
@@ -1185,6 +1451,24 @@ class ConsoleService:
         if self._validations is None or self._validation_runner is None:
             raise PersistenceUnavailableError("Validation service is unavailable")
         return self._validations, self._validation_runner
+
+    def _require_portfolio_validations(
+        self,
+    ) -> tuple[
+        PostgresPortfolioValidationRepository,
+        PortfolioWalkForwardRunnerPort,
+    ]:
+        if (
+            self._portfolio_validations is None
+            or self._portfolio_validation_runner is None
+        ):
+            raise PersistenceUnavailableError(
+                "Portfolio validation service is unavailable"
+            )
+        return (
+            self._portfolio_validations,
+            self._portfolio_validation_runner,
+        )
 
     async def _audit(self, event_type: str, job_id: UUID, payload: Mapping[str, object]) -> None:
         normalized = {"job_id": str(job_id), **dict(payload)}

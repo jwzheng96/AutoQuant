@@ -139,6 +139,7 @@ async def registry_fixture() -> AsyncIterator[
             "migrations/postgres/019_paper_portfolio_registry.sql",
             "migrations/postgres/020_portfolio_oos_assessment.sql",
             "migrations/postgres/021_validation_campaigns.sql",
+            "migrations/postgres/022_portfolio_validation.sql",
         )
     )
     report = QualityReport(

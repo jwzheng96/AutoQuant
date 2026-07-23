@@ -39,6 +39,7 @@ Apply `migrations/postgres/001_phase1.sql`,
 `migrations/postgres/019_paper_portfolio_registry.sql`, then
 `migrations/postgres/020_portfolio_oos_assessment.sql`, then
 `migrations/postgres/021_validation_campaigns.sql`, then
+`migrations/postgres/022_portfolio_validation.sql`, then
 `migrations/clickhouse/001_phase1.sql` and
 `migrations/clickhouse/002_tushare_daily.sql` and
 `migrations/clickhouse/003_daily_coverage.sql` in order, only to explicitly authorized
@@ -266,6 +267,40 @@ aggregate status with:
 uv run autoquant validation-campaign-status \
   --campaign-hash <campaign-hash>
 ```
+
+Run the portfolio as one cross-sectional strategy, rather than treating
+single-security validations as independent evidence:
+
+```bash
+uv run autoquant portfolio-validation-create \
+  --manifest-hash <exact-multi-instrument-manifest> \
+  --idempotency-key portfolio-research-20260723-v1 \
+  --candidate 20:5:3 \
+  --candidate 60:10:3 \
+  --candidate 120:20:3 \
+  --gross-allocation 0.29 \
+  --maximum-order-notional 100000 \
+  --train-sessions 252 \
+  --test-sessions 21 \
+  --embargo-sessions 1 \
+  --requested-by operator
+```
+
+`serve-web` claims this queue with restart recovery and up to three transient
+dependency attempts. It selects momentum parameters inside each training
+window, evaluates the following embargoed test window, and compares it with an
+equal-weight buy-and-hold benchmark on the same common calendar. Full training,
+test and benchmark ledgers are stored per fold under immutable triggers.
+Inspect and re-verify the artifact with:
+
+```bash
+uv run autoquant portfolio-validation-status \
+  --experiment-id <experiment-uuid>
+```
+
+The status command exits nonzero when the experiment fails or its evidence is
+not a `research_candidate`. A candidate still cannot approve paper or live
+trading; real trading remains hard locked.
 
 ```bash
 uv run autoquant approve-paper-sma \

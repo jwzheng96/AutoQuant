@@ -359,6 +359,194 @@ class ValidationExperimentDetail(BaseModel):
     folds: tuple[ValidationFoldView, ...]
 
 
+class MomentumCandidateRequest(BaseModel):
+    lookback_sessions: int = Field(ge=20, le=252)
+    rebalance_sessions: int = Field(ge=5, le=63)
+    selection_count: int = Field(ge=1, le=10)
+
+
+class PortfolioWalkForwardJobRequest(BaseModel):
+    manifest_hash: str
+    initial_cash: Decimal = Field(
+        default=Decimal("1000000"),
+        ge=10_000,
+        le=1_000_000_000,
+    )
+    gross_allocation: Decimal = Field(
+        default=Decimal("0.29"),
+        gt=0,
+        le=Decimal("0.80"),
+    )
+    maximum_order_notional: Decimal = Field(
+        default=Decimal("100000"),
+        gt=0,
+    )
+    slippage_bps: Decimal = Field(default=Decimal("5"), ge=0, le=100)
+    train_sessions: int = Field(default=252, ge=126, le=750)
+    test_sessions: int = Field(default=21, ge=20, le=126)
+    embargo_sessions: int = Field(default=1, ge=1, le=20)
+    candidates: tuple[MomentumCandidateRequest, ...] = Field(
+        default=(
+            MomentumCandidateRequest(
+                lookback_sessions=20,
+                rebalance_sessions=5,
+                selection_count=3,
+            ),
+            MomentumCandidateRequest(
+                lookback_sessions=60,
+                rebalance_sessions=10,
+                selection_count=3,
+            ),
+            MomentumCandidateRequest(
+                lookback_sessions=120,
+                rebalance_sessions=20,
+                selection_count=3,
+            ),
+        ),
+        min_length=1,
+        max_length=12,
+    )
+    idempotency_key: str
+
+    @field_validator("manifest_hash")
+    @classmethod
+    def validate_portfolio_manifest_hash(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if re.fullmatch(r"[0-9a-f]{64}", normalized) is None:
+            raise ValueError(
+                "manifest_hash must be a lowercase SHA-256 hash"
+            )
+        return normalized
+
+    @field_validator("idempotency_key")
+    @classmethod
+    def validate_portfolio_idempotency_key(cls, value: str) -> str:
+        normalized = value.strip()
+        if _IDEMPOTENCY_KEY.fullmatch(normalized) is None:
+            raise ValueError(
+                "idempotency_key must be 16-128 safe characters"
+            )
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_portfolio_grid(self) -> Self:
+        candidates = tuple(
+            (
+                value.lookback_sessions,
+                value.rebalance_sessions,
+                value.selection_count,
+            )
+            for value in self.candidates
+        )
+        if len(set(candidates)) != len(candidates):
+            raise ValueError("portfolio candidates must be unique")
+        if max(value.lookback_sessions for value in self.candidates) >= (
+            self.train_sessions
+        ):
+            raise ValueError(
+                "portfolio candidate lookback must be smaller than training"
+            )
+        if any(
+            self.gross_allocation / value.selection_count
+            > Decimal("0.20")
+            or self.initial_cash
+            * self.gross_allocation
+            / value.selection_count
+            * (
+                Decimal("1")
+                + self.slippage_bps / Decimal("10000")
+            )
+            > self.maximum_order_notional
+            for value in self.candidates
+        ):
+            raise ValueError(
+                "portfolio candidate allocation exceeds risk limits"
+            )
+        return self
+
+
+class PortfolioValidationSummary(BaseModel):
+    fold_count: int = Field(ge=1)
+    oos_sessions: int = Field(ge=1)
+    compounded_oos_return: Decimal
+    benchmark_compounded_oos_return: Decimal
+    excess_oos_return: Decimal
+    profitable_fold_rate: Decimal = Field(ge=0, le=1)
+    worst_oos_drawdown: Decimal = Field(ge=0, le=1)
+    mean_training_return: Decimal
+    selection_optimism: Decimal
+    rejected_order_count: int = Field(ge=0)
+    evidence_status: str
+    gate_failures: tuple[str, ...]
+    validation_version: str
+    objective_version: str
+    policy_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    assessment_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class PortfolioValidationExperiment(BaseModel):
+    experiment_id: UUID
+    state: OperatorJobState
+    validator_id: str
+    request: PortfolioWalkForwardJobRequest
+    requested_by: str
+    created_at: datetime
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    as_of: datetime | None = None
+    result_hash: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    summary: PortfolioValidationSummary | None = None
+    error_code: str | None = None
+    live_trading_locked: bool = True
+
+    @field_validator("created_at", "started_at", "completed_at", "as_of")
+    @classmethod
+    def require_aware_portfolio_validation_time(
+        cls,
+        value: datetime | None,
+    ) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError(
+                "portfolio validation timestamps must be timezone-aware"
+            )
+        return value.astimezone(UTC)
+
+    @model_validator(mode="after")
+    def require_portfolio_research_lock(self) -> Self:
+        if not self.live_trading_locked:
+            raise ValueError(
+                "portfolio validation cannot unlock live trading"
+            )
+        return self
+
+
+class PortfolioValidationFoldView(BaseModel):
+    sequence: int = Field(ge=1)
+    train_start: date
+    train_end: date
+    test_start: date
+    test_end: date
+    selected: MomentumCandidateRequest
+    selection_score: Decimal
+    training: BacktestMetrics
+    test: BacktestMetrics
+    benchmark: BacktestMetrics
+    training_result_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    test_result_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    benchmark_result_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    fold_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class PortfolioValidationExperimentDetail(BaseModel):
+    experiment: PortfolioValidationExperiment
+    folds: tuple[PortfolioValidationFoldView, ...]
+
+
 class ValidationCampaignComponentView(BaseModel):
     sequence: int = Field(ge=1)
     instrument: str

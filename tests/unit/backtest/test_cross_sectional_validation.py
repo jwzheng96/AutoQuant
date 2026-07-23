@@ -184,6 +184,7 @@ def test_cross_sectional_signal_never_uses_current_session_close() -> None:
     config = PortfolioWalkForwardConfig(
         initial_cash=Decimal("1000000"),
         gross_allocation=Decimal("0.20"),
+        maximum_order_notional=Decimal("101000"),
         train_sessions=126,
         test_sessions=20,
         candidates=(parameters,),

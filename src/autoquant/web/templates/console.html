@@ -153,6 +153,42 @@
             <p class="form-help">活动由受控 CLI 创建，统一数据清单、资金和切点；控制台仅展示不可变活动及各组件证据状态。</p>
             <div class="table-wrap"><table><thead><tr><th>创建时间</th><th>活动</th><th>标的数</th><th>状态</th><th>完成进度</th><th>失败门禁</th></tr></thead><tbody id="validation-campaigns-table"></tbody></table></div>
           </article>
+          <div class="section-heading research-section-heading"><div><p class="eyebrow">CROSS-SECTIONAL PORTFOLIO</p><h2>组合级嵌套走步验证</h2></div><button id="refresh-portfolio-validations" class="secondary-button" type="button">刷新组合实验</button></div>
+          <article class="panel">
+            <form id="portfolio-validation-form" class="research-form">
+              <label>多标的数据清单<select id="portfolio-validation-manifest" required><option value="">正在读取…</option></select></label>
+              <label>初始资金<input id="portfolio-validation-cash" type="number" min="10000" max="1000000000" step="1000" value="1000000" required></label>
+              <label>总资金使用率<input id="portfolio-validation-gross" type="number" min="0.01" max="0.80" step="0.01" value="0.29" required></label>
+              <label>单笔名义上限<input id="portfolio-validation-order-cap" type="number" min="1" step="1000" value="100000" required></label>
+              <label>滑点（bp）<input id="portfolio-validation-slippage" type="number" min="0" max="100" step="0.1" value="5" required></label>
+              <label>训练交易日<input id="portfolio-validation-train" type="number" min="126" max="750" value="252" required></label>
+              <label>测试交易日<input id="portfolio-validation-test" type="number" min="20" max="126" value="21" required></label>
+              <label>隔离交易日<input id="portfolio-validation-embargo" type="number" min="1" max="20" value="1" required></label>
+              <label>动量候选<input id="portfolio-validation-candidates" value="20/5/3,60/10/3,120/20/3" required></label>
+              <button class="primary-button" type="submit">创建组合验证</button>
+            </form>
+            <p class="form-help">候选格式为“回看日/调仓日/持仓数”。参数只在训练窗选择，测试窗与等权买入持有同步比较；结果只能形成研究证据，不能解锁实盘。</p>
+          </article>
+          <article class="panel">
+            <div class="panel-title"><div><p class="eyebrow">PORTFOLIO EXPERIMENTS</p><h3>最近组合实验</h3></div><span class="pill warning">实盘锁定</span></div>
+            <div class="table-wrap"><table><thead><tr><th>创建时间</th><th>标的数</th><th>训练/测试</th><th>状态</th><th>样本外收益</th><th>超额收益</th><th>证据</th></tr></thead><tbody id="portfolio-validations-table"></tbody></table></div>
+          </article>
+          <section id="portfolio-validation-detail" class="research-detail" hidden>
+            <div class="metric-grid">
+              <article class="metric"><span>样本外复合收益</span><strong id="portfolio-oos-return">—</strong><small>独立测试折叠顺序复合</small></article>
+              <article class="metric"><span>等权基准收益</span><strong id="portfolio-benchmark-return">—</strong><small>同一费用和执行规则</small></article>
+              <article class="metric"><span>样本外超额</span><strong id="portfolio-excess-return">—</strong><small>组合策略减等权基准</small></article>
+              <article class="metric"><span>证据状态</span><strong id="portfolio-evidence-status">—</strong><small id="portfolio-gate-failures">尚未评估</small></article>
+              <article class="metric"><span>最差回撤</span><strong id="portfolio-worst-drawdown">—</strong><small>各测试折叠最大值</small></article>
+              <article class="metric"><span>盈利折叠比例</span><strong id="portfolio-profitable-rate">—</strong><small>最低门槛 50%</small></article>
+              <article class="metric"><span>选择乐观偏差</span><strong id="portfolio-optimism">—</strong><small>训练均值减测试均值</small></article>
+              <article class="metric"><span>拒单数</span><strong id="portfolio-rejections">—</strong><small>任何拒单都会阻断候选</small></article>
+            </div>
+            <article class="panel">
+              <div class="panel-title"><div><p class="eyebrow">PORTFOLIO FOLD AUDIT</p><h3>组合滚动折叠</h3></div></div>
+              <div class="table-wrap"><table><thead><tr><th>#</th><th>训练区间</th><th>测试区间</th><th>动量参数</th><th>训练收益</th><th>测试收益</th><th>基准收益</th><th>测试回撤</th></tr></thead><tbody id="portfolio-validation-folds-table"></tbody></table></div>
+            </article>
+          </section>
           <article class="panel">
             <div class="panel-title"><div><p class="eyebrow">VALIDATION RUNS</p><h3>最近实验</h3></div></div>
             <div class="table-wrap"><table><thead><tr><th>创建时间</th><th>证券</th><th>训练/测试</th><th>状态</th><th>样本外复合收益</th><th>盈利折叠</th></tr></thead><tbody id="validations-table"></tbody></table></div>

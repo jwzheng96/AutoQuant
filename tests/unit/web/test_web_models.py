@@ -1,10 +1,18 @@
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from uuid import uuid4
 
 import pytest
 from pydantic import ValidationError
 
-from autoquant.web.models import DailyIngestionJobRequest, OperatorJob, OperatorJobState
+from autoquant.web.models import (
+    DailyIngestionJobRequest,
+    OperatorJob,
+    OperatorJobState,
+    PortfolioWalkForwardJobRequest,
+)
+
+MANIFEST_HASH = "a" * 64
 
 
 def test_daily_ingestion_request_normalizes_and_limits_scope() -> None:
@@ -76,4 +84,36 @@ def test_operator_job_requires_aware_timestamps() -> None:
             request=request,
             requested_by="operator",
             created_at=datetime(2025, 1, 1),
+        )
+
+
+def test_portfolio_validation_request_has_execution_headroom() -> None:
+    request = PortfolioWalkForwardJobRequest(
+        manifest_hash=MANIFEST_HASH.upper(),
+        idempotency_key="portfolio-validation-0001",
+    )
+
+    assert request.manifest_hash == MANIFEST_HASH
+    assert request.gross_allocation == Decimal("0.29")
+    assert (
+        request.initial_cash
+        * request.gross_allocation
+        / request.candidates[0].selection_count
+        * (
+            Decimal("1")
+            + request.slippage_bps / Decimal("10000")
+        )
+        < request.maximum_order_notional
+    )
+
+
+def test_portfolio_validation_request_counts_slippage_in_order_cap() -> None:
+    with pytest.raises(
+        ValidationError,
+        match="allocation exceeds risk limits",
+    ):
+        PortfolioWalkForwardJobRequest(
+            manifest_hash=MANIFEST_HASH,
+            gross_allocation=Decimal("0.30"),
+            idempotency_key="portfolio-validation-0002",
         )

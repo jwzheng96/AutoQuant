@@ -30,10 +30,12 @@ from autoquant.operations import (
     approve_paper_sma_portfolio_strategy,
     approve_paper_sma_strategy,
     complete_qmt_recovery_drill,
+    create_portfolio_validation,
     create_validation_campaign,
     inspect_paper_pre_open,
     inspect_paper_promotion,
     inspect_paper_runtime_readiness,
+    inspect_portfolio_validation,
     inspect_validation_campaign,
     revoke_paper_strategy,
     run_daily_ingestion,
@@ -43,6 +45,10 @@ from autoquant.operations import (
     start_qmt_recovery_drill,
     tushare_source,
     unlock_paper_runtime,
+)
+from autoquant.web.models import (
+    MomentumCandidateRequest,
+    PortfolioWalkForwardJobRequest,
 )
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
@@ -111,6 +117,23 @@ def _parse_sma_candidate(value: str) -> SmaParameters:
     except (TypeError, ValueError):
         _fail(
             "candidate must use FAST:SLOW with valid SMA windows"
+        )
+
+
+def _parse_momentum_candidate(
+    value: str,
+) -> MomentumCandidateRequest:
+    try:
+        lookback, rebalance, selection = value.split(":")
+        return MomentumCandidateRequest(
+            lookback_sessions=int(lookback),
+            rebalance_sessions=int(rebalance),
+            selection_count=int(selection),
+        )
+    except (TypeError, ValueError):
+        _fail(
+            "candidate must use LOOKBACK:REBALANCE:COUNT "
+            "with valid momentum windows"
         )
 
 
@@ -676,6 +699,115 @@ def validation_campaign_status(
         "failed",
         "completed_with_rejections",
     }:
+        raise typer.Exit(code=2)
+
+
+@app.command("portfolio-validation-create")
+def portfolio_validation_create(
+    manifest_hash: Annotated[str, typer.Option("--manifest-hash")],
+    idempotency_key: Annotated[
+        str,
+        typer.Option("--idempotency-key"),
+    ],
+    requested_by: Annotated[str, typer.Option("--requested-by")],
+    candidate: Annotated[list[str], typer.Option("--candidate")],
+    initial_cash: Annotated[
+        str,
+        typer.Option("--initial-cash"),
+    ] = "1000000",
+    gross_allocation: Annotated[
+        str,
+        typer.Option("--gross-allocation"),
+    ] = "0.29",
+    maximum_order_notional: Annotated[
+        str,
+        typer.Option("--maximum-order-notional"),
+    ] = "100000",
+    slippage_bps: Annotated[
+        str,
+        typer.Option("--slippage-bps"),
+    ] = "5",
+    train_sessions: Annotated[
+        int,
+        typer.Option("--train-sessions"),
+    ] = 252,
+    test_sessions: Annotated[
+        int,
+        typer.Option("--test-sessions"),
+    ] = 21,
+    embargo_sessions: Annotated[
+        int,
+        typer.Option("--embargo-sessions"),
+    ] = 1,
+) -> None:
+    """Queue one audited portfolio experiment; never approve trading."""
+
+    try:
+        request = PortfolioWalkForwardJobRequest(
+            manifest_hash=manifest_hash,
+            initial_cash=_parse_decimal(
+                initial_cash,
+                name="initial-cash",
+            ),
+            gross_allocation=_parse_decimal(
+                gross_allocation,
+                name="gross-allocation",
+            ),
+            maximum_order_notional=_parse_decimal(
+                maximum_order_notional,
+                name="maximum-order-notional",
+            ),
+            slippage_bps=_parse_decimal(
+                slippage_bps,
+                name="slippage-bps",
+            ),
+            train_sessions=train_sessions,
+            test_sessions=test_sessions,
+            embargo_sessions=embargo_sessions,
+            candidates=tuple(
+                _parse_momentum_candidate(value)
+                for value in candidate
+            ),
+            idempotency_key=idempotency_key,
+        )
+        payload = asyncio.run(
+            create_portfolio_validation(
+                _settings(),
+                request=request,
+                requested_by=requested_by,
+            )
+        )
+    except (AutoQuantError, LookupError, ValueError):
+        _fail("portfolio validation creation failed")
+    _emit(payload)
+
+
+@app.command("portfolio-validation-status")
+def portfolio_validation_status(
+    experiment_id: Annotated[UUID, typer.Option("--experiment-id")],
+) -> None:
+    """Verify one stored portfolio artifact and report its gates."""
+
+    try:
+        payload = asyncio.run(
+            inspect_portfolio_validation(
+                _settings(),
+                experiment_id=experiment_id,
+            )
+        )
+    except (AutoQuantError, LookupError, ValueError):
+        _fail("portfolio validation status failed")
+    _emit(payload)
+    assessment = payload.get("assessment")
+    evidence_status = (
+        assessment.get("evidence_status")
+        if isinstance(assessment, dict)
+        else None
+    )
+    if payload["state"] in {"failed", "interrupted"} or (
+        payload["state"] == "completed"
+        and evidence_status != "research_candidate"
+    ):
         raise typer.Exit(code=2)
 
 

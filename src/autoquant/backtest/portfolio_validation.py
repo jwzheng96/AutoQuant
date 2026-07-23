@@ -83,7 +83,7 @@ class CrossSectionalMomentumParameters:
 @dataclass(frozen=True, slots=True)
 class PortfolioWalkForwardConfig:
     initial_cash: Decimal = Decimal("1000000")
-    gross_allocation: Decimal = Decimal("0.30")
+    gross_allocation: Decimal = Decimal("0.29")
     maximum_order_notional: Decimal = Decimal("100000")
     slippage_bps: Decimal = Decimal("5")
     train_sessions: int = 252
@@ -152,6 +152,10 @@ class PortfolioWalkForwardConfig:
                 or self.initial_cash
                 * self.gross_allocation
                 / value.selection_count
+                * (
+                    Decimal("1")
+                    + self.slippage_bps / Decimal("10000")
+                )
                 > self.maximum_order_notional
             )
             for value in candidates

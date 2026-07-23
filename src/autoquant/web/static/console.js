@@ -306,10 +306,12 @@ const researchManifests = new Map();
 async function loadResearchManifests() {
   const select = document.getElementById("backtest-manifest");
   const validationSelect = document.getElementById("validation-manifest");
+  const portfolioSelect = document.getElementById("portfolio-validation-manifest");
   try {
     const data = await requestJson("/api/v1/research/manifests?limit=100");
     select.replaceChildren();
     validationSelect.replaceChildren();
+    portfolioSelect.replaceChildren();
     researchManifests.clear();
     data.items.forEach(item => {
       researchManifests.set(item.manifest_hash, item);
@@ -318,6 +320,7 @@ async function loadResearchManifests() {
       option.textContent = `${item.instruments.join(", ")} · ${item.start_time.slice(0, 10)} — ${item.end_time.slice(0, 10)} · ${item.manifest_hash.slice(0, 10)}`;
       select.append(option);
       validationSelect.append(option.cloneNode(true));
+      if (item.instruments.length >= 3) portfolioSelect.append(option.cloneNode(true));
     });
     if (!data.items.length) {
       const option = document.createElement("option");
@@ -326,16 +329,24 @@ async function loadResearchManifests() {
       select.append(option);
       validationSelect.append(option.cloneNode(true));
     }
+    if (!portfolioSelect.options.length) {
+      const option = document.createElement("option");
+      option.value = "";
+      option.textContent = "暂无至少包含 3 个标的的数据清单";
+      portfolioSelect.append(option);
+    }
     syncManifestInstrument();
     syncValidationManifestInstrument();
   } catch (error) {
     select.replaceChildren();
     validationSelect.replaceChildren();
+    portfolioSelect.replaceChildren();
     const option = document.createElement("option");
     option.value = "";
     option.textContent = "数据清单读取失败";
     select.append(option);
     validationSelect.append(option.cloneNode(true));
+    portfolioSelect.append(option.cloneNode(true));
     showToast(`数据清单读取失败：${error.message}`);
   }
 }
@@ -524,6 +535,144 @@ async function loadValidationCampaigns() {
   } catch (error) { showToast(`验证活动读取失败：${error.message}`); }
 }
 
+async function loadPortfolioValidationDetail(experimentId) {
+  try {
+    const detail = await requestJson(`/api/v1/portfolio-validations/${experimentId}`);
+    const host = document.getElementById("portfolio-validation-detail");
+    host.hidden = false;
+    const summary = detail.experiment.summary;
+    setText("portfolio-oos-return", formatPercent(summary?.compounded_oos_return));
+    setText("portfolio-benchmark-return", formatPercent(summary?.benchmark_compounded_oos_return));
+    setText("portfolio-excess-return", formatPercent(summary?.excess_oos_return));
+    setText("portfolio-evidence-status", summary?.evidence_status ?? "—");
+    setText(
+      "portfolio-gate-failures",
+      summary?.gate_failures?.length
+        ? summary.gate_failures.join(", ")
+        : "门槛通过仍只代表研究候选，实盘保持锁定",
+    );
+    setText("portfolio-worst-drawdown", formatPercent(summary?.worst_oos_drawdown));
+    setText("portfolio-profitable-rate", formatPercent(summary?.profitable_fold_rate));
+    setText("portfolio-optimism", formatPercent(summary?.selection_optimism));
+    setText("portfolio-rejections", summary?.rejected_order_count ?? "—");
+    const table = document.getElementById("portfolio-validation-folds-table");
+    table.replaceChildren();
+    detail.folds.forEach(fold => {
+      const row = document.createElement("tr");
+      [
+        fold.sequence,
+        `${fold.train_start} — ${fold.train_end}`,
+        `${fold.test_start} — ${fold.test_end}`,
+        `${fold.selected.lookback_sessions}/${fold.selected.rebalance_sessions}/${fold.selected.selection_count}`,
+        formatPercent(fold.training.total_return),
+        formatPercent(fold.test.total_return),
+        formatPercent(fold.benchmark.total_return),
+        formatPercent(fold.test.max_drawdown),
+      ].forEach(value => {
+        const cell = document.createElement("td");
+        cell.textContent = value;
+        row.append(cell);
+      });
+      table.append(row);
+    });
+  } catch (error) {
+    showToast(`组合验证明细读取失败：${error.message}`);
+  }
+}
+
+async function loadPortfolioValidations() {
+  try {
+    const data = await requestJson("/api/v1/portfolio-validations?limit=50");
+    const table = document.getElementById("portfolio-validations-table");
+    table.replaceChildren();
+    data.items.forEach(experiment => {
+      const row = document.createElement("tr");
+      row.className = "selectable-row";
+      row.tabIndex = 0;
+      const manifest = researchManifests.get(experiment.request.manifest_hash);
+      [
+        new Date(experiment.created_at).toLocaleString(),
+        manifest?.instruments?.length ?? "—",
+        `${experiment.request.train_sessions}/${experiment.request.test_sessions}`,
+      ].forEach(value => {
+        const cell = document.createElement("td");
+        cell.textContent = value;
+        row.append(cell);
+      });
+      const stateCell = document.createElement("td");
+      const badge = document.createElement("span");
+      statusPill(badge, experiment.state);
+      stateCell.append(badge);
+      row.append(stateCell);
+      [
+        formatPercent(experiment.summary?.compounded_oos_return),
+        formatPercent(experiment.summary?.excess_oos_return),
+        experiment.summary?.evidence_status ?? experiment.error_code ?? "—",
+      ].forEach(value => {
+        const cell = document.createElement("td");
+        cell.textContent = value;
+        row.append(cell);
+      });
+      const open = () => loadPortfolioValidationDetail(experiment.experiment_id);
+      row.addEventListener("click", open);
+      row.addEventListener("keydown", event => {
+        if (event.key === "Enter" || event.key === " ") open();
+      });
+      table.append(row);
+    });
+    if (data.items.length) {
+      await loadPortfolioValidationDetail(data.items[0].experiment_id);
+    }
+  } catch (error) {
+    showToast(`组合验证实验读取失败：${error.message}`);
+  }
+}
+
+function parseMomentumCandidates(value) {
+  return value.split(",").map(candidate => {
+    const [lookback, rebalance, selection, extra] = candidate.trim().split("/");
+    if (!lookback || !rebalance || !selection || extra) {
+      throw new Error("动量候选格式应为 20/5/3,60/10/3");
+    }
+    return {
+      lookback_sessions: Number(lookback),
+      rebalance_sessions: Number(rebalance),
+      selection_count: Number(selection),
+    };
+  });
+}
+
+async function createPortfolioValidation(event) {
+  event.preventDefault();
+  try {
+    const payload = {
+      manifest_hash: document.getElementById("portfolio-validation-manifest").value,
+      initial_cash: document.getElementById("portfolio-validation-cash").value,
+      gross_allocation: document.getElementById("portfolio-validation-gross").value,
+      maximum_order_notional: document.getElementById("portfolio-validation-order-cap").value,
+      slippage_bps: document.getElementById("portfolio-validation-slippage").value,
+      train_sessions: Number(document.getElementById("portfolio-validation-train").value),
+      test_sessions: Number(document.getElementById("portfolio-validation-test").value),
+      embargo_sessions: Number(document.getElementById("portfolio-validation-embargo").value),
+      candidates: parseMomentumCandidates(
+        document.getElementById("portfolio-validation-candidates").value,
+      ),
+      idempotency_key: `web-portfolio-validation-${crypto.randomUUID()}`,
+    };
+    const experiment = await requestJson("/api/v1/portfolio-validations", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-AutoQuant-CSRF": csrf },
+      body: JSON.stringify(payload),
+    });
+    showToast("组合级样本外验证已进入持久化队列");
+    await loadPortfolioValidations();
+    window.setTimeout(loadPortfolioValidations, 1800);
+    await loadPortfolioValidationDetail(experiment.experiment_id);
+  } catch (error) {
+    showToast(`组合验证创建失败：${error.message}`);
+  }
+}
+
 function parseCandidates(value) {
   return value.split(",").map(pair => {
     const [fast, slow, extra] = pair.trim().split("/");
@@ -584,6 +733,14 @@ if (page === "/") {
   document.getElementById("validation-manifest").addEventListener("change", syncValidationManifestInstrument);
   document.getElementById("refresh-backtests").addEventListener("click", loadBacktests);
   document.getElementById("validation-form").addEventListener("submit", createValidation);
+  document.getElementById("portfolio-validation-form").addEventListener(
+    "submit",
+    createPortfolioValidation,
+  );
+  document.getElementById("refresh-portfolio-validations").addEventListener(
+    "click",
+    loadPortfolioValidations,
+  );
   document.getElementById("refresh-validations").addEventListener(
     "click",
     () => Promise.all([loadValidations(), loadValidationCampaigns()]),
@@ -593,6 +750,7 @@ if (page === "/") {
     loadBacktests(),
     loadValidations(),
     loadValidationCampaigns(),
+    loadPortfolioValidations(),
   ]));
 } else {
   statusPill(document.getElementById("global-status"), "研究模式");

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from uuid import uuid4
 
 from starlette.testclient import TestClient
@@ -20,6 +21,9 @@ from autoquant.web.models import (
     PaperExecutionStatus,
     PaperPromotionStatus,
     PaperStrategyStatus,
+    PortfolioValidationExperiment,
+    PortfolioValidationExperimentDetail,
+    PortfolioWalkForwardJobRequest,
     PromotionGateView,
     QmtReadOnlyStatus,
     ResearchManifest,
@@ -41,6 +45,10 @@ class FakeConsoleService:
         self.backtest_run_id = uuid4()
         self.created_validations: list[WalkForwardJobRequest] = []
         self.validation_experiment_id = uuid4()
+        self.created_portfolio_validations: list[
+            PortfolioWalkForwardJobRequest
+        ] = []
+        self.portfolio_validation_experiment_id = uuid4()
         self.kill_switch_activations: list[tuple[str, str, str]] = []
 
     async def start(self) -> None:
@@ -164,6 +172,52 @@ class FakeConsoleService:
             requested_by="operator",
         )
         return ValidationExperimentDetail(experiment=experiment, folds=())
+
+    async def list_portfolio_validations(
+        self,
+        *,
+        limit: int = 50,
+    ) -> tuple[PortfolioValidationExperiment, ...]:
+        assert 1 <= limit <= 200
+        return ()
+
+    async def create_portfolio_validation(
+        self,
+        request: PortfolioWalkForwardJobRequest,
+        *,
+        requested_by: str,
+    ) -> PortfolioValidationExperiment:
+        self.created_portfolio_validations.append(request)
+        return PortfolioValidationExperiment(
+            experiment_id=self.portfolio_validation_experiment_id,
+            state=OperatorJobState.QUEUED,
+            validator_id=(
+                "cross_sectional_momentum_walk_forward_v1"
+            ),
+            request=request,
+            requested_by=requested_by,
+            created_at=datetime(2025, 1, 1, tzinfo=UTC),
+        )
+
+    async def portfolio_validation_detail(
+        self,
+        experiment_id: object,
+    ) -> PortfolioValidationExperimentDetail:
+        assert (
+            experiment_id
+            == self.portfolio_validation_experiment_id
+        )
+        experiment = await self.create_portfolio_validation(
+            PortfolioWalkForwardJobRequest(
+                manifest_hash="a" * 64,
+                idempotency_key="web-portfolio-detail-0001",
+            ),
+            requested_by="operator",
+        )
+        return PortfolioValidationExperimentDetail(
+            experiment=experiment,
+            folds=(),
+        )
 
     async def list_validation_campaigns(
         self,
@@ -583,3 +637,50 @@ def test_validation_campaigns_are_read_only_and_live_locked() -> None:
     assert campaign["status"] == "queued"
     assert campaign["live_trading_locked"] is True
     assert len(campaign["components"]) == 3
+
+
+def test_portfolio_validation_is_csrf_protected_and_risk_bounded() -> None:
+    service = FakeConsoleService()
+    app = create_app(_settings(), service=service)
+    payload = {
+        "manifest_hash": "a" * 64,
+        "idempotency_key": "web-portfolio-validation-0001",
+    }
+
+    with TestClient(app) as client:
+        denied = client.post(
+            "/api/v1/portfolio-validations",
+            json=payload,
+            auth=_auth(),
+        )
+        page = client.get("/research", auth=_auth())
+        match = re.search(
+            r'name="autoquant-csrf" content="([^"]+)"',
+            page.text,
+        )
+        assert match is not None
+        accepted = client.post(
+            "/api/v1/portfolio-validations",
+            json=payload,
+            auth=_auth(),
+            headers={"X-AutoQuant-CSRF": match.group(1)},
+        )
+        rejected = client.post(
+            "/api/v1/portfolio-validations",
+            json={**payload, "gross_allocation": "0.30"},
+            auth=_auth(),
+            headers={"X-AutoQuant-CSRF": match.group(1)},
+        )
+
+    assert denied.status_code == 403
+    assert accepted.status_code == 202
+    assert accepted.json()["live_trading_locked"] is True
+    assert (
+        accepted.json()["validator_id"]
+        == "cross_sectional_momentum_walk_forward_v1"
+    )
+    assert rejected.status_code == 422
+    assert (
+        service.created_portfolio_validations[0].gross_allocation
+        == Decimal("0.29")
+    )

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from decimal import Decimal
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -777,6 +778,96 @@ def test_validation_campaign_rejects_invalid_candidate_syntax() -> None:
 
     assert result.exit_code == 2
     assert creation.await_count == 0
+
+
+def test_portfolio_validation_cli_queues_live_locked_request() -> None:
+    payload = {
+        "assessment": None,
+        "completed_at": None,
+        "error_code": None,
+        "experiment_id": (
+            "11111111-1111-1111-1111-111111111111"
+        ),
+        "fold_count": 0,
+        "live_trading_locked": True,
+        "manifest_hash": "a" * 64,
+        "result_hash": None,
+        "state": "queued",
+        "validator_id": (
+            "cross_sectional_momentum_walk_forward_v1"
+        ),
+    }
+    creation = AsyncMock(return_value=payload)
+    with patch(
+        "autoquant.cli.create_portfolio_validation",
+        new=creation,
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "portfolio-validation-create",
+                "--manifest-hash",
+                "a" * 64,
+                "--idempotency-key",
+                "portfolio-cli-request-0001",
+                "--requested-by",
+                "operator",
+                "--candidate",
+                "20:5:3",
+                "--candidate",
+                "60:10:3",
+                "--candidate",
+                "120:20:3",
+            ],
+            env={
+                "AQ_POSTGRES_DSN": (
+                    "postgresql+asyncpg://sensitive"
+                )
+            },
+        )
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == payload
+    assert "sensitive" not in result.stdout
+    request = creation.await_args.kwargs["request"]
+    assert request.gross_allocation == Decimal("0.29")
+    assert request.candidates[0].lookback_sessions == 20
+
+
+def test_portfolio_validation_status_fails_for_rejected_evidence() -> None:
+    inspection = AsyncMock(
+        return_value={
+            "assessment": {
+                "evidence_status": "rejected",
+                "gate_failures": ["nonpositive_excess_return"],
+            },
+            "experiment_id": (
+                "11111111-1111-1111-1111-111111111111"
+            ),
+            "live_trading_locked": True,
+            "state": "completed",
+        }
+    )
+    with patch(
+        "autoquant.cli.inspect_portfolio_validation",
+        new=inspection,
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "portfolio-validation-status",
+                "--experiment-id",
+                "11111111-1111-1111-1111-111111111111",
+            ],
+            env={
+                "AQ_POSTGRES_DSN": (
+                    "postgresql+asyncpg://sensitive"
+                )
+            },
+        )
+
+    assert result.exit_code == 2
+    assert json.loads(result.stdout)["live_trading_locked"] is True
 
 
 def test_paper_portfolio_approval_emits_redacted_metadata() -> None:

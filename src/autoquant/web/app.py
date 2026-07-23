@@ -19,6 +19,9 @@ from starlette.responses import Response
 
 from autoquant.adapters.clickhouse_daily import ClickHouseDailyRepository
 from autoquant.adapters.postgres import PostgresControlRepository
+from autoquant.backtest.portfolio_validation import (
+    PortfolioWalkForwardValidator,
+)
 from autoquant.backtest.runner import ManifestBacktestRunner
 from autoquant.backtest.validation import WalkForwardValidator
 from autoquant.config import AppSettings, WebCredentials
@@ -46,7 +49,11 @@ from autoquant.web.models import (
     BacktestRunRequest,
     DailyIngestionJobRequest,
     KillSwitchActivationRequest,
+    PortfolioWalkForwardJobRequest,
     WalkForwardJobRequest,
+)
+from autoquant.web.portfolio_validation_store import (
+    PostgresPortfolioValidationRepository,
 )
 from autoquant.web.risk_store import PostgresRiskDecisionRepository
 from autoquant.web.service import ConsoleService, ConsoleServicePort
@@ -305,6 +312,61 @@ def create_app(
             "items": [item.model_dump(mode="json") for item in items]
         }
 
+    @app.get("/api/v1/portfolio-validations")
+    async def portfolio_validations(
+        request: Request,
+        limit: Annotated[int, Query(ge=1, le=200)] = 50,
+        _: str = Depends(authenticated_user),
+    ) -> dict[str, object]:
+        items = await active_service(
+            request
+        ).list_portfolio_validations(limit=limit)
+        return {
+            "items": [
+                item.model_dump(mode="json") for item in items
+            ]
+        }
+
+    @app.post("/api/v1/portfolio-validations", status_code=202)
+    async def create_portfolio_validation(
+        request: Request,
+        payload: PortfolioWalkForwardJobRequest,
+        user: str = Depends(authenticated_user),
+        _: None = Depends(csrf_protected),
+    ) -> dict[str, object]:
+        try:
+            experiment = await active_service(
+                request
+            ).create_portfolio_validation(
+                payload,
+                requested_by=user,
+            )
+        except ValueError as error:
+            raise HTTPException(
+                status_code=422,
+                detail=str(error),
+            ) from None
+        return experiment.model_dump(mode="json")
+
+    @app.get(
+        "/api/v1/portfolio-validations/{experiment_id}"
+    )
+    async def portfolio_validation_detail(
+        request: Request,
+        experiment_id: UUID,
+        _: str = Depends(authenticated_user),
+    ) -> dict[str, object]:
+        try:
+            detail = await active_service(
+                request
+            ).portfolio_validation_detail(experiment_id)
+        except LookupError:
+            raise HTTPException(
+                status_code=404,
+                detail="portfolio validation experiment not found",
+            ) from None
+        return detail.model_dump(mode="json")
+
     @app.get("/api/v1/trading")
     async def trading(
         request: Request,
@@ -400,6 +462,11 @@ async def _production_service(settings: AppSettings) -> ConsoleService:
     operators = PostgresOperatorRepository.connect(dsn=postgres_dsn)
     backtests = PostgresBacktestRepository.connect(dsn=postgres_dsn)
     validations = PostgresValidationRepository.connect(dsn=postgres_dsn)
+    portfolio_validations = (
+        PostgresPortfolioValidationRepository.connect(
+            dsn=postgres_dsn
+        )
+    )
     validation_campaigns = PostgresValidationCampaignRepository.connect(
         dsn=postgres_dsn
     )
@@ -425,6 +492,7 @@ async def _production_service(settings: AppSettings) -> ConsoleService:
         await operators.close()
         await backtests.close()
         await validations.close()
+        await portfolio_validations.close()
         await validation_campaigns.close()
         await risks.close()
         await executions.close()
@@ -449,6 +517,10 @@ async def _production_service(settings: AppSettings) -> ConsoleService:
         control_repository=control,
         dataset_reader=reader,
     )
+    portfolio_validation_runner = PortfolioWalkForwardValidator(
+        control_repository=control,
+        dataset_reader=reader,
+    )
     return ConsoleService(
         settings=settings,
         operator_repository=operators,
@@ -458,6 +530,8 @@ async def _production_service(settings: AppSettings) -> ConsoleService:
         backtest_runner=backtest_runner,
         validation_repository=validations,
         validation_runner=validation_runner,
+        portfolio_validation_repository=portfolio_validations,
+        portfolio_validation_runner=portfolio_validation_runner,
         validation_campaign_repository=validation_campaigns,
         risk_repository=risks,
         execution_repository=executions,
