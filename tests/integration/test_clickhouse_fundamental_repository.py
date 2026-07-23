@@ -209,3 +209,7 @@ async def test_indicator_query_preserves_announcement_revision_stream(
 
     assert before_update == (original,)
     assert after_update == (original, update)
+    pressure = await repository.merge_pressure()
+    assert pressure.inactive_bytes >= 0
+    assert pressure.inactive_parts >= 0
+    await repository.purge_allocator(strict=True)

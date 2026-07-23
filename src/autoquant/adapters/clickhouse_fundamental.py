@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
@@ -72,6 +73,18 @@ _INDICATOR_COLUMNS = (
     "operating_cashflow_to_revenue_percent",
     "content_hash",
 )
+
+
+@dataclass(frozen=True, slots=True)
+class FundamentalMergePressure:
+    inactive_bytes: int
+    inactive_parts: int
+
+    def __post_init__(self) -> None:
+        if self.inactive_bytes < 0 or self.inactive_parts < 0:
+            raise ValueError(
+                "fundamental merge pressure cannot be negative"
+            )
 
 
 def _year_intervals(
@@ -177,6 +190,53 @@ class ClickHouseFundamentalRepository:
             raise PersistenceUnavailableError(
                 "ClickHouse fundamental schema is unavailable"
             )
+
+    async def merge_pressure(self) -> FundamentalMergePressure:
+        try:
+            result = await self._client.query(
+                query="""
+SELECT
+    toUInt64(coalesce(sum(bytes_on_disk), 0)) AS inactive_bytes,
+    toUInt64(count()) AS inactive_parts
+FROM system.parts
+WHERE database = currentDatabase()
+  AND table IN {tables:Array(String)}
+  AND active = 0
+""".strip(),
+                parameters={
+                    "tables": [
+                        self._valuation_table,
+                        self._indicator_table,
+                    ]
+                },
+            )
+            rows = tuple(tuple(row) for row in result.result_rows)
+            if (
+                tuple(result.column_names)
+                != ("inactive_bytes", "inactive_parts")
+                or len(rows) != 1
+                or len(rows[0]) != 2
+            ):
+                raise ValueError(
+                    "unexpected fundamental merge pressure result"
+                )
+            return FundamentalMergePressure(
+                inactive_bytes=int(rows[0][0]),
+                inactive_parts=int(rows[0][1]),
+            )
+        except Exception:
+            raise PersistenceUnavailableError(
+                "ClickHouse fundamental merge pressure check failed"
+            ) from None
+
+    async def purge_allocator(self, *, strict: bool = False) -> None:
+        try:
+            await self._client.command("SYSTEM JEMALLOC PURGE")
+        except Exception:
+            if strict:
+                raise PersistenceUnavailableError(
+                    "ClickHouse fundamental allocator purge failed"
+                ) from None
 
     async def append_valuations(
         self,

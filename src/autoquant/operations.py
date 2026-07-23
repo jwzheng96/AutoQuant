@@ -1473,6 +1473,9 @@ async def run_fundamental_data_backfill(
     processed = 0
     completed_now = 0
     failed = 0
+    maintenance_wait = False
+    inactive_bytes = 0
+    inactive_parts = 0
     try:
         spec_record = await specifications.read(spec_hash)
         spec = spec_record.spec
@@ -1529,7 +1532,18 @@ async def run_fundamental_data_backfill(
             control_repository=control,
             now=lambda: datetime.now(UTC),
         )
+        pressure = await clickhouse.merge_pressure()
+        inactive_bytes = pressure.inactive_bytes
+        inactive_parts = pressure.inactive_parts
+        maintenance_wait = (
+            inactive_bytes
+            >= settings.research_data_max_inactive_bytes
+            or inactive_parts
+            >= settings.research_data_max_inactive_parts
+        )
         for instrument in missing[:max_items]:
+            if maintenance_wait:
+                break
             processed += 1
             try:
                 result = await service.run(
@@ -1551,11 +1565,23 @@ async def run_fundamental_data_backfill(
                     completed_now += 1
                 else:
                     failed += 1
+            if processed % 5 == 0:
+                await clickhouse.purge_allocator()
+                pressure = await clickhouse.merge_pressure()
+                inactive_bytes = pressure.inactive_bytes
+                inactive_parts = pressure.inactive_parts
+                maintenance_wait = (
+                    inactive_bytes
+                    >= settings.research_data_max_inactive_bytes
+                    or inactive_parts
+                    >= settings.research_data_max_inactive_parts
+                )
             if pause_seconds and processed < min(
                 max_items,
                 len(missing),
             ):
                 await asyncio.sleep(float(pause_seconds))
+        await clickhouse.purge_allocator()
         completed = await fundamentals.completed_shards(
             instruments=daily.instruments,
             start_date=spec.start_date,
@@ -1573,7 +1599,10 @@ async def run_fundamental_data_backfill(
                 None if dataset is None else dataset.manifest_hash
             ),
             "failed": failed,
+            "inactive_bytes": inactive_bytes,
+            "inactive_parts": inactive_parts,
             "live_trading_locked": True,
+            "maintenance_wait": maintenance_wait,
             "processed": processed,
             "remaining_instruments": (
                 len(daily.instruments) - len(completed)
