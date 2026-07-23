@@ -15,7 +15,10 @@ from autoquant.data.daily_ports import DailyDataSource, DailyMarketRepository
 from autoquant.data.daily_quality import DailyQualityGate
 from autoquant.data.ingestion import ControlRepository
 from autoquant.data.models import DatasetManifest
-from autoquant.errors import PersistenceUnavailableError
+from autoquant.errors import (
+    ManifestIntegrityError,
+    PersistenceUnavailableError,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -303,27 +306,145 @@ class ValidatedDailyDatasetReader:
         coverage = await self._market_repository.query_coverage_as_of(
             manifest.instruments, start, end, cutoff
         )
-        hashes = tuple(value.content_hash for value in bars) + tuple(
-            value.content_hash for value in factors
-        ) + tuple(
-            value.content_hash
-            for values in (
-                coverage.sessions,
-                coverage.lifecycles,
-                coverage.suspensions,
-                coverage.price_limits,
-            )
+        bar_keys = {
+            (value.instrument, value.session_date)
+            for value in bars
+        }
+        factors = tuple(
+            value
+            for value in factors
+            if (value.instrument, value.session_date) in bar_keys
+        )
+        groups = (
+            ("bars", tuple(value.content_hash for value in bars)),
+            (
+                "factors",
+                tuple(value.content_hash for value in factors),
+            ),
+            (
+                "sessions",
+                tuple(
+                    value.content_hash
+                    for value in coverage.sessions
+                ),
+            ),
+            (
+                "lifecycles",
+                tuple(
+                    value.content_hash
+                    for value in coverage.lifecycles
+                ),
+            ),
+            (
+                "suspensions",
+                tuple(
+                    value.content_hash
+                    for value in coverage.suspensions
+                ),
+            ),
+            (
+                "price_limits",
+                tuple(
+                    value.content_hash
+                    for value in coverage.price_limits
+                ),
+            ),
+        )
+        hashes = tuple(
+            value
+            for _, values in groups
             for value in values
         )
         if hashes != manifest.record_hashes:
-            raise PersistenceUnavailableError(
-                "validated daily rows do not match the manifest"
+            raise ManifestIntegrityError(
+                _daily_manifest_mismatch(
+                    expected=manifest.record_hashes,
+                    actual=hashes,
+                    groups=groups,
+                    actual_identities={
+                        value.content_hash: (
+                            f"bar:{value.instrument}:"
+                            f"{value.session_date.isoformat()}"
+                        )
+                        for value in bars
+                    }
+                    | {
+                        value.content_hash: (
+                            f"factor:{value.instrument}:"
+                            f"{value.session_date.isoformat()}"
+                        )
+                        for value in factors
+                    }
+                    | {
+                        value.content_hash: (
+                            f"session:{value.session_date.isoformat()}"
+                        )
+                        for value in coverage.sessions
+                    }
+                    | {
+                        value.content_hash: (
+                            f"lifecycle:{value.instrument}"
+                        )
+                        for value in coverage.lifecycles
+                    }
+                    | {
+                        value.content_hash: (
+                            f"suspension:{value.instrument}:"
+                            f"{value.session_date.isoformat()}"
+                        )
+                        for value in coverage.suspensions
+                    }
+                    | {
+                        value.content_hash: (
+                            f"price_limit:{value.instrument}:"
+                            f"{value.session_date.isoformat()}"
+                        )
+                        for value in coverage.price_limits
+                    },
+                )
             )
         return ValidatedDailyDataset(bars=bars, factors=factors, coverage=coverage)
 
 
 def _start_time(session_date: date) -> datetime:
     return to_utc(datetime.combine(session_date, time.min, tzinfo=SHANGHAI))
+
+
+def _daily_manifest_mismatch(
+    *,
+    expected: tuple[str, ...],
+    actual: tuple[str, ...],
+    groups: tuple[tuple[str, tuple[str, ...]], ...],
+    actual_identities: dict[str, str],
+) -> str:
+    mismatch = next(
+        (
+            index
+            for index in range(min(len(expected), len(actual)))
+            if expected[index] != actual[index]
+        ),
+        min(len(expected), len(actual)),
+    )
+    counts = ",".join(
+        f"{name}:{len(values)}"
+        for name, values in groups
+    )
+    expected_set = set(expected)
+    actual_set = set(actual)
+    missing = sorted(expected_set - actual_set)
+    extra = sorted(actual_set - expected_set)
+    missing_text = ",".join(value[:12] for value in missing[:3])
+    extra_text = ",".join(
+        f"{actual_identities.get(value, 'unknown')}:{value[:12]}"
+        for value in extra[:3]
+    )
+    return (
+        "validated daily rows do not match the manifest "
+        f"(first_mismatch={mismatch},expected_total={len(expected)},"
+        f"actual_total={len(actual)},actual_counts={counts},"
+        f"missing={missing_text or 'none'},"
+        f"extra={extra_text or 'none'})"
+    )
 
 
 def _event_time(session_date: date) -> datetime:

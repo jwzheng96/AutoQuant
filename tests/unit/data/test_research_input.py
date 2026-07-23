@@ -16,6 +16,10 @@ from autoquant.data.research_input import (
     ValidatedResearchDatasetReader,
     compile_research_input_plan,
 )
+from autoquant.errors import (
+    ManifestIntegrityError,
+    PersistenceUnavailableError,
+)
 
 
 def _manifest(
@@ -249,3 +253,78 @@ async def test_validated_reader_fails_closed_on_shard_metadata_drift() -> None:
 
     with pytest.raises(ValueError, match="does not match"):
         await reader.query_instrument("000001.XSHE")
+
+
+class _TransientDatasetReader(_DatasetReader):
+    def __init__(
+        self,
+        *,
+        error: PersistenceUnavailableError,
+    ) -> None:
+        super().__init__()
+        self.error = error
+        self.attempts = 0
+
+    async def query(
+        self,
+        manifest_hash: str,
+        as_of: datetime,
+    ) -> ValidatedDailyDataset:
+        self.attempts += 1
+        if self.attempts == 1:
+            raise self.error
+        return await super().query(manifest_hash, as_of)
+
+
+@pytest.mark.asyncio
+async def test_validated_reader_retries_only_transient_persistence() -> None:
+    first = _daily_manifest("000001.XSHE")
+    second = _daily_manifest("600000.XSHG")
+    plan = compile_research_input_plan(
+        manifest=_manifest(
+            (first.manifest_hash, second.manifest_hash)
+        ),
+        universes=_universes(),
+    )
+    datasets = _TransientDatasetReader(
+        error=PersistenceUnavailableError("temporary"),
+    )
+    reader = ValidatedResearchDatasetReader(
+        plan=plan,
+        manifest_reader=_ManifestReader((first, second)),
+        dataset_reader=datasets,
+        retry_delay_seconds=0,
+    )
+
+    result = await reader.query_instrument("000001.XSHE")
+
+    assert result.instrument == "000001.XSHE"
+    assert datasets.attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_validated_reader_never_retries_manifest_integrity() -> None:
+    first = _daily_manifest("000001.XSHE")
+    second = _daily_manifest("600000.XSHG")
+    plan = compile_research_input_plan(
+        manifest=_manifest(
+            (first.manifest_hash, second.manifest_hash)
+        ),
+        universes=_universes(),
+    )
+    datasets = _TransientDatasetReader(
+        error=ManifestIntegrityError("deterministic"),
+    )
+    reader = ValidatedResearchDatasetReader(
+        plan=plan,
+        manifest_reader=_ManifestReader((first, second)),
+        dataset_reader=datasets,
+        retry_delay_seconds=0,
+    )
+
+    with pytest.raises(
+        ManifestIntegrityError,
+        match="row-hash verification",
+    ):
+        await reader.query_instrument("000001.XSHE")
+    assert datasets.attempts == 1

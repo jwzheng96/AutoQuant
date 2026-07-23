@@ -12,9 +12,13 @@ import pytest
 from autoquant.config import AppSettings, RuntimeEnvironment
 from autoquant.data.daily_ingestion import ValidatedDailyDataset
 from autoquant.data.daily_models import DailyCoverageEvidence
-from autoquant.errors import MissingCapabilityError
+from autoquant.errors import (
+    MissingCapabilityError,
+    PersistenceUnavailableError,
+)
 from autoquant.operations import (
     _month_intervals,
+    _RecyclingDailyDatasetReader,
     _validate_campaign_dataset,
     approve_paper_sma_strategy,
     revoke_paper_strategy,
@@ -131,6 +135,82 @@ def _settings() -> AppSettings:
         postgres_dsn="postgresql+asyncpg://configured",
         clickhouse_dsn="clickhouse://configured",
     )
+
+
+@pytest.mark.asyncio
+async def test_daily_dataset_reader_recycles_clickhouse_connections() -> None:
+    market_one = MagicMock()
+    market_one.client.close = AsyncMock()
+    market_two = MagicMock()
+    market_two.client.close = AsyncMock()
+    reader_one = MagicMock()
+    reader_one.query = AsyncMock(side_effect=["one", "two"])
+    reader_two = MagicMock()
+    reader_two.query = AsyncMock(return_value="three")
+    with (
+        patch(
+            "autoquant.operations.ClickHouseDailyRepository.connect",
+            new=AsyncMock(side_effect=[market_one, market_two]),
+        ) as connect,
+        patch(
+            "autoquant.operations.ValidatedDailyDatasetReader",
+            side_effect=[reader_one, reader_two],
+        ),
+    ):
+        reader = _RecyclingDailyDatasetReader(
+            clickhouse_dsn="clickhouse://configured",
+            control_repository=MagicMock(),
+            recycle_after=2,
+        )
+
+        assert await reader.query("a" * 64, NOW) == "one"
+        assert await reader.query("b" * 64, NOW) == "two"
+        assert await reader.query("c" * 64, NOW) == "three"
+        await reader.close()
+
+    assert connect.await_count == 2
+    market_one.client.close.assert_awaited_once()
+    market_two.client.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_daily_dataset_reader_drops_failed_clickhouse_connection() -> None:
+    market_one = MagicMock()
+    market_one.client.close = AsyncMock()
+    market_two = MagicMock()
+    market_two.client.close = AsyncMock()
+    reader_one = MagicMock()
+    reader_one.query = AsyncMock(
+        side_effect=PersistenceUnavailableError("malformed response")
+    )
+    reader_two = MagicMock()
+    reader_two.query = AsyncMock(return_value="recovered")
+    with (
+        patch(
+            "autoquant.operations.ClickHouseDailyRepository.connect",
+            new=AsyncMock(side_effect=[market_one, market_two]),
+        ) as connect,
+        patch(
+            "autoquant.operations.ValidatedDailyDatasetReader",
+            side_effect=[reader_one, reader_two],
+        ),
+    ):
+        reader = _RecyclingDailyDatasetReader(
+            clickhouse_dsn="clickhouse://configured",
+            control_repository=MagicMock(),
+        )
+
+        with pytest.raises(
+            PersistenceUnavailableError,
+            match="malformed response",
+        ):
+            await reader.query("a" * 64, NOW)
+        assert await reader.query("a" * 64, NOW) == "recovered"
+        await reader.close()
+
+    assert connect.await_count == 2
+    market_one.client.close.assert_awaited_once()
+    market_two.client.close.assert_awaited_once()
 
 
 @pytest.mark.asyncio

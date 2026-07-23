@@ -26,6 +26,10 @@ class PersistenceUnavailableError(AutoQuantError):
     """A required durable store is unavailable."""
 
 
+class ManifestIntegrityError(PersistenceUnavailableError):
+    """Durable rows deterministically differ from an immutable manifest."""
+
+
 class LiveTradingLockedError(AutoQuantError):
     """A live-broker mutation was attempted while the release lock is active."""
 

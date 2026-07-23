@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
@@ -15,6 +16,10 @@ from autoquant.data.models import (
 from autoquant.data.research_data_campaign import (
     ResearchDatasetManifest,
     ResearchDatasetShard,
+)
+from autoquant.errors import (
+    ManifestIntegrityError,
+    PersistenceUnavailableError,
 )
 
 RESEARCH_INPUT_PLAN_VERSION = "point-in-time-monthly-strict-after-v1"
@@ -139,6 +144,10 @@ class ResearchInputPlan:
             "version": self.version,
         }
 
+    @property
+    def instruments(self) -> tuple[str, ...]:
+        return tuple(value.instrument for value in self.shards)
+
     def members_for(self, session_date: date) -> tuple[str, ...]:
         active = self.universe_for(session_date)
         return () if active is None else active.members
@@ -194,10 +203,20 @@ class ValidatedResearchDatasetReader:
         plan: ResearchInputPlan,
         manifest_reader: DailyManifestReader,
         dataset_reader: ValidatedDailyReader,
+        max_read_attempts: int = 3,
+        retry_delay_seconds: float = 0.25,
     ) -> None:
+        if (
+            not 1 <= max_read_attempts <= 5
+            or retry_delay_seconds < 0
+            or retry_delay_seconds > 5
+        ):
+            raise ValueError("research shard retry policy is invalid")
         self._plan = plan
         self._manifests = manifest_reader
         self._datasets = dataset_reader
+        self._max_read_attempts = max_read_attempts
+        self._retry_delay_seconds = retry_delay_seconds
 
     async def query_instrument(
         self,
@@ -218,10 +237,25 @@ class ValidatedResearchDatasetReader:
             raise ValueError(
                 "daily shard does not match the research input plan"
             )
-        dataset = await self._datasets.query(
-            manifest.manifest_hash,
-            manifest.as_of,
-        )
+        for attempt in range(1, self._max_read_attempts + 1):
+            try:
+                dataset = await self._datasets.query(
+                    manifest.manifest_hash,
+                    manifest.as_of,
+                )
+                break
+            except ManifestIntegrityError as error:
+                raise ManifestIntegrityError(
+                    f"research shard {instrument} failed row-hash verification"
+                ) from error
+            except PersistenceUnavailableError as error:
+                if attempt == self._max_read_attempts:
+                    raise PersistenceUnavailableError(
+                        f"research shard {instrument} remained unavailable "
+                        f"after {attempt} attempts"
+                    ) from error
+                if self._retry_delay_seconds:
+                    await asyncio.sleep(self._retry_delay_seconds)
         return ValidatedResearchShard(
             instrument=instrument,
             manifest=manifest,

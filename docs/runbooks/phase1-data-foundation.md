@@ -461,6 +461,21 @@ running the command again can only return the original specification. Do not
 change these values after observing validation results. A failed specification
 means the strategy is rejected, not retuned against the same OOS sample.
 
+Compile the full market panel only from the frozen specification:
+
+```bash
+uv run autoquant dynamic-market-panel-compile \
+  --spec-hash <frozen-dynamic-spec-hash> \
+  --requested-by operator
+```
+
+The compiler streams and verifies all shards, requires the exact same open
+session calendar in every shard, and binds each session to the most recent
+strictly-prior universe snapshot. It retains only observed market states;
+missing bars on suspended or otherwise non-tradable sessions are not
+fabricated. The panel summary and deterministic hash are appended to the
+immutable audit chain, and execution remains locked.
+
 ```bash
 uv run autoquant approve-paper-sma \
   --experiment-id <completed-experiment-uuid> \

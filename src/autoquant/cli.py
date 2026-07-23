@@ -30,6 +30,7 @@ from autoquant.operations import (
     approve_paper_sma_portfolio_strategy,
     approve_paper_sma_strategy,
     backfill_research_universe_snapshots,
+    compile_dynamic_market_panel,
     compile_research_input,
     complete_qmt_recovery_drill,
     create_portfolio_validation,
@@ -994,6 +995,26 @@ def dynamic_research_spec_freeze(
         )
     except (AutoQuantError, LookupError, ValueError):
         _fail("dynamic research specification freeze failed")
+    _emit(payload)
+
+
+@app.command("dynamic-market-panel-compile")
+def dynamic_market_panel_compile(
+    spec_hash: Annotated[str, typer.Option("--spec-hash")],
+    requested_by: Annotated[str, typer.Option("--requested-by")],
+) -> None:
+    """Compile the frozen point-in-time market panel; execution stays locked."""
+
+    try:
+        payload = asyncio.run(
+            compile_dynamic_market_panel(
+                _settings(),
+                spec_hash=spec_hash,
+                requested_by=requested_by,
+            )
+        )
+    except (AutoQuantError, LookupError, ValueError):
+        _fail("dynamic market panel compilation failed")
     _emit(payload)
 
 

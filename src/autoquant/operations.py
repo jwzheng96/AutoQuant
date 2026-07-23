@@ -11,6 +11,7 @@ from pydantic import SecretStr
 from autoquant.adapters.clickhouse_daily import ClickHouseDailyRepository
 from autoquant.adapters.postgres import PostgresControlRepository
 from autoquant.adapters.tushare import TushareDailySource, TushareHttpClient
+from autoquant.backtest.dynamic_panel import DynamicMarketPanelCompiler
 from autoquant.backtest.dynamic_portfolio import (
     DynamicPortfolioResearchSpec,
 )
@@ -157,6 +158,65 @@ def tushare_source(settings: AppSettings) -> TushareDailySource:
         ),
         now=lambda: datetime.now(UTC),
     )
+
+
+class _RecyclingDailyDatasetReader:
+    def __init__(
+        self,
+        *,
+        clickhouse_dsn: str,
+        control_repository: PostgresControlRepository,
+        recycle_after: int = 20,
+    ) -> None:
+        if recycle_after < 1 or recycle_after > 100:
+            raise ValueError("ClickHouse recycle interval is invalid")
+        self._dsn = clickhouse_dsn
+        self._control = control_repository
+        self._recycle_after = recycle_after
+        self._market: ClickHouseDailyRepository | None = None
+        self._reader: ValidatedDailyDatasetReader | None = None
+        self._queries = 0
+
+    async def query(
+        self,
+        manifest_hash: str,
+        as_of: datetime,
+    ) -> ValidatedDailyDataset:
+        if (
+            self._reader is None
+            or self._queries >= self._recycle_after
+        ):
+            await self._reconnect()
+        reader = self._reader
+        if reader is None:
+            raise PersistenceUnavailableError(
+                "ClickHouse recycling reader is unavailable"
+            )
+        try:
+            dataset = await reader.query(manifest_hash, as_of)
+        except PersistenceUnavailableError:
+            await self.close()
+            raise
+        self._queries += 1
+        return dataset
+
+    async def close(self) -> None:
+        if self._market is not None:
+            await self._market.client.close()
+        self._market = None
+        self._reader = None
+        self._queries = 0
+
+    async def _reconnect(self) -> None:
+        await self.close()
+        self._market = await ClickHouseDailyRepository.connect(
+            dsn=self._dsn,
+            source="tushare",
+        )
+        self._reader = ValidatedDailyDatasetReader(
+            control_repository=self._control,
+            market_repository=self._market,
+        )
 
 
 async def run_daily_ingestion(
@@ -726,6 +786,114 @@ async def freeze_dynamic_research_spec(
         await specifications.close()
         await universes.close()
         await campaigns.close()
+
+
+async def compile_dynamic_market_panel(
+    settings: AppSettings,
+    *,
+    spec_hash: str,
+    requested_by: str,
+) -> dict[str, object]:
+    """Compile all frozen shards into a point-in-time dynamic market panel."""
+
+    if settings.live_trading_enabled:
+        raise MissingCapabilityError(
+            "dynamic market panel compilation requires live trading locked"
+        )
+    if (
+        not requested_by.strip()
+        or requested_by != requested_by.strip()
+        or len(requested_by) > 128
+    ):
+        raise ValueError(
+            "requested_by must contain 1-128 trimmed characters"
+        )
+    postgres_dsn = configured_dsn(
+        settings.postgres_dsn,
+        capability="PostgreSQL",
+    )
+    specifications = PostgresDynamicResearchSpecRepository.connect(
+        dsn=postgres_dsn
+    )
+    campaigns = PostgresResearchDataCampaignRepository.connect(
+        dsn=postgres_dsn
+    )
+    universes = PostgresResearchUniverseRepository.connect(
+        dsn=postgres_dsn
+    )
+    control = PostgresControlRepository.connect(dsn=postgres_dsn)
+    dataset_reader: _RecyclingDailyDatasetReader | None = None
+    try:
+        record = await specifications.read(spec_hash)
+        plan = await _load_research_input_plan(
+            campaigns=campaigns,
+            universes=universes,
+            manifest_hash=record.spec.dataset_manifest_hash,
+        )
+        dataset_reader = _RecyclingDailyDatasetReader(
+            clickhouse_dsn=configured_dsn(
+                settings.clickhouse_dsn,
+                capability="ClickHouse",
+            ),
+            control_repository=control,
+        )
+        shard_reader = ValidatedResearchDatasetReader(
+            plan=plan,
+            manifest_reader=control,
+            dataset_reader=dataset_reader,
+        )
+        panel = await DynamicMarketPanelCompiler(
+            shard_reader=shard_reader,
+        ).compile(
+            plan=plan,
+            spec=record.spec,
+        )
+        market_count = sum(
+            len(value.markets) for value in panel.histories
+        )
+        payload: dict[str, object] = {
+            "as_of": panel.as_of.isoformat(),
+            "dataset_manifest_hash": panel.dataset_manifest_hash,
+            "first_session": (
+                panel.sessions[0].session_date.isoformat()
+            ),
+            "history_count": len(panel.histories),
+            "last_session": (
+                panel.sessions[-1].session_date.isoformat()
+            ),
+            "live_trading_locked": True,
+            "market_state_count": market_count,
+            "maximum_active_members": max(
+                len(value.active_members)
+                for value in panel.sessions
+            ),
+            "minimum_active_members": min(
+                len(value.active_members)
+                for value in panel.sessions
+            ),
+            "panel_hash": panel.panel_hash,
+            "plan_hash": panel.plan_hash,
+            "session_count": len(panel.sessions),
+            "spec_hash": panel.spec_hash,
+            "status": "compiled",
+            "version": panel.version,
+        }
+        await control.append_audit_event(
+            "research.dynamic_market_panel.compiled",
+            datetime.now(UTC),
+            {
+                **payload,
+                "requested_by": requested_by,
+            },
+        )
+        return payload
+    finally:
+        if dataset_reader is not None:
+            await dataset_reader.close()
+        await control.close()
+        await universes.close()
+        await campaigns.close()
+        await specifications.close()
 
 
 async def inspect_research_input_shard(

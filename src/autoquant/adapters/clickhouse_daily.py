@@ -30,6 +30,11 @@ _SESSION_TABLE = "trading_session_revisions"
 _LIFECYCLE_TABLE = "instrument_lifecycle_revisions"
 _SUSPENSION_TABLE = "daily_suspension_revisions"
 _LIMIT_TABLE = "daily_price_limit_revisions"
+_HISTORICAL_QUERY_SETTINGS: dict[str, int] = {
+    "max_block_size": 8_192,
+    "max_bytes_before_external_group_by": 64 * 1024 * 1024,
+    "max_threads": 1,
+}
 _TABLE_IDENTIFIER = re.compile(
     r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?\Z"
 )
@@ -417,7 +422,7 @@ WHERE database = currentDatabase()
             "instruments": list(instruments),
             "start_date": start,
             "end_date": end,
-            "as_of": cutoff,
+            "as_of_64": cutoff,
         }
         sessions = await self._coverage_query(
             f"""
@@ -536,7 +541,10 @@ ORDER BY instrument, session_date
     ) -> tuple[tuple[Any, ...], ...]:
         try:
             result = await self._client.query(
-                query=sql, parameters=parameters, tz_mode="aware"
+                query=sql,
+                parameters=parameters,
+                settings=_HISTORICAL_QUERY_SETTINGS,
+                tz_mode="aware",
             )
             rows = tuple(tuple(row) for row in result.result_rows)
             result_columns = tuple(result.column_names)
@@ -545,10 +553,10 @@ ORDER BY instrument, session_date
             if result_columns != columns:
                 raise ValueError("unexpected columns")
             return rows
-        except Exception:
+        except Exception as error:
             raise PersistenceUnavailableError(
                 "ClickHouse daily coverage query failed"
-            ) from None
+            ) from error
 
     async def _append(
         self,
@@ -593,12 +601,15 @@ ORDER BY instrument, session_date
             "instruments": list(instruments),
             "start_date": start,
             "end_date": end,
-            "as_of": cutoff,
+            "as_of_64": cutoff,
         }
         sql = self._as_of_sql(table, result_columns, tuple_columns)
         try:
             result = await self._client.query(
-                query=sql, parameters=parameters, tz_mode="aware"
+                query=sql,
+                parameters=parameters,
+                settings=_HISTORICAL_QUERY_SETTINGS,
+                tz_mode="aware",
             )
             rows = tuple(tuple(row) for row in result.result_rows)
             actual_columns = tuple(result.column_names)

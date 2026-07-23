@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from clickhouse_connect.driver.asyncclient import AsyncClient
+from clickhouse_connect.driver.binding import bind_query
 
 from autoquant.adapters.clickhouse_daily import (
     ClickHouseDailyRepository,
@@ -205,8 +206,21 @@ async def test_query_bars_binds_filters_and_verifies_content_hash() -> None:
         "instruments": ["000001.XSHE"],
         "start_date": date(2026, 7, 20),
         "end_date": date(2026, 7, 20),
-        "as_of": AVAILABLE,
+        "as_of_64": AVAILABLE,
     }
+    assert call.kwargs["settings"] == {
+        "max_block_size": 8192,
+        "max_bytes_before_external_group_by": 67_108_864,
+        "max_threads": 1,
+    }
+    rendered_sql, bound_parameters = bind_query(
+        call.kwargs["query"],
+        call.kwargs["parameters"],
+    )
+    assert rendered_sql == call.kwargs["query"]
+    assert bound_parameters["param_as_of"] == AVAILABLE.strftime(
+        "%Y-%m-%d %H:%M:%S.%f"
+    )
 
     byte_hash_row = list(ClickHouseDailyRepository.bar_result_row(revision))
     byte_hash_row[8] = revision.evidence_hash.encode("ascii")
@@ -269,6 +283,15 @@ async def test_empty_driver_results_are_valid_empty_daily_and_coverage_queries()
     assert coverage.lifecycles == ()
     assert coverage.suspensions == ()
     assert coverage.price_limits == ()
+    assert all(
+        call.kwargs["settings"]
+        == {
+            "max_block_size": 8192,
+            "max_bytes_before_external_group_by": 67_108_864,
+            "max_threads": 1,
+        }
+        for call in client.query.await_args_list
+    )
 
 
 @pytest.mark.asyncio

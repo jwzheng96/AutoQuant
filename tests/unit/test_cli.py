@@ -875,6 +875,42 @@ def test_dynamic_research_freeze_is_live_locked_and_redacted() -> None:
     freeze.assert_awaited_once()
 
 
+def test_dynamic_market_panel_compilation_is_live_locked() -> None:
+    payload = {
+        "history_count": 493,
+        "live_trading_locked": True,
+        "panel_hash": "a" * 64,
+        "session_count": 1580,
+        "spec_hash": "b" * 64,
+        "status": "compiled",
+    }
+    compilation = AsyncMock(return_value=payload)
+    with patch(
+        "autoquant.cli.compile_dynamic_market_panel",
+        new=compilation,
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "dynamic-market-panel-compile",
+                "--spec-hash",
+                "b" * 64,
+                "--requested-by",
+                "operator",
+            ],
+            env={
+                "AQ_POSTGRES_DSN": (
+                    "postgresql+asyncpg://sensitive"
+                )
+            },
+        )
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == payload
+    assert "sensitive" not in result.stdout
+    compilation.assert_awaited_once()
+
+
 def test_research_input_shard_check_is_redacted() -> None:
     payload = {
         "instrument": "000001.XSHE",

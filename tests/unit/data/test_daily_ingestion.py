@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -383,3 +383,34 @@ async def test_validated_reader_returns_exact_manifest_streams() -> None:
     market.factors = ()
     with pytest.raises(PersistenceUnavailableError, match="manifest"):
         await reader.query(result.manifest_hash, AS_OF)
+
+
+@pytest.mark.asyncio
+async def test_validated_reader_ignores_append_only_factor_orphans() -> None:
+    service, request, _, market, control = setup()
+    result = await service.run(request)
+    assert result.manifest_hash is not None
+    original_factors = market.factors
+    orphan_date = DAY - timedelta(days=1)
+    market.factors += (
+        AdjustmentFactorRevision.from_values(
+            source="tushare",
+            instrument=INSTRUMENT,
+            session_date=orphan_date,
+            event_time=EVENT - timedelta(days=1),
+            available_at=AVAILABLE,
+            ingested_at=AS_OF,
+            source_revision="stale-orphan",
+            availability_policy="tushare-daily-v1",
+            evidence_hash="a" * 64,
+            factor="122.0",
+        ),
+    )
+    reader = ValidatedDailyDatasetReader(
+        control_repository=control,
+        market_repository=market,
+    )
+
+    dataset = await reader.query(result.manifest_hash, AS_OF)
+
+    assert dataset.factors == original_factors
