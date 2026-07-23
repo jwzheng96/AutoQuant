@@ -14,6 +14,7 @@ from autoquant.config import AppSettings
 from autoquant.errors import AutoQuantError, PersistenceUnavailableError
 from autoquant.execution.control import KillSwitchReason
 from autoquant.execution.control_store import PostgresExecutionControlRepository
+from autoquant.execution.paper_scheduler_store import PostgresPaperSchedulerRepository
 from autoquant.execution.simulated_broker import PersistentSimulatedBroker
 from autoquant.execution.store import PostgresPaperExecutionRepository
 from autoquant.operations import run_daily_ingestion
@@ -124,6 +125,7 @@ class ConsoleService:
         execution_repository: PostgresPaperExecutionRepository | None = None,
         execution_control_repository: PostgresExecutionControlRepository | None = None,
         simulated_broker: PersistentSimulatedBroker | None = None,
+        scheduler_repository: PostgresPaperSchedulerRepository | None = None,
         ingestion_runner: IngestionRunner = run_daily_ingestion,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
         poll_interval: float = 1.0,
@@ -144,6 +146,7 @@ class ConsoleService:
         self._execution = execution_repository
         self._execution_controls = execution_control_repository
         self._simulated_broker = simulated_broker
+        self._scheduler = scheduler_repository
         self._ingestion_runner = ingestion_runner
         self._now = now
         self._poll_interval = poll_interval
@@ -181,6 +184,21 @@ class ConsoleService:
                     await self._execution_controls.activate(
                         account_id=self._settings.paper_account_id,
                         command_id=f"broker-recovery-{uuid4()}",
+                        reason=KillSwitchReason.RECOVERY_FAILED,
+                        actor="console-startup",
+                        now=self._now(),
+                    )
+                raise
+        if self._scheduler is not None:
+            try:
+                await self._scheduler.replay(
+                    account_id=self._settings.paper_account_id
+                )
+            except Exception:
+                if self._execution_controls is not None:
+                    await self._execution_controls.activate(
+                        account_id=self._settings.paper_account_id,
+                        command_id=f"scheduler-recovery-{uuid4()}",
                         reason=KillSwitchReason.RECOVERY_FAILED,
                         actor="console-startup",
                         now=self._now(),
@@ -241,6 +259,8 @@ class ConsoleService:
             await self._execution_controls.close()
         if self._simulated_broker is not None:
             await self._simulated_broker.close()
+        if self._scheduler is not None:
+            await self._scheduler.close()
         await self._operators.close()
         await self._control.close()
         await self._market.client.close()
@@ -400,8 +420,8 @@ class ConsoleService:
                 recent_decisions=(),
                 remaining_gates=(
                     "risk_audit_store",
-                    "session_risk_daily_initializer",
-                    "quote_gateway",
+                    "scheduler_runtime_wiring",
+                    "external_realtime_quote_adapter",
                     "reconciliation_loop",
                     "kill_switch_drill",
                     "qmt_gateway",
@@ -416,8 +436,8 @@ class ConsoleService:
             decision_count=count,
             recent_decisions=recent,
             remaining_gates=(
-                "session_risk_daily_initializer",
-                "quote_gateway",
+                "scheduler_runtime_wiring",
+                "external_realtime_quote_adapter",
                 "reconciliation_loop",
                 "kill_switch_drill",
                 "qmt_gateway",
@@ -442,6 +462,9 @@ class ConsoleService:
                 simulated_broker_recovery_verified=False,
                 simulated_broker_order_count=0,
                 simulated_broker_fact_count=0,
+                scheduler_evidence_available=False,
+                scheduler_recovery_verified=False,
+                scheduler_cycle_count=0,
                 remaining_gates=(
                     "paper_execution_store",
                     "paper_broker_adapter",
@@ -455,6 +478,11 @@ class ConsoleService:
             None
             if self._simulated_broker is None
             else await self._simulated_broker.verify_recovery()
+        )
+        scheduler_summary = (
+            None
+            if self._scheduler is None
+            else await self._scheduler.replay(account_id=self._settings.paper_account_id)
         )
         control = (
             None
@@ -487,10 +515,23 @@ class ConsoleService:
             simulated_broker_fact_count=(
                 0 if broker_summary is None else broker_summary.fact_count
             ),
+            scheduler_evidence_available=scheduler_summary is not None,
+            scheduler_recovery_verified=(
+                False
+                if scheduler_summary is None
+                else scheduler_summary.recovery_verified
+            ),
+            scheduler_cycle_count=(
+                0 if scheduler_summary is None else scheduler_summary.event_count
+            ),
+            latest_scheduler_at=(
+                None
+                if scheduler_summary is None
+                else scheduler_summary.latest_evaluated_at
+            ),
             remaining_gates=(
-                "session_risk_daily_initializer",
-                "continuous_quote_source",
-                "coordinator_scheduler",
+                "external_realtime_quote_adapter",
+                "scheduler_runtime_wiring",
                 "operational_kill_switch_reset_drill",
                 "paper_evidence_period",
                 "qmt_windows_read_only_reconciliation",

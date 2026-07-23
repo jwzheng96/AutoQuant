@@ -158,6 +158,12 @@ bearer token is stored. Renewals require an unexpired matching lease, while acqu
 transitions are immutable audit events. This table is preparation for a Windows read-only
 gateway and does not enable broker mutations.
 
+Schema v13 persists hash-chained paper scheduler cycles. Market phase is derived from a
+point-in-time calendar; only continuous-auction phases can request strategy intents. A complete
+fresh quote snapshot, replayed daily session state, bounded strategy output and mandatory cycle
+evidence sink are required. The console replays this chain at startup. External real-time quotes
+and the resident scheduler runtime remain separate release gates.
+
 The internal `PaperSessionInitializer` accepts only `pre_open`, requires a reconciled broker and
 internal snapshot plus zero current-session fill turnover, and freezes the opening state
 idempotently. It is not a manual bypass: no CLI or Web route exposes it, and production still

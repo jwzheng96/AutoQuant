@@ -56,6 +56,7 @@ def _service(
     executions: MagicMock | None = None,
     execution_controls: MagicMock | None = None,
     simulated_broker: MagicMock | None = None,
+    scheduler: MagicMock | None = None,
 ) -> ConsoleService:
     market = MagicMock()
     market.client = MagicMock()
@@ -73,6 +74,7 @@ def _service(
         execution_repository=executions,
         execution_control_repository=execution_controls,
         simulated_broker=simulated_broker,
+        scheduler_repository=scheduler,
         now=lambda: NOW,
         poll_interval=0.01,
     )
@@ -150,11 +152,18 @@ async def test_execution_status_requires_gateway_even_after_verified_recovery() 
     summary.latest_reconciliation_at = NOW
     summary.latest_reconciled = True
     executions.verify_recovery = AsyncMock(return_value=summary)
+    scheduler = MagicMock()
+    scheduler_summary = MagicMock()
+    scheduler_summary.recovery_verified = True
+    scheduler_summary.event_count = 7
+    scheduler_summary.latest_evaluated_at = NOW
+    scheduler.replay = AsyncMock(return_value=scheduler_summary)
     service = _service(
         operator=MagicMock(),
         control=MagicMock(),
         runner=AsyncMock(),
         executions=executions,
+        scheduler=scheduler,
     )
 
     status = await service.execution_status()
@@ -162,7 +171,9 @@ async def test_execution_status_requires_gateway_even_after_verified_recovery() 
     assert isinstance(status, PaperExecutionStatus)
     assert status.recovery_verified is True
     assert status.gateway_available is False
-    assert "coordinator_scheduler" in status.remaining_gates
+    assert status.scheduler_recovery_verified is True
+    assert status.scheduler_cycle_count == 7
+    assert "scheduler_runtime_wiring" in status.remaining_gates
 
 
 @pytest.mark.asyncio
@@ -210,6 +221,29 @@ async def test_simulated_broker_recovery_failure_also_aborts_startup() -> None:
     )
 
     with pytest.raises(PersistenceUnavailableError, match="broker fact mismatch"):
+        await service.start()
+
+    assert controls.activate.await_args.kwargs["reason"] is KillSwitchReason.RECOVERY_FAILED
+
+
+@pytest.mark.asyncio
+async def test_scheduler_evidence_recovery_failure_also_aborts_startup() -> None:
+    scheduler = MagicMock()
+    scheduler.replay = AsyncMock(
+        side_effect=PersistenceUnavailableError("scheduler chain mismatch")
+    )
+    controls = MagicMock()
+    controls.ensure_fail_closed = AsyncMock()
+    controls.activate = AsyncMock()
+    service = _service(
+        operator=MagicMock(),
+        control=MagicMock(),
+        runner=AsyncMock(),
+        execution_controls=controls,
+        scheduler=scheduler,
+    )
+
+    with pytest.raises(PersistenceUnavailableError, match="scheduler chain mismatch"):
         await service.start()
 
     assert controls.activate.await_args.kwargs["reason"] is KillSwitchReason.RECOVERY_FAILED

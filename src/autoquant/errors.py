@@ -40,3 +40,11 @@ class QmtSessionConflictError(AutoQuantError):
 
 class QmtSessionLeaseLostError(AutoQuantError):
     """A QMT adapter no longer owns its durable session lease."""
+
+
+class MarketCalendarUnavailableError(AutoQuantError):
+    """A point-in-time exchange calendar cannot prove the current market phase."""
+
+
+class QuoteStreamUnavailableError(AutoQuantError):
+    """A continuous quote stream is disconnected, stale, incomplete, or inconsistent."""

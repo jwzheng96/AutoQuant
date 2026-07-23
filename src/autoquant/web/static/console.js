@@ -211,6 +211,8 @@ async function loadTrading() {
     setText("kill-switch-state", data.execution?.kill_switch_active ? "ACTIVE" : "RESET");
     setText("kill-switch-reason", data.execution?.kill_switch_reason ?? "—");
     setText("simulated-broker-state", data.execution?.simulated_broker_recovery_verified ? "持久化模拟券商事实链已验证" : "模拟券商不可用");
+    setText("scheduler-evidence-state", data.execution?.scheduler_recovery_verified ? "调度周期哈希链已验证" : "调度证据不可用");
+    setText("scheduler-cycle-count", data.execution?.scheduler_cycle_count ?? 0);
   }
   catch (error) { showToast(`能力读取失败：${error.message}`); }
 }

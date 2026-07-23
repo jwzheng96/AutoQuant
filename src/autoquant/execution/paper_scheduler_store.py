@@ -1,0 +1,369 @@
+from __future__ import annotations
+
+import json
+import re
+from dataclasses import dataclass
+from datetime import datetime
+
+from sqlalchemy import text
+from sqlalchemy.engine import RowMapping
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
+
+from autoquant.clock import to_utc
+from autoquant.data.models import _canonical_hash, _require_lowercase_sha256
+from autoquant.errors import PersistenceUnavailableError
+from autoquant.execution.models import ZERO_HASH
+from autoquant.execution.paper_scheduler import (
+    PaperSchedulerCycle,
+    scheduler_cycle_payload,
+)
+
+_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+
+
+@dataclass(frozen=True, slots=True)
+class PaperSchedulerEvent:
+    account_id: str
+    sequence: int
+    previous_hash: str
+    cycle_hash: str
+    evaluated_at: datetime
+    event_hash: str
+
+    def __post_init__(self) -> None:
+        if not self.account_id.strip():
+            raise ValueError("account_id cannot be empty")
+        if (
+            not isinstance(self.sequence, int)
+            or isinstance(self.sequence, bool)
+            or self.sequence < 1
+        ):
+            raise ValueError("scheduler event sequence must be positive")
+        _require_lowercase_sha256(self.previous_hash, name="previous_hash")
+        _require_lowercase_sha256(self.cycle_hash, name="cycle_hash")
+        _require_lowercase_sha256(self.event_hash, name="event_hash")
+        object.__setattr__(
+            self,
+            "evaluated_at",
+            to_utc(self.evaluated_at, name="scheduler event evaluated_at"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class PaperSchedulerRecovery:
+    account_id: str
+    event_count: int
+    latest_evaluated_at: datetime | None
+    latest_cycle_hash: str | None
+    recovery_verified: bool
+
+
+class PostgresPaperSchedulerRepository:
+    """Append-only, hash-chained scheduler-cycle evidence."""
+
+    def __init__(self, *, engine: AsyncEngine, schema: str = "public") -> None:
+        if _IDENTIFIER.fullmatch(schema) is None:
+            raise ValueError("schema must be a safe PostgreSQL identifier")
+        self._engine = engine
+        self._schema = schema
+
+    @classmethod
+    def connect(cls, *, dsn: str, schema: str = "public") -> PostgresPaperSchedulerRepository:
+        if not dsn.strip():
+            raise ValueError("dsn cannot be empty")
+        try:
+            engine = create_async_engine(dsn, pool_pre_ping=True)
+        except Exception:
+            raise PersistenceUnavailableError(
+                "PostgreSQL paper scheduler connection failed"
+            ) from None
+        return cls(engine=engine, schema=schema)
+
+    async def close(self) -> None:
+        await self._engine.dispose()
+
+    async def append(self, cycle: PaperSchedulerCycle) -> PaperSchedulerEvent:
+        if not isinstance(cycle, PaperSchedulerCycle):
+            raise TypeError("cycle must be PaperSchedulerCycle")
+        payload = scheduler_cycle_payload(cycle)
+        if _canonical_hash(payload) != cycle.cycle_hash:
+            raise ValueError("scheduler cycle hash does not match its payload")
+        try:
+            async with self._engine.begin() as connection:
+                await connection.execute(
+                    text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+                    {"key": f"autoquant:paper-scheduler:{cycle.account_id}"},
+                )
+                duplicate = await self._select_by_cycle_hash(
+                    connection,
+                    account_id=cycle.account_id,
+                    cycle_hash=cycle.cycle_hash,
+                )
+                if duplicate is not None:
+                    return duplicate
+                state = await self._select_state(connection, cycle.account_id)
+                if state is None:
+                    sequence = 1
+                    previous_hash = ZERO_HASH
+                else:
+                    if cycle.evaluated_at < state["last_evaluated_at"]:
+                        raise ValueError("scheduler cycle time cannot move backwards")
+                    sequence = int(state["last_sequence"]) + 1
+                    previous_hash = str(state["last_event_hash"])
+                event_hash = _canonical_hash(
+                    {
+                        "cycle_hash": cycle.cycle_hash,
+                        "previous_hash": previous_hash,
+                        "sequence": sequence,
+                    }
+                )
+                event = PaperSchedulerEvent(
+                    account_id=cycle.account_id,
+                    sequence=sequence,
+                    previous_hash=previous_hash,
+                    cycle_hash=cycle.cycle_hash,
+                    evaluated_at=cycle.evaluated_at,
+                    event_hash=event_hash,
+                )
+                await self._insert_event(
+                    connection,
+                    cycle=cycle,
+                    event=event,
+                    payload=payload,
+                )
+                await self._write_state(
+                    connection,
+                    event=event,
+                    exists=state is not None,
+                )
+                return event
+        except ValueError:
+            raise
+        except Exception:
+            raise PersistenceUnavailableError("Paper scheduler cycle persistence failed") from None
+
+    async def replay(self, *, account_id: str) -> PaperSchedulerRecovery:
+        if not account_id.strip():
+            raise ValueError("account_id cannot be empty")
+        try:
+            async with self._engine.connect() as connection:
+                state = await self._select_state(connection, account_id)
+                rows = (
+                    (
+                        await connection.execute(
+                            text(
+                                f"SELECT event_hash, account_id, sequence, "
+                                "previous_hash, cycle_hash, "
+                                "evaluated_at, strategy_id, session_date, phase, status, "
+                                "control_state_hash, calendar_hash, mark_evidence_hash, "
+                                f"quote_evidence_hash, error_code, cycle_payload FROM "
+                                f"{self._schema}.paper_scheduler_events "
+                                "WHERE account_id=:account_id ORDER BY sequence"
+                            ),
+                            {"account_id": account_id},
+                        )
+                    )
+                    .mappings()
+                    .all()
+                )
+        except Exception:
+            raise PersistenceUnavailableError("Paper scheduler recovery read failed") from None
+        if state is None:
+            if rows:
+                raise PersistenceUnavailableError(
+                    "Paper scheduler events exist without materialized state"
+                )
+            return PaperSchedulerRecovery(
+                account_id=account_id,
+                event_count=0,
+                latest_evaluated_at=None,
+                latest_cycle_hash=None,
+                recovery_verified=True,
+            )
+        previous_hash = ZERO_HASH
+        latest_at: datetime | None = None
+        latest_cycle_hash: str | None = None
+        for expected_sequence, row in enumerate(rows, start=1):
+            payload = dict(row["cycle_payload"])
+            cycle_hash = _canonical_hash(payload)
+            event_hash = _canonical_hash(
+                {
+                    "cycle_hash": cycle_hash,
+                    "previous_hash": previous_hash,
+                    "sequence": expected_sequence,
+                }
+            )
+            if (
+                int(row["sequence"]) != expected_sequence
+                or str(row["previous_hash"]) != previous_hash
+                or str(row["cycle_hash"]) != cycle_hash
+                or str(row["event_hash"]) != event_hash
+                or not _columns_match_payload(row, payload)
+            ):
+                raise PersistenceUnavailableError(
+                    "Paper scheduler event failed integrity verification"
+                )
+            previous_hash = event_hash
+            latest_cycle_hash = cycle_hash
+            latest_at = to_utc(row["evaluated_at"], name="scheduler evaluated_at")
+        if (
+            len(rows) != int(state["last_sequence"])
+            or previous_hash != str(state["last_event_hash"])
+            or latest_cycle_hash != str(state["last_cycle_hash"])
+            or latest_at != to_utc(state["last_evaluated_at"], name="scheduler state evaluated_at")
+        ):
+            raise PersistenceUnavailableError("Paper scheduler state does not match event replay")
+        return PaperSchedulerRecovery(
+            account_id=account_id,
+            event_count=len(rows),
+            latest_evaluated_at=latest_at,
+            latest_cycle_hash=latest_cycle_hash,
+            recovery_verified=True,
+        )
+
+    async def _select_state(
+        self, connection: AsyncConnection, account_id: str
+    ) -> RowMapping | None:
+        return (
+            (
+                await connection.execute(
+                    text(
+                        f"SELECT account_id, last_sequence, last_event_hash, "
+                        f"last_cycle_hash, last_evaluated_at FROM "
+                        f"{self._schema}.paper_scheduler_state "
+                        "WHERE account_id=:account_id FOR UPDATE"
+                    ),
+                    {"account_id": account_id},
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+
+    async def _select_by_cycle_hash(
+        self,
+        connection: AsyncConnection,
+        *,
+        account_id: str,
+        cycle_hash: str,
+    ) -> PaperSchedulerEvent | None:
+        row = (
+            (
+                await connection.execute(
+                    text(
+                        f"SELECT account_id, sequence, previous_hash, cycle_hash, "
+                        f"evaluated_at, event_hash FROM "
+                        f"{self._schema}.paper_scheduler_events "
+                        "WHERE account_id=:account_id AND cycle_hash=:cycle_hash"
+                    ),
+                    {"account_id": account_id, "cycle_hash": cycle_hash},
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        return None if row is None else _event_from_row(row)
+
+    async def _insert_event(
+        self,
+        connection: AsyncConnection,
+        *,
+        cycle: PaperSchedulerCycle,
+        event: PaperSchedulerEvent,
+        payload: dict[str, object],
+    ) -> None:
+        await connection.execute(
+            text(
+                f"INSERT INTO {self._schema}.paper_scheduler_events "
+                "(event_hash, account_id, sequence, previous_hash, cycle_hash, "
+                "strategy_id, session_date, evaluated_at, phase, status, "
+                "control_state_hash, calendar_hash, mark_evidence_hash, "
+                "quote_evidence_hash, error_code, cycle_payload) VALUES "
+                "(:event_hash, :account_id, :sequence, :previous_hash, :cycle_hash, "
+                ":strategy_id, :session_date, :evaluated_at, :phase, :status, "
+                ":control_state_hash, :calendar_hash, :mark_evidence_hash, "
+                ":quote_evidence_hash, :error_code, CAST(:cycle_payload AS jsonb))"
+            ),
+            {
+                "event_hash": event.event_hash,
+                "account_id": cycle.account_id,
+                "sequence": event.sequence,
+                "previous_hash": event.previous_hash,
+                "cycle_hash": cycle.cycle_hash,
+                "strategy_id": cycle.strategy_id,
+                "session_date": cycle.session_date,
+                "evaluated_at": cycle.evaluated_at,
+                "phase": cycle.phase.value,
+                "status": cycle.status.value,
+                "control_state_hash": cycle.control.state_hash,
+                "calendar_hash": cycle.calendar_hash,
+                "mark_evidence_hash": cycle.mark_evidence_hash,
+                "quote_evidence_hash": cycle.quote_evidence_hash,
+                "error_code": cycle.error_code,
+                "cycle_payload": json.dumps(payload, sort_keys=True, separators=(",", ":")),
+            },
+        )
+
+    async def _write_state(
+        self,
+        connection: AsyncConnection,
+        *,
+        event: PaperSchedulerEvent,
+        exists: bool,
+    ) -> None:
+        parameters = {
+            "account_id": event.account_id,
+            "last_sequence": event.sequence,
+            "last_event_hash": event.event_hash,
+            "last_cycle_hash": event.cycle_hash,
+            "last_evaluated_at": event.evaluated_at,
+        }
+        if exists:
+            await connection.execute(
+                text(
+                    f"UPDATE {self._schema}.paper_scheduler_state SET "
+                    "last_sequence=:last_sequence, last_event_hash=:last_event_hash, "
+                    "last_cycle_hash=:last_cycle_hash, "
+                    "last_evaluated_at=:last_evaluated_at, "
+                    "updated_at=clock_timestamp() WHERE account_id=:account_id"
+                ),
+                parameters,
+            )
+        else:
+            await connection.execute(
+                text(
+                    f"INSERT INTO {self._schema}.paper_scheduler_state "
+                    "(account_id, last_sequence, last_event_hash, last_cycle_hash, "
+                    "last_evaluated_at) VALUES (:account_id, :last_sequence, "
+                    ":last_event_hash, :last_cycle_hash, :last_evaluated_at)"
+                ),
+                parameters,
+            )
+
+
+def _event_from_row(row: RowMapping) -> PaperSchedulerEvent:
+    return PaperSchedulerEvent(
+        account_id=str(row["account_id"]),
+        sequence=int(row["sequence"]),
+        previous_hash=str(row["previous_hash"]),
+        cycle_hash=str(row["cycle_hash"]),
+        evaluated_at=row["evaluated_at"],
+        event_hash=str(row["event_hash"]),
+    )
+
+
+def _columns_match_payload(row: RowMapping, payload: dict[str, object]) -> bool:
+    return (
+        str(row["account_id"]) == payload.get("account_id")
+        and str(row["strategy_id"]) == payload.get("strategy_id")
+        and row["session_date"].isoformat() == payload.get("session_date")
+        and to_utc(row["evaluated_at"]).isoformat(timespec="microseconds")
+        == payload.get("evaluated_at")
+        and str(row["phase"]) == payload.get("phase")
+        and str(row["status"]) == payload.get("status")
+        and str(row["control_state_hash"]) == payload.get("control_state_hash")
+        and row["calendar_hash"] == payload.get("calendar_hash")
+        and row["mark_evidence_hash"] == payload.get("mark_evidence_hash")
+        and row["quote_evidence_hash"] == payload.get("quote_evidence_hash")
+        and row["error_code"] == payload.get("error_code")
+    )

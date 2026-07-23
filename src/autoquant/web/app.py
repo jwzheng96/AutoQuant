@@ -25,6 +25,7 @@ from autoquant.config import AppSettings, WebCredentials
 from autoquant.data.daily_ingestion import ValidatedDailyDatasetReader
 from autoquant.errors import AutoQuantError
 from autoquant.execution.control_store import PostgresExecutionControlRepository
+from autoquant.execution.paper_scheduler_store import PostgresPaperSchedulerRepository
 from autoquant.execution.simulated_broker import PersistentSimulatedBroker
 from autoquant.execution.store import PostgresPaperExecutionRepository
 from autoquant.operations import configured_dsn
@@ -345,6 +346,7 @@ async def _production_service(settings: AppSettings) -> ConsoleService:
     executions = PostgresPaperExecutionRepository.connect(dsn=postgres_dsn)
     execution_controls = PostgresExecutionControlRepository.connect(dsn=postgres_dsn)
     simulated_broker = PersistentSimulatedBroker.connect(dsn=postgres_dsn)
+    scheduler = PostgresPaperSchedulerRepository.connect(dsn=postgres_dsn)
     control = PostgresControlRepository.connect(dsn=postgres_dsn)
     try:
         market = await ClickHouseDailyRepository.connect(dsn=clickhouse_dsn, source="tushare")
@@ -356,6 +358,7 @@ async def _production_service(settings: AppSettings) -> ConsoleService:
         await executions.close()
         await execution_controls.close()
         await simulated_broker.close()
+        await scheduler.close()
         await control.close()
         raise
     reader = ValidatedDailyDatasetReader(
@@ -383,6 +386,7 @@ async def _production_service(settings: AppSettings) -> ConsoleService:
         execution_repository=executions,
         execution_control_repository=execution_controls,
         simulated_broker=simulated_broker,
+        scheduler_repository=scheduler,
     )
 
 

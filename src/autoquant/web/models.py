@@ -410,9 +410,13 @@ class PaperExecutionStatus(BaseModel):
     simulated_broker_recovery_verified: bool
     simulated_broker_order_count: int = Field(ge=0)
     simulated_broker_fact_count: int = Field(ge=0)
+    scheduler_evidence_available: bool = False
+    scheduler_recovery_verified: bool = False
+    scheduler_cycle_count: int = Field(default=0, ge=0)
+    latest_scheduler_at: datetime | None = None
     remaining_gates: tuple[str, ...]
 
-    @field_validator("latest_reconciliation_at")
+    @field_validator("latest_reconciliation_at", "latest_scheduler_at")
     @classmethod
     def require_aware_reconciliation_time(
         cls, value: datetime | None

@@ -86,6 +86,14 @@ events. The readiness command now checks the durable active-session registry, wh
 Windows adapter must still acquire and continuously renew its lease before connecting. Expiry or
 token mismatch fails closed and never changes the live-order release lock.
 
+PostgreSQL schema v13 adds an exchange-phase-aware paper scheduler and its append-only evidence
+chain. The scheduler uses point-in-time trading calendars, permits strategy intents only during
+morning/afternoon continuous auctions, replays daily session risk before use, and requires a
+complete fresh sequenced quote snapshot. Stream gaps, time regression, stale/missing prices,
+overlapping cycles, invalid strategy output, or evidence-sink failure activate the durable kill
+switch. The operator console verifies and displays scheduler recovery, but no external real-time
+adapter or production scheduler process is wired yet.
+
 All dependency, test, lint, type-check, migration, and Git mutation commands for this
 checkout must run on `rlocal`; see [the phase-1 runbook](docs/runbooks/phase1-data-foundation.md).
 
