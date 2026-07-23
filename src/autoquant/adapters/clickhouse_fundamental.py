@@ -508,7 +508,12 @@ ORDER BY
     ) -> tuple[tuple[Any, ...], ...]:
         cutoff = to_utc(as_of, name="as_of")
         rows: list[tuple[Any, ...]] = []
-        for interval_start, interval_end in _year_intervals(start, end):
+        intervals = (
+            ((start, end),)
+            if len(instruments) == 1
+            else _year_intervals(start, end)
+        )
+        for interval_start, interval_end in intervals:
             try:
                 result = await self._client.query(
                     query=sql,
