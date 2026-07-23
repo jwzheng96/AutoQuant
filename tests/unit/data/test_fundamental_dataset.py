@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import UTC, date, datetime
 
 import pytest
@@ -125,18 +126,27 @@ def _valuation() -> DailyValuationRevision:
 
 
 @pytest.mark.asyncio
-async def test_validated_reader_checks_exact_fundamental_hash_sequence() -> None:
+async def test_validated_reader_checks_complete_fundamental_hash_set() -> None:
     valuation = _valuation()
+    second = replace(
+        valuation,
+        session_date=date(2026, 7, 21),
+        event_time=datetime(2026, 7, 21, 7, tzinfo=UTC),
+        available_at=datetime(2026, 7, 22, 1, 30, tzinfo=UTC),
+    )
     shard_manifest = DatasetManifest(
         source="tushare-fundamental",
         instruments=(valuation.instrument,),
         start_time=datetime(2019, 12, 31, 16, tzinfo=UTC),
         end_time=datetime(2026, 7, 22, 7, tzinfo=UTC),
         as_of=datetime(2026, 7, 23, 8, tzinfo=UTC),
-        record_hashes=(valuation.content_hash,),
+        record_hashes=(
+            valuation.content_hash,
+            second.content_hash,
+        ),
         quality_report_hash="quality",
         production_complete=True,
-        row_count=1,
+        row_count=2,
     )
     aggregate = FundamentalResearchDatasetManifest(
         spec_hash="a" * 64,
@@ -153,14 +163,14 @@ async def test_validated_reader_checks_exact_fundamental_hash_sequence() -> None
     reader = ValidatedFundamentalDatasetReader(
         aggregate=aggregate,
         manifest_reader=_ManifestReader(shard_manifest),
-        data_reader=_DataReader((valuation,)),
+        data_reader=_DataReader((second, valuation)),
         retry_delay_seconds=0,
     )
 
     shard = await reader.query_instrument(valuation.instrument)
 
     assert shard.manifest == shard_manifest
-    assert shard.valuations == (valuation,)
+    assert shard.valuations == (second, valuation)
 
     corrupt = ValidatedFundamentalDatasetReader(
         aggregate=aggregate,

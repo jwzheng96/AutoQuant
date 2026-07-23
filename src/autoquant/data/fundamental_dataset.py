@@ -285,7 +285,10 @@ class ValidatedFundamentalDatasetReader:
         actual = tuple(
             value.content_hash for value in valuations
         ) + tuple(value.content_hash for value in indicators)
-        if actual != manifest.record_hashes:
+        if (
+            len(actual) != len(manifest.record_hashes)
+            or set(actual) != set(manifest.record_hashes)
+        ):
             raise ManifestIntegrityError(
                 f"fundamental shard {instrument} failed row-hash "
                 "verification"
