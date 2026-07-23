@@ -37,6 +37,7 @@ Apply `migrations/postgres/001_phase1.sql`,
 `migrations/postgres/017_qmt_readonly_acceptance.sql`, then
 `migrations/postgres/018_qmt_recovery_drills.sql`, then
 `migrations/postgres/019_paper_portfolio_registry.sql`, then
+`migrations/postgres/020_portfolio_oos_assessment.sql`, then
 `migrations/clickhouse/001_phase1.sql` and
 `migrations/clickhouse/002_tushare_daily.sql` and
 `migrations/clickhouse/003_daily_coverage.sql` in order, only to explicitly authorized
@@ -263,7 +264,15 @@ uv run autoquant approve-paper-portfolio \
 
 Component allocations must each stay within the position cap and their sum must
 stay within the gross-exposure cap. Single and portfolio deployments are mutually
-exclusive, and the same revocation command handles either kind:
+exclusive. Portfolio approval also requires at least six exactly aligned OOS
+folds generated with the configured paper initial capital and one shared
+point-in-time cutoff, positive compounded portfolio return, at least 50%
+profitable folds, a
+conservative drawdown bound no greater than 12%, maximum pairwise component
+correlation no greater than 0.85, and maximum absolute component return
+contribution no greater than 65%. The immutable assessment hash is part of the
+portfolio registration and is shown in the operator console. The same revocation
+command handles either kind:
 
 ```bash
 uv run autoquant revoke-paper-strategy \

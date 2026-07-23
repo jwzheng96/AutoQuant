@@ -12,6 +12,12 @@ from autoquant.clock import to_utc
 from autoquant.data.daily_ingestion import ValidatedDailyDataset
 from autoquant.data.ingestion import ControlRepository
 from autoquant.data.models import _canonical_hash
+from autoquant.execution.portfolio_validation import (
+    PortfolioOosComponentEvidence,
+    PortfolioOosFold,
+    PortfolioOosPolicy,
+    assess_portfolio_oos,
+)
 from autoquant.execution.validated_sma import (
     DailyDatasetReader,
     ValidatedSmaRegistration,
@@ -108,19 +114,26 @@ class PaperStrategyPromotionService:
         approved_by: str,
         approved_at: datetime,
         allow_portfolio_policy: bool,
+        detail: ValidationExperimentDetail | None = None,
     ) -> ValidatedSmaRegistration:
         instant = to_utc(approved_at, name="strategy approval time")
-        detail = await self._validations.detail(experiment_id)
-        experiment = detail.experiment
+        resolved_detail = (
+            await self._validations.detail(experiment_id)
+            if detail is None
+            else detail
+        )
+        experiment = resolved_detail.experiment
         summary = experiment.summary
         if (
+            experiment.experiment_id != experiment_id
+            or
             experiment.state is not OperatorJobState.COMPLETED
             or experiment.result_hash is None
             or experiment.as_of is None
             or summary is None
             or summary.evidence_status != "research_candidate"
             or summary.gate_failures
-            or not detail.folds
+            or not resolved_detail.folds
         ):
             raise ValueError(
                 "only a completed, gate-passing OOS research candidate can be approved"
@@ -148,7 +161,7 @@ class PaperStrategyPromotionService:
                     value.selected.fast_sessions,
                     value.selected.slow_sessions,
                 )
-                for value in detail.folds
+                for value in resolved_detail.folds
             )
         )
         validation_manifest = await self._controls.read_manifest(
@@ -243,6 +256,7 @@ class PaperPortfolioPromotionService:
         self._controls = controls
         self._datasets = datasets
         self._registrations = registrations
+        self._validations = validations
         self._component_builder = PaperStrategyPromotionService(
             validations=validations,
             controls=controls,
@@ -258,9 +272,18 @@ class PaperPortfolioPromotionService:
         components: tuple[PaperPortfolioComponentApproval, ...],
         valuation_manifest_hash: str,
         policy: RiskPolicy,
+        expected_initial_cash: Decimal,
         approved_by: str,
         approved_at: datetime,
     ) -> ValidatedSmaPortfolioRegistration:
+        if (
+            not isinstance(expected_initial_cash, Decimal)
+            or not expected_initial_cash.is_finite()
+            or expected_initial_cash <= 0
+        ):
+            raise ValueError(
+                "portfolio expected initial cash must be positive"
+            )
         if (
             len(components) < 3
             or len(components) > 20
@@ -283,6 +306,29 @@ class PaperPortfolioPromotionService:
                 "portfolio components must exactly match unique policy instruments"
             )
         instant = to_utc(approved_at, name="portfolio approval time")
+        details = tuple(
+            [
+                await self._validations.detail(value.experiment_id)
+                for value in components
+            ]
+        )
+        if (
+            any(
+                detail.experiment.request.initial_cash
+                != expected_initial_cash
+                for detail in details
+            )
+            or len(
+                {
+                    detail.experiment.as_of
+                    for detail in details
+                }
+            )
+            != 1
+        ):
+            raise ValueError(
+                "portfolio validations must share the configured capital and cutoff"
+            )
         registrations = tuple(
             [
                 await self._component_builder._prepare_sma(
@@ -295,8 +341,13 @@ class PaperPortfolioPromotionService:
                     approved_by=approved_by,
                     approved_at=instant,
                     allow_portfolio_policy=True,
+                    detail=detail,
                 )
-                for value in components
+                for value, detail in zip(
+                    components,
+                    details,
+                    strict=True,
+                )
             ]
         )
         if (
@@ -327,12 +378,46 @@ class PaperPortfolioPromotionService:
             valuation_dataset,
             instruments=instruments,
         )
+        assessment = assess_portfolio_oos(
+            tuple(
+                PortfolioOosComponentEvidence(
+                    experiment_id=registration.experiment_id,
+                    validation_result_hash=(
+                        registration.validation_result_hash
+                    ),
+                    instrument=registration.instrument,
+                    allocation=registration.allocation,
+                    folds=tuple(
+                        PortfolioOosFold(
+                            sequence=fold.sequence,
+                            test_start=fold.test_start,
+                            test_end=fold.test_end,
+                            total_return=fold.test.total_return,
+                            max_drawdown=fold.test.max_drawdown,
+                        )
+                        for fold in detail.folds
+                    ),
+                )
+                for registration, detail in zip(
+                    registrations,
+                    details,
+                    strict=True,
+                )
+            ),
+            policy=PortfolioOosPolicy(),
+        )
+        if not assessment.passed:
+            raise ValueError(
+                "portfolio OOS assessment failed: "
+                + ",".join(assessment.gate_failures)
+            )
         component_hashes = tuple(
             sorted(value.registration_hash for value in registrations)
         )
         version_hash = _canonical_hash(
             {
                 "component_hashes": component_hashes,
+                "oos_assessment_hash": assessment.assessment_hash,
                 "valuation_manifest_hash": (
                     valuation_manifest.manifest_hash
                 ),
@@ -346,6 +431,7 @@ class PaperPortfolioPromotionService:
                 f"sma-portfolio-paper-v1:{version_hash[:12]}"
             ),
             components=registrations,
+            oos_assessment=assessment,
             valuation_manifest_hash=valuation_manifest.manifest_hash,
             valuation_manifest_as_of=valuation_manifest.as_of,
             risk_policy_hash=policy.policy_hash,

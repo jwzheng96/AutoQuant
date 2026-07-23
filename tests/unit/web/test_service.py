@@ -8,6 +8,11 @@ import pytest
 from autoquant.config import AppSettings
 from autoquant.errors import PersistenceUnavailableError
 from autoquant.execution.control import KillSwitchReason
+from autoquant.execution.portfolio_validation import (
+    PortfolioOosComponentEvidence,
+    PortfolioOosFold,
+    assess_portfolio_oos,
+)
 from autoquant.execution.validated_sma import ValidatedSmaRegistration
 from autoquant.execution.validated_sma_portfolio import (
     ValidatedSmaPortfolioRegistration,
@@ -315,6 +320,61 @@ async def test_strategy_status_exposes_portfolio_components() -> None:
         strategy_id="validated-sma-paper",
         strategy_version="sma-portfolio-paper-v1:test",
         components=components,
+        oos_assessment=assess_portfolio_oos(
+            tuple(
+                PortfolioOosComponentEvidence(
+                    experiment_id=component.experiment_id,
+                    validation_result_hash=(
+                        component.validation_result_hash
+                    ),
+                    instrument=component.instrument,
+                    allocation=component.allocation,
+                    folds=tuple(
+                        PortfolioOosFold(
+                            sequence=sequence,
+                            test_start=date(2024, sequence, 1),
+                            test_end=date(2024, sequence, 20),
+                            total_return=Decimal(value),
+                            max_drawdown=Decimal("0.01"),
+                        )
+                        for sequence, value in enumerate(
+                            returns,
+                            start=1,
+                        )
+                    ),
+                )
+                for component, returns in zip(
+                    components,
+                    (
+                        (
+                            "0.010",
+                            "0.020",
+                            "-0.005",
+                            "0.015",
+                            "0.003",
+                            "0.012",
+                        ),
+                        (
+                            "0.008",
+                            "-0.003",
+                            "0.018",
+                            "0.004",
+                            "0.014",
+                            "0.006",
+                        ),
+                        (
+                            "-0.002",
+                            "0.011",
+                            "0.005",
+                            "0.017",
+                            "0.007",
+                            "0.009",
+                        ),
+                    ),
+                    strict=True,
+                )
+            )
+        ),
         valuation_manifest_hash="b" * 64,
         valuation_manifest_as_of=NOW - timedelta(hours=1),
         risk_policy_hash="a" * 64,
@@ -337,6 +397,9 @@ async def test_strategy_status_exposes_portfolio_components() -> None:
     assert len(status.components) == 3
     assert status.total_allocation == Decimal("0.60")
     assert status.instrument is None
+    assert status.portfolio_oos is not None
+    assert status.portfolio_oos.fold_count == 6
+    assert status.portfolio_oos.compounded_return > 0
 
 
 @pytest.mark.asyncio

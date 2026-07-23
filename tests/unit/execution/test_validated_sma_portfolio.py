@@ -20,6 +20,11 @@ from autoquant.data.daily_models import (
 from autoquant.data.models import DatasetManifest
 from autoquant.execution.market_clock import AShareTradingPhase
 from autoquant.execution.paper_scheduler import PaperStrategyContext
+from autoquant.execution.portfolio_validation import (
+    PortfolioOosComponentEvidence,
+    PortfolioOosFold,
+    assess_portfolio_oos,
+)
 from autoquant.execution.quote_book import ContinuousQuoteBook
 from autoquant.execution.session_rules import SessionRuleSet
 from autoquant.execution.strategy_account import PaperStrategyAccountEvidence
@@ -167,11 +172,69 @@ def _portfolio() -> ValidatedSmaPortfolioRegistration:
         for index, instrument in enumerate(INSTRUMENTS)
     )
     valuation = _valuation_manifest()
+    returns = (
+        (
+            Decimal("0.01"),
+            Decimal("0.02"),
+            Decimal("-0.005"),
+            Decimal("0.015"),
+            Decimal("0.003"),
+            Decimal("0.012"),
+        ),
+        (
+            Decimal("0.008"),
+            Decimal("-0.003"),
+            Decimal("0.018"),
+            Decimal("0.004"),
+            Decimal("0.014"),
+            Decimal("0.006"),
+        ),
+        (
+            Decimal("-0.002"),
+            Decimal("0.011"),
+            Decimal("0.005"),
+            Decimal("0.017"),
+            Decimal("0.007"),
+            Decimal("0.009"),
+        ),
+    )
+    assessment = assess_portfolio_oos(
+        tuple(
+            PortfolioOosComponentEvidence(
+                experiment_id=component.experiment_id,
+                validation_result_hash=(
+                    component.validation_result_hash
+                ),
+                instrument=component.instrument,
+                allocation=component.allocation,
+                folds=tuple(
+                    PortfolioOosFold(
+                        sequence=sequence,
+                        test_start=date(2025, sequence, 1),
+                        test_end=date(2025, sequence, 20),
+                        total_return=value,
+                        max_drawdown=Decimal("0.01"),
+                    )
+                    for sequence, value in enumerate(
+                        component_returns,
+                        start=1,
+                    )
+                ),
+            )
+            for component, component_returns in zip(
+                components,
+                returns,
+                strict=True,
+            )
+        )
+    )
+    assert assessment.passed
     return ValidatedSmaPortfolioRegistration(
         account_id="paper-main",
         strategy_id=STRATEGY_ID,
-        strategy_version="sma-portfolio-v1:test",
+        strategy_version="sma-portfolio-v2:test",
         components=components,
+        oos_assessment=assessment,
         valuation_manifest_hash=valuation.manifest_hash,
         valuation_manifest_as_of=valuation.as_of,
         risk_policy_hash=policy.policy_hash,
@@ -296,6 +359,14 @@ def test_portfolio_registration_requires_diversification_and_shared_controls() -
                     approved_by="another-operator",
                 ),
                 *registration.components[1:],
+            ),
+        )
+    with pytest.raises(ValueError, match="OOS assessment"):
+        replace(
+            registration,
+            oos_assessment=replace(
+                registration.oos_assessment,
+                gate_failures=("pairwise_correlation_limit",),
             ),
         )
 

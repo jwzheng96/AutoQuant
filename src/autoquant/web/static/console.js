@@ -219,7 +219,7 @@ async function loadTrading() {
       "paper-strategy-evidence",
       data.strategy?.active
         ? data.strategy.deployment_kind === "portfolio"
-          ? `${data.strategy.instruments.join(", ")} · ${data.strategy.components.length} 个独立样本外组件 · 总配置 ${(Number(data.strategy.total_allocation) * 100).toFixed(2)}%`
+          ? `${data.strategy.instruments.join(", ")} · ${data.strategy.components.length} 个独立样本外组件 · 总配置 ${(Number(data.strategy.total_allocation) * 100).toFixed(2)}% · 组合 OOS ${(Number(data.strategy.portfolio_oos.compounded_return) * 100).toFixed(2)}% · 回撤上界 ${(Number(data.strategy.portfolio_oos.maximum_drawdown) * 100).toFixed(2)}%`
           : `${data.strategy.instrument} · SMA ${data.strategy.fast_sessions}/${data.strategy.slow_sessions} · ${(Number(data.strategy.allocation) * 100).toFixed(2)}%`
         : "当前没有可进入调度器的策略工件",
     );

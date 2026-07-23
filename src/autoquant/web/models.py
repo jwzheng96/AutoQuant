@@ -543,6 +543,21 @@ class PaperStrategyComponentStatus(BaseModel):
         return self
 
 
+class PaperPortfolioOosStatus(BaseModel):
+    assessment_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    policy_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    fold_count: int = Field(ge=1)
+    compounded_return: Decimal
+    profitable_fold_rate: Decimal = Field(ge=0, le=1)
+    maximum_drawdown: Decimal = Field(ge=0, le=1)
+    maximum_pairwise_correlation: Decimal | None = Field(
+        default=None,
+        ge=-1,
+        le=1,
+    )
+    maximum_component_contribution: Decimal = Field(ge=0, le=1)
+
+
 class PaperStrategyStatus(BaseModel):
     status: str
     active: bool
@@ -574,6 +589,7 @@ class PaperStrategyStatus(BaseModel):
         default=None,
         pattern=r"^[0-9a-f]{64}$",
     )
+    portfolio_oos: PaperPortfolioOosStatus | None = None
     remaining_gates: tuple[str, ...]
 
     @field_validator("approved_at")
@@ -610,6 +626,7 @@ class PaperStrategyStatus(BaseModel):
             or self.components
             or self.total_allocation is not None
             or self.valuation_manifest_hash is not None
+            or self.portfolio_oos is not None
         ):
             raise ValueError("inactive paper strategy cannot contain deployment data")
         if self.active and self.deployment_kind == "portfolio":
@@ -622,6 +639,7 @@ class PaperStrategyStatus(BaseModel):
                 != tuple(sorted(self.instruments))
                 or self.total_allocation is None
                 or self.valuation_manifest_hash is None
+                or self.portfolio_oos is None
                 or any(
                     value is not None
                     for value in (
@@ -651,6 +669,10 @@ class PaperStrategyStatus(BaseModel):
             if not all(value is not None for value in single_details):
                 raise ValueError(
                     "single paper strategy status details are incomplete"
+                )
+            if self.portfolio_oos is not None:
+                raise ValueError(
+                    "single paper strategy cannot contain portfolio OOS data"
                 )
         if (
             self.fast_sessions is not None

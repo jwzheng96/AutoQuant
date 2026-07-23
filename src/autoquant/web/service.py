@@ -46,6 +46,7 @@ from autoquant.web.models import (
     OperatorJob,
     OperatorOverview,
     PaperExecutionStatus,
+    PaperPortfolioOosStatus,
     PaperPromotionStatus,
     PaperStrategyComponentStatus,
     PaperStrategyStatus,
@@ -695,6 +696,32 @@ class ConsoleService:
                 total_allocation=registration.total_allocation,
                 valuation_manifest_hash=(
                     registration.valuation_manifest_hash
+                ),
+                portfolio_oos=PaperPortfolioOosStatus(
+                    assessment_hash=(
+                        registration.oos_assessment.assessment_hash
+                    ),
+                    policy_hash=(
+                        registration.oos_assessment.policy_hash
+                    ),
+                    fold_count=registration.oos_assessment.fold_count,
+                    compounded_return=(
+                        registration.oos_assessment.compounded_return
+                    ),
+                    profitable_fold_rate=(
+                        registration.oos_assessment.profitable_fold_rate
+                    ),
+                    maximum_drawdown=(
+                        registration.oos_assessment.maximum_drawdown
+                    ),
+                    maximum_pairwise_correlation=(
+                        registration.oos_assessment
+                        .maximum_pairwise_correlation
+                    ),
+                    maximum_component_contribution=(
+                        registration.oos_assessment
+                        .maximum_component_contribution
+                    ),
                 ),
                 approved_by=registration.approved_by,
                 approved_at=registration.approved_at,

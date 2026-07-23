@@ -1013,6 +1013,7 @@ async def approve_paper_sma_portfolio_strategy(
             ),
             valuation_manifest_hash=valuation_manifest_hash,
             policy=policy,
+            expected_initial_cash=settings.paper_initial_cash,
             approved_by=approved_by,
             approved_at=now,
         )
@@ -1031,6 +1032,39 @@ async def approve_paper_sma_portfolio_strategy(
             "execution_mode": registration.execution_mode,
             "instruments": list(registration.instruments),
             "live_trading_locked": True,
+            "oos_assessment": {
+                "assessment_hash": (
+                    registration.oos_assessment.assessment_hash
+                ),
+                "compounded_return": str(
+                    registration.oos_assessment.compounded_return
+                ),
+                "fold_count": (
+                    registration.oos_assessment.fold_count
+                ),
+                "maximum_component_contribution": str(
+                    registration.oos_assessment
+                    .maximum_component_contribution
+                ),
+                "maximum_drawdown": str(
+                    registration.oos_assessment.maximum_drawdown
+                ),
+                "maximum_pairwise_correlation": (
+                    None
+                    if registration.oos_assessment
+                    .maximum_pairwise_correlation is None
+                    else str(
+                        registration.oos_assessment
+                        .maximum_pairwise_correlation
+                    )
+                ),
+                "policy_hash": (
+                    registration.oos_assessment.policy_hash
+                ),
+                "profitable_fold_rate": str(
+                    registration.oos_assessment.profitable_fold_rate
+                ),
+            },
             "registration_hash": registration.registration_hash,
             "status": "approved",
             "strategy_id": registration.strategy_id,

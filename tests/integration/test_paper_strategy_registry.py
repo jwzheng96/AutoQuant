@@ -34,6 +34,11 @@ from autoquant.execution.paper_unlock import (
     PaperRuntimeUnlockEvidence,
     PostgresPaperRuntimeUnlockRepository,
 )
+from autoquant.execution.portfolio_validation import (
+    PortfolioOosComponentEvidence,
+    PortfolioOosFold,
+    assess_portfolio_oos,
+)
 from autoquant.execution.promotion_audit import (
     PaperPromotionAuditor,
     PostgresPaperPromotionFactRepository,
@@ -127,6 +132,7 @@ async def registry_fixture() -> AsyncIterator[
             "migrations/postgres/017_qmt_readonly_acceptance.sql",
             "migrations/postgres/018_qmt_recovery_drills.sql",
             "migrations/postgres/019_paper_portfolio_registry.sql",
+            "migrations/postgres/020_portfolio_oos_assessment.sql",
         )
     )
     report = QualityReport(
@@ -512,11 +518,68 @@ async def test_portfolio_registry_activates_only_independent_components(
     )
     await control.save_quality_report(valuation_report)
     await control.save_manifest(valuation_manifest)
+    assessment = assess_portfolio_oos(
+        tuple(
+            PortfolioOosComponentEvidence(
+                experiment_id=component.experiment_id,
+                validation_result_hash=(
+                    component.validation_result_hash
+                ),
+                instrument=component.instrument,
+                allocation=component.allocation,
+                folds=tuple(
+                    PortfolioOosFold(
+                        sequence=sequence,
+                        test_start=date(2024, sequence, 1),
+                        test_end=date(2024, sequence, 20),
+                        total_return=Decimal(value),
+                        max_drawdown=Decimal("0.01"),
+                    )
+                    for sequence, value in enumerate(
+                        component_returns,
+                        start=1,
+                    )
+                ),
+            )
+            for component, component_returns in zip(
+                components,
+                (
+                    (
+                        "0.010",
+                        "0.020",
+                        "-0.005",
+                        "0.015",
+                        "0.003",
+                        "0.012",
+                    ),
+                    (
+                        "0.008",
+                        "-0.003",
+                        "0.018",
+                        "0.004",
+                        "0.014",
+                        "0.006",
+                    ),
+                    (
+                        "-0.002",
+                        "0.011",
+                        "0.005",
+                        "0.017",
+                        "0.007",
+                        "0.009",
+                    ),
+                ),
+                strict=True,
+            )
+        )
+    )
+    assert assessment.passed
     portfolio = ValidatedSmaPortfolioRegistration(
         account_id="paper-main",
         strategy_id="validated-sma-paper",
         strategy_version="sma-portfolio-paper-v1:integration",
         components=tuple(components),
+        oos_assessment=assessment,
         valuation_manifest_hash=valuation_manifest.manifest_hash,
         valuation_manifest_as_of=valuation_manifest.as_of,
         risk_policy_hash=policy.policy_hash,
@@ -536,6 +599,24 @@ async def test_portfolio_registry_activates_only_independent_components(
     assert stored == deployment == portfolio
     with pytest.raises(ValueError, match="portfolio must be revoked"):
         await single_registry.approve(components[0])
+    with pytest.raises(SQLAlchemyError):
+        async with engine.begin() as connection:
+            await connection.exec_driver_sql(
+                f'SET LOCAL search_path TO "{schema}"'
+            )
+            await connection.execute(
+                text(
+                    """
+                    UPDATE paper_portfolio_registrations
+                    SET oos_assessment_hash = :tampered
+                    WHERE registration_hash = :registration_hash
+                    """
+                ),
+                {
+                    "registration_hash": portfolio.registration_hash,
+                    "tampered": "f" * 64,
+                },
+            )
 
 
 @pytest.mark.asyncio

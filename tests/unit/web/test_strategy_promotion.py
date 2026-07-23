@@ -41,26 +41,59 @@ def _manifest(*, suffix: str) -> DatasetManifest:
 def _detail(
     validation_manifest: DatasetManifest,
     *,
+    experiment_id: Any,
+    instrument: str = INSTRUMENT,
     status: str = "research_candidate",
+    returns: tuple[str, ...] = (
+        "0.010",
+        "0.020",
+        "-0.005",
+        "0.015",
+        "0.003",
+        "0.012",
+    ),
 ) -> Any:
     request = SimpleNamespace(
         manifest_hash=validation_manifest.manifest_hash,
-        instrument=INSTRUMENT,
+        instrument=instrument,
+        initial_cash=Decimal("1000000"),
         allocation=Decimal("0.20"),
         slippage_bps=Decimal("5"),
     )
     experiment = SimpleNamespace(
+        experiment_id=experiment_id,
         state=OperatorJobState.COMPLETED,
         result_hash="a" * 64,
         as_of=NOW,
         summary=SimpleNamespace(evidence_status=status, gate_failures=()),
         request=request,
     )
+    selections = (
+        (10, 30),
+        (5, 20),
+        (5, 20),
+        (5, 20),
+        (10, 30),
+        (5, 20),
+    )
     folds = tuple(
         SimpleNamespace(
-            selected=SimpleNamespace(fast_sessions=fast, slow_sessions=slow)
+            sequence=sequence,
+            test_start=date(2025, sequence, 1),
+            test_end=date(2025, sequence, 20),
+            selected=SimpleNamespace(
+                fast_sessions=fast,
+                slow_sessions=slow,
+            ),
+            test=SimpleNamespace(
+                total_return=Decimal(total_return),
+                max_drawdown=Decimal("0.01"),
+            ),
         )
-        for fast, slow in ((10, 30), (5, 20), (5, 20))
+        for sequence, ((fast, slow), total_return) in enumerate(
+            zip(selections, returns, strict=True),
+            start=1,
+        )
     )
     return SimpleNamespace(experiment=experiment, folds=folds)
 
@@ -69,8 +102,14 @@ def _detail(
 async def test_promotion_requires_gate_passing_oos_and_persists_modal_parameters() -> None:
     validation_manifest = _manifest(suffix="1")
     signal_manifest = _manifest(suffix="2")
+    experiment_id = uuid4()
     validations = MagicMock()
-    validations.detail = AsyncMock(return_value=_detail(validation_manifest))
+    validations.detail = AsyncMock(
+        return_value=_detail(
+            validation_manifest,
+            experiment_id=experiment_id,
+        )
+    )
     controls = MagicMock()
     controls.read_manifest = AsyncMock(
         side_effect=(validation_manifest, signal_manifest)
@@ -100,7 +139,7 @@ async def test_promotion_requires_gate_passing_oos_and_persists_modal_parameters
     registration = await service.approve_sma(
         account_id="paper-main",
         strategy_id="validated-sma-paper",
-        experiment_id=uuid4(),
+        experiment_id=experiment_id,
         signal_manifest_hash=signal_manifest.manifest_hash,
         rules=rules,
         policy=policy,
@@ -118,9 +157,14 @@ async def test_promotion_requires_gate_passing_oos_and_persists_modal_parameters
 async def test_promotion_rejects_non_candidate_and_risk_policy_drift() -> None:
     validation_manifest = _manifest(suffix="1")
     signal_manifest = _manifest(suffix="2")
+    experiment_id = uuid4()
     validations = MagicMock()
     validations.detail = AsyncMock(
-        return_value=_detail(validation_manifest, status="rejected")
+        return_value=_detail(
+            validation_manifest,
+            experiment_id=experiment_id,
+            status="rejected",
+        )
     )
     controls = MagicMock()
     controls.read_manifest = AsyncMock(
@@ -147,7 +191,7 @@ async def test_promotion_rejects_non_candidate_and_risk_policy_drift() -> None:
         await service.approve_sma(
             account_id="paper-main",
             strategy_id="validated-sma-paper",
-            experiment_id=uuid4(),
+            experiment_id=experiment_id,
             signal_manifest_hash=signal_manifest.manifest_hash,
             rules=rules,
             policy=policy,
@@ -230,8 +274,50 @@ async def test_portfolio_promotion_binds_three_independent_components() -> None:
     )
     datasets = MagicMock()
     datasets.query = AsyncMock(return_value=MagicMock())
+    validations = MagicMock()
+    validations.detail = AsyncMock(
+        side_effect=tuple(
+            _detail(
+                valuation_manifest,
+                experiment_id=experiment_id,
+                instrument=instrument,
+                returns=returns,
+            )
+            for experiment_id, instrument, returns in zip(
+                experiment_ids,
+                instruments,
+                (
+                    (
+                        "0.010",
+                        "0.020",
+                        "-0.005",
+                        "0.015",
+                        "0.003",
+                        "0.012",
+                    ),
+                    (
+                        "0.008",
+                        "-0.003",
+                        "0.018",
+                        "0.004",
+                        "0.014",
+                        "0.006",
+                    ),
+                    (
+                        "-0.002",
+                        "0.011",
+                        "0.005",
+                        "0.017",
+                        "0.007",
+                        "0.009",
+                    ),
+                ),
+                strict=True,
+            )
+        )
+    )
     service = PaperPortfolioPromotionService(
-        validations=MagicMock(),
+        validations=validations,
         controls=controls,
         datasets=datasets,
         registrations=registrations,
@@ -256,6 +342,7 @@ async def test_portfolio_promotion_binds_three_independent_components() -> None:
         ),
         valuation_manifest_hash=valuation_manifest.manifest_hash,
         policy=policy,
+        expected_initial_cash=Decimal("1000000"),
         approved_by="operator",
         approved_at=NOW,
     )

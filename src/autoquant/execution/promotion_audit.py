@@ -1016,10 +1016,18 @@ class PostgresPaperPromotionFactRepository:
                                        max(c.slippage_bps) AS slippage_bps,
                                        'portfolio' AS deployment_kind
                                 FROM portfolio_latest e
+                                JOIN {self._schema}.paper_portfolio_registrations r
+                                  ON r.registration_hash =
+                                     e.registration_hash
                                 JOIN {self._schema}.paper_portfolio_components c
                                   ON c.portfolio_registration_hash =
                                      e.registration_hash
                                 WHERE e.action = 'approve'
+                                  AND r.portfolio_version =
+                                      'validated-sma-portfolio-v2'
+                                  AND r.oos_assessment_hash IS NOT NULL
+                                  AND r.oos_assessment_payload
+                                      -> 'gate_failures' = '[]'::jsonb
                                 GROUP BY e.registration_hash
                                 """
                             ),

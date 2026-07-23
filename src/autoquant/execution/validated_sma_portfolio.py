@@ -16,6 +16,10 @@ from autoquant.data.models import (
     _require_nonblank,
 )
 from autoquant.execution.paper_scheduler import PaperStrategyContext
+from autoquant.execution.portfolio_validation import (
+    PortfolioOosAssessment,
+    PortfolioOosPolicy,
+)
 from autoquant.execution.session_rules import SessionRuleSet
 from autoquant.execution.target_strategy import (
     TargetInstrumentPosition,
@@ -29,7 +33,7 @@ from autoquant.execution.validated_sma import (
 )
 from autoquant.risk.models import RiskPolicy
 
-PORTFOLIO_VERSION = "validated-sma-portfolio-v1"
+PORTFOLIO_VERSION = "validated-sma-portfolio-v2"
 
 
 class PaperPortfolioRegistry(Protocol):
@@ -47,6 +51,7 @@ class ValidatedSmaPortfolioRegistration:
     strategy_id: str
     strategy_version: str
     components: tuple[ValidatedSmaRegistration, ...]
+    oos_assessment: PortfolioOosAssessment
     valuation_manifest_hash: str
     valuation_manifest_as_of: datetime
     risk_policy_hash: str
@@ -69,6 +74,10 @@ class ValidatedSmaPortfolioRegistration:
                 raise ValueError(f"{name} cannot exceed 128 characters")
         if self.execution_mode != "paper":
             raise ValueError("validated SMA portfolio is paper-only")
+        if self.portfolio_version != PORTFOLIO_VERSION:
+            raise ValueError(
+                "validated SMA portfolio version is unsupported"
+            )
         for name, value in (
             ("valuation_manifest_hash", self.valuation_manifest_hash),
             ("risk_policy_hash", self.risk_policy_hash),
@@ -84,6 +93,29 @@ class ValidatedSmaPortfolioRegistration:
         instruments = tuple(value.instrument for value in components)
         if len(set(instruments)) != len(instruments):
             raise ValueError("portfolio component instruments must be unique")
+        if (
+            not isinstance(
+                self.oos_assessment,
+                PortfolioOosAssessment,
+            )
+            or not self.oos_assessment.passed
+            or self.oos_assessment.policy_hash
+            != PortfolioOosPolicy().policy_hash
+            or self.oos_assessment.instruments != instruments
+            or {
+                instrument: result_hash
+                for instrument, result_hash, _ in (
+                    self.oos_assessment.component_evidence
+                )
+            }
+            != {
+                value.instrument: value.validation_result_hash
+                for value in components
+            }
+        ):
+            raise ValueError(
+                "portfolio OOS assessment does not bind passing components"
+            )
         if any(
             not isinstance(value, ValidatedSmaRegistration)
             or value.account_id != self.account_id
@@ -155,6 +187,9 @@ class ValidatedSmaPortfolioRegistration:
                 value.registration_hash for value in self.components
             ],
             "execution_mode": self.execution_mode,
+            "oos_assessment_hash": (
+                self.oos_assessment.assessment_hash
+            ),
             "portfolio_version": self.portfolio_version,
             "risk_policy_hash": self.risk_policy_hash,
             "strategy_id": self.strategy_id,

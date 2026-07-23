@@ -25,6 +25,9 @@ from autoquant.data.models import (
 )
 from autoquant.errors import PersistenceUnavailableError
 from autoquant.execution.models import ZERO_HASH
+from autoquant.execution.portfolio_validation import (
+    PortfolioOosAssessment,
+)
 from autoquant.execution.validated_sma import (
     ValidatedSmaRegistration,
     select_deployment_parameters,
@@ -303,6 +306,7 @@ class PostgresPaperPortfolioRegistry:
                      valuation_manifest_as_of, component_count,
                      total_allocation, risk_policy_hash, approved_by,
                      approved_at, execution_mode, portfolio_version,
+                     oos_assessment_hash, oos_assessment_payload,
                      artifact_payload)
                 VALUES
                     (:registration_hash, :account_id, :strategy_id,
@@ -310,6 +314,8 @@ class PostgresPaperPortfolioRegistry:
                      :valuation_manifest_as_of, :component_count,
                      :total_allocation, :risk_policy_hash, :approved_by,
                      :approved_at, 'paper', :portfolio_version,
+                     :oos_assessment_hash,
+                     CAST(:oos_assessment_payload AS jsonb),
                      CAST(:artifact_payload AS jsonb))
                 ON CONFLICT (registration_hash) DO NOTHING
                 """
@@ -323,6 +329,12 @@ class PostgresPaperPortfolioRegistry:
                 "component_count": len(registration.components),
                 "total_allocation": registration.total_allocation,
                 "approved_at": registration.approved_at,
+                "oos_assessment_hash": (
+                    registration.oos_assessment.assessment_hash
+                ),
+                "oos_assessment_payload": _json(
+                    registration.oos_assessment.payload()
+                ),
                 "artifact_payload": _json(payload),
             },
         )
@@ -462,6 +474,9 @@ class PostgresPaperPortfolioRegistry:
                 strategy_id=str(parent["strategy_id"]),
                 strategy_version=str(parent["strategy_version"]),
                 components=component_values,
+                oos_assessment=PortfolioOosAssessment.from_payload(
+                    _object(parent["oos_assessment_payload"])
+                ),
                 valuation_manifest_hash=str(
                     parent["valuation_manifest_hash"]
                 ),
@@ -479,6 +494,8 @@ class PostgresPaperPortfolioRegistry:
                 != str(parent["registration_hash"])
                 or registration.artifact_payload()
                 != _object(parent["artifact_payload"])
+                or registration.oos_assessment.assessment_hash
+                != str(parent["oos_assessment_hash"])
                 or len(component_values)
                 != int(parent["component_count"])
                 or registration.total_allocation
