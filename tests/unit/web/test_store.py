@@ -232,5 +232,6 @@ def test_research_universe_migration_binds_source_evidence() -> None:
         "REFERENCES source_evidence(evidence_hash)"
         in migration
     )
+    assert "research_universe_snapshots_identity_idx" in migration
     assert "research_universe_snapshots_immutable" in migration
     assert "VALUES ('postgres', 23)" in migration

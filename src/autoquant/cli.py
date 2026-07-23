@@ -29,6 +29,7 @@ from autoquant.execution.qmt_session_store import PostgresQmtSessionLeaseReposit
 from autoquant.operations import (
     approve_paper_sma_portfolio_strategy,
     approve_paper_sma_strategy,
+    backfill_research_universe_snapshots,
     complete_qmt_recovery_drill,
     create_portfolio_validation,
     create_research_universe_snapshot,
@@ -853,6 +854,39 @@ def universe_snapshot_create(
         )
     except (AutoQuantError, LookupError, ValueError):
         _fail("research universe creation failed")
+    _emit(payload)
+
+
+@app.command("universe-snapshot-backfill")
+def universe_snapshot_backfill(
+    start_month: Annotated[str, typer.Option("--start-month")],
+    end_month: Annotated[str, typer.Option("--end-month")],
+    requested_by: Annotated[str, typer.Option("--requested-by")],
+    index_code: Annotated[
+        str,
+        typer.Option("--index-code"),
+    ] = "399300.SZ",
+) -> None:
+    """Backfill up to 12 idempotent month-end universes."""
+
+    try:
+        payload = asyncio.run(
+            backfill_research_universe_snapshots(
+                _settings(),
+                start_month=_parse_date(
+                    start_month,
+                    name="start-month",
+                ),
+                end_month=_parse_date(
+                    end_month,
+                    name="end-month",
+                ),
+                index_code=index_code,
+                requested_by=requested_by,
+            )
+        )
+    except (AutoQuantError, LookupError, ValueError):
+        _fail("research universe backfill failed")
     _emit(payload)
 
 

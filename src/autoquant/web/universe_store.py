@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 from sqlalchemy import text
 from sqlalchemy.engine import RowMapping
@@ -153,6 +153,42 @@ class PostgresResearchUniverseRepository:
                 "research universe listing failed"
             ) from None
         return tuple(_view(row) for row in rows)
+
+    async def find(
+        self,
+        *,
+        policy_hash: str,
+        reference_date: date,
+    ) -> ResearchUniverseSnapshotDetail | None:
+        if re.fullmatch(r"[0-9a-f]{64}", policy_hash) is None:
+            raise ValueError("policy_hash must be SHA-256")
+        try:
+            async with self._engine.connect() as connection:
+                value = (
+                    await connection.execute(
+                        text(
+                            f"""
+                            SELECT snapshot_hash
+                            FROM {self._schema}.research_universe_snapshots
+                            WHERE policy_hash = :policy_hash
+                              AND reference_date = :reference_date
+                            """
+                        ),
+                        {
+                            "policy_hash": policy_hash,
+                            "reference_date": reference_date,
+                        },
+                    )
+                ).scalar_one_or_none()
+        except Exception:
+            raise PersistenceUnavailableError(
+                "research universe identity lookup failed"
+            ) from None
+        return (
+            None
+            if value is None
+            else await self.detail(str(value))
+        )
 
     async def detail(
         self,

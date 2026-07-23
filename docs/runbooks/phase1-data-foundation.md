@@ -330,6 +330,23 @@ canonical 250-350 member snapshot and its audit event. PostgreSQL schema v23
 binds both evidence hashes by foreign key and makes the snapshot append-only.
 The artifact is research-only and cannot unlock live trading.
 
+Backfill at most 12 month-end snapshots per invocation:
+
+```bash
+uv run autoquant universe-snapshot-backfill \
+  --index-code 399300.SZ \
+  --start-month 2025-08-01 \
+  --end-month 2026-07-01 \
+  --requested-by operator
+```
+
+Bounds must be first days of months. The current month is capped at the
+previous Shanghai calendar date, so future planned trading sessions can never
+become research cutoffs. Schema v23 uniquely identifies a snapshot by policy
+hash and reference date; reruns return existing artifacts instead of creating
+new samples with later request timestamps. Completed months remain committed
+if a later month fails, and a rerun safely resumes them.
+
 ```bash
 uv run autoquant approve-paper-sma \
   --experiment-id <completed-experiment-uuid> \

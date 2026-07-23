@@ -14,12 +14,36 @@ from autoquant.data.daily_ingestion import ValidatedDailyDataset
 from autoquant.data.daily_models import DailyCoverageEvidence
 from autoquant.errors import MissingCapabilityError
 from autoquant.operations import (
+    _month_intervals,
     _validate_campaign_dataset,
     approve_paper_sma_strategy,
     revoke_paper_strategy,
 )
 
 NOW = datetime(2026, 7, 23, 8, tzinfo=UTC)
+
+
+def test_universe_backfill_months_are_bounded_and_exact() -> None:
+    values = _month_intervals(
+        date(2025, 12, 1),
+        date(2026, 2, 1),
+    )
+
+    assert values == (
+        (date(2025, 12, 1), date(2025, 12, 31)),
+        (date(2026, 1, 1), date(2026, 1, 31)),
+        (date(2026, 2, 1), date(2026, 2, 28)),
+    )
+    with pytest.raises(ValueError, match="12 months"):
+        _month_intervals(
+            date(2025, 1, 1),
+            date(2026, 1, 1),
+        )
+    with pytest.raises(ValueError, match="first days"):
+        _month_intervals(
+            date(2026, 1, 2),
+            date(2026, 2, 1),
+        )
 
 
 def test_validation_campaign_dataset_requires_aligned_history() -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import calendar
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID, uuid4
@@ -100,6 +101,7 @@ from autoquant.execution.validated_sma_portfolio import (
 from autoquant.web.models import (
     PortfolioValidationExperiment,
     PortfolioWalkForwardJobRequest,
+    ResearchUniverseSnapshotView,
 )
 from autoquant.web.portfolio_validation_store import (
     PostgresPortfolioValidationRepository,
@@ -223,22 +225,30 @@ async def create_research_universe_snapshot(
         repository = PostgresResearchUniverseRepository.connect(
             dsn=dsn
         )
+        policy = PointInTimeUniversePolicy(
+            index_code=index_code,
+            minimum_members=250,
+            maximum_members=350,
+            minimum_turnover_rate_f=minimum_turnover_rate_f,
+            minimum_circulating_market_value=(
+                minimum_circulating_market_value
+            ),
+        )
+        existing = await repository.find(
+            policy_hash=policy.policy_hash,
+            reference_date=reference_date,
+        )
+        if existing is not None:
+            return _research_universe_payload(
+                existing.snapshot,
+                status="existing",
+            )
         batch = await source.fetch_index_universe(
             index_code=index_code,
             reference_date=reference_date,
         )
         snapshot = build_point_in_time_universe(
-            policy=PointInTimeUniversePolicy(
-                index_code=index_code,
-                minimum_members=250,
-                maximum_members=350,
-                minimum_turnover_rate_f=(
-                    minimum_turnover_rate_f
-                ),
-                minimum_circulating_market_value=(
-                    minimum_circulating_market_value
-                ),
-            ),
+            policy=policy,
             reference_date=reference_date,
             constituents=batch.constituents,
             liquidity=batch.liquidity,
@@ -263,26 +273,10 @@ async def create_research_universe_snapshot(
                 },
             )
         detail = await repository.detail(snapshot.snapshot_hash)
-        return {
-            "index_constituent_date": (
-                detail.snapshot.index_constituent_date.isoformat()
-            ),
-            "index_code": detail.snapshot.index_code,
-            "knowledge_as_of": (
-                detail.snapshot.knowledge_as_of.isoformat()
-            ),
-            "liquidity_date": (
-                detail.snapshot.liquidity_date.isoformat()
-            ),
-            "live_trading_locked": True,
-            "member_count": detail.snapshot.member_count,
-            "policy_hash": detail.snapshot.policy_hash,
-            "reference_date": (
-                detail.snapshot.reference_date.isoformat()
-            ),
-            "snapshot_hash": detail.snapshot.snapshot_hash,
-            "status": "created",
-        }
+        return _research_universe_payload(
+            detail.snapshot,
+            status="created",
+        )
     finally:
         if repository is not None:
             await repository.close()
@@ -290,6 +284,161 @@ async def create_research_universe_snapshot(
             await control.close()
         if source is not None:
             await source.close()
+
+
+def _research_universe_payload(
+    snapshot: ResearchUniverseSnapshotView,
+    *,
+    status: str,
+) -> dict[str, object]:
+    return {
+        "index_constituent_date": (
+            snapshot.index_constituent_date.isoformat()
+        ),
+        "index_code": snapshot.index_code,
+        "knowledge_as_of": snapshot.knowledge_as_of.isoformat(),
+        "liquidity_date": snapshot.liquidity_date.isoformat(),
+        "live_trading_locked": True,
+        "member_count": snapshot.member_count,
+        "policy_hash": snapshot.policy_hash,
+        "reference_date": snapshot.reference_date.isoformat(),
+        "snapshot_hash": snapshot.snapshot_hash,
+        "status": status,
+    }
+
+
+async def backfill_research_universe_snapshots(
+    settings: AppSettings,
+    *,
+    start_month: date,
+    end_month: date,
+    index_code: str,
+    requested_by: str,
+) -> dict[str, object]:
+    if settings.live_trading_enabled:
+        raise MissingCapabilityError(
+            "research universe backfill requires live trading locked"
+        )
+    if (
+        not requested_by.strip()
+        or requested_by != requested_by.strip()
+        or len(requested_by) > 128
+    ):
+        raise ValueError(
+            "requested_by must contain 1-128 trimmed characters"
+        )
+    months = _month_intervals(start_month, end_month)
+    source = tushare_source(settings)
+    control = PostgresControlRepository.connect(
+        dsn=configured_dsn(
+            settings.postgres_dsn,
+            capability="PostgreSQL",
+        )
+    )
+    results: list[dict[str, object]] = []
+    safe_reference_cutoff = (
+        to_shanghai(datetime.now(UTC)).date()
+        - timedelta(days=1)
+    )
+    try:
+        for month_start, month_end in months:
+            bounded_end = min(month_end, safe_reference_cutoff)
+            if month_start > bounded_end:
+                raise ValueError(
+                    "universe backfill cannot include a future month"
+                )
+            calendar_batch = await source.fetch_trading_calendar(
+                month_start,
+                bounded_end,
+            )
+            open_dates = tuple(
+                value.session_date
+                for value in calendar_batch.sessions
+                if value.is_open
+            )
+            if not open_dates:
+                raise ValueError(
+                    "universe backfill month contains no open session"
+                )
+            await control.save_source_evidence(
+                calendar_batch.source_evidence[0]
+            )
+            results.append(
+                await create_research_universe_snapshot(
+                    settings,
+                    index_code=index_code,
+                    reference_date=max(open_dates),
+                    minimum_turnover_rate_f=Decimal("0"),
+                    minimum_circulating_market_value=Decimal("0"),
+                    requested_by=requested_by,
+                )
+            )
+        await control.append_audit_event(
+            "research.universe.backfill.completed",
+            datetime.now(UTC),
+            {
+                "index_code": index_code,
+                "month_count": len(months),
+                "requested_by": requested_by,
+                "snapshot_hashes": [
+                    str(value["snapshot_hash"])
+                    for value in results
+                ],
+            },
+        )
+        return {
+            "created_count": sum(
+                value["status"] == "created" for value in results
+            ),
+            "existing_count": sum(
+                value["status"] == "existing" for value in results
+            ),
+            "live_trading_locked": True,
+            "month_count": len(months),
+            "snapshot_hashes": [
+                str(value["snapshot_hash"]) for value in results
+            ],
+            "status": "completed",
+        }
+    finally:
+        await control.close()
+        await source.close()
+
+
+def _month_intervals(
+    start_month: date,
+    end_month: date,
+) -> tuple[tuple[date, date], ...]:
+    start = start_month.replace(day=1)
+    end = end_month.replace(day=1)
+    if (
+        start_month != start
+        or end_month != end
+        or start > end
+    ):
+        raise ValueError(
+            "backfill bounds must be ordered first days of months"
+        )
+    values: list[tuple[date, date]] = []
+    current = start
+    while current <= end:
+        last_day = calendar.monthrange(
+            current.year,
+            current.month,
+        )[1]
+        values.append(
+            (current, current.replace(day=last_day))
+        )
+        current = (
+            date(current.year + 1, 1, 1)
+            if current.month == 12
+            else date(current.year, current.month + 1, 1)
+        )
+    if len(values) > 12:
+        raise ValueError(
+            "one universe backfill cannot exceed 12 months"
+        )
+    return tuple(values)
 
 
 async def create_validation_campaign(

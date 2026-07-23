@@ -34,6 +34,10 @@ CREATE INDEX IF NOT EXISTS research_universe_snapshots_date_idx
 ON research_universe_snapshots
     (index_code, reference_date DESC, knowledge_as_of DESC);
 
+CREATE UNIQUE INDEX IF NOT EXISTS
+    research_universe_snapshots_identity_idx
+ON research_universe_snapshots (policy_hash, reference_date);
+
 DO $create_research_universe_immutable$
 BEGIN
     IF NOT EXISTS (
