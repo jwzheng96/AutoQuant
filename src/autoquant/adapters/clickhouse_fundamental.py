@@ -28,6 +28,8 @@ _QUERY_SETTINGS: dict[str, int] = {
     "max_block_size": 1_024,
     "max_bytes_before_external_group_by": 32 * 1024 * 1024,
     "max_threads": 1,
+    "optimize_aggregation_in_order": 1,
+    "use_query_condition_cache": 0,
 }
 _VALUATION_NAMESPACE = UUID("86d71ad9-ee26-433a-ac34-f2e20cf566f7")
 _INDICATOR_NAMESPACE = UUID("aeb42b50-2df1-453c-8ec2-b48d7b5a1180")

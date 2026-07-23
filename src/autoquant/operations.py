@@ -1708,11 +1708,13 @@ async def compile_fundamental_research_panel(
                 capability="ClickHouse",
             ),
             control_repository=control,
+            recycle_after=1,
         )
         daily_shards = ValidatedResearchDatasetReader(
             plan=plan,
             manifest_reader=control,
             dataset_reader=daily_reader,
+            retry_delay_seconds=2,
         )
         daily_panel = await DynamicMarketPanelCompiler(
             shard_reader=daily_shards,
