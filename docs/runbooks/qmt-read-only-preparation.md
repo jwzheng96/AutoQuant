@@ -41,8 +41,9 @@ uv run autoquant qmt-check
 ```
 
 `qmt-check` 输出十项 `pass`/`blocked`，但 `live_trading_ready` 永远为 `false`，也不会
-连接 MiniQMT。当前 CLI 尚未连接跨进程会话注册表，因此 `session_id_unique` 会诚实地
-保持 `blocked`；只有后续受管网关向预检提供活动会话集合时，整体就绪状态才可能通过。
+连接 MiniQMT。`session_id_unique` 来自 schema v12 的跨进程活动租约查询；数据库不可用、
+未迁移或相同会话号已有有效租约时保持 `blocked`。实际网关连接前仍必须原子获取租约，
+预检本身不占用会话号。
 
 ## 失败处理
 

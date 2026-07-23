@@ -80,6 +80,12 @@ without importing XtQuant or connecting to MiniQMT. Submit and cancel methods st
 release-lock error unconditionally; this is preparation for read-only reconciliation, not a
 live gateway.
 
+PostgreSQL schema v12 adds a cross-process QMT session lease with advisory-lock serialization,
+short bounded heartbeats, hashed bearer tokens, fencing generations, and immutable acquire/release
+events. The readiness command now checks the durable active-session registry, while the future
+Windows adapter must still acquire and continuously renew its lease before connecting. Expiry or
+token mismatch fails closed and never changes the live-order release lock.
+
 All dependency, test, lint, type-check, migration, and Git mutation commands for this
 checkout must run on `rlocal`; see [the phase-1 runbook](docs/runbooks/phase1-data-foundation.md).
 

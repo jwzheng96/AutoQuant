@@ -32,3 +32,11 @@ class LiveTradingLockedError(AutoQuantError):
 
 class BrokerStateUnknownError(AutoQuantError):
     """A broker response could not prove a known account or order state."""
+
+
+class QmtSessionConflictError(AutoQuantError):
+    """A QMT session identifier is leased by another active adapter."""
+
+
+class QmtSessionLeaseLostError(AutoQuantError):
+    """A QMT adapter no longer owns its durable session lease."""

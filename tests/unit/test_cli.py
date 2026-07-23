@@ -265,7 +265,8 @@ def test_web_console_starts_only_on_configured_loopback() -> None:
 
 def test_qmt_check_is_read_only_blocked_and_does_not_emit_configuration() -> None:
     with patch(
-        "autoquant.cli._qmt_kill_switch_active", new=AsyncMock(return_value=True)
+        "autoquant.cli._qmt_preflight_db_state",
+        new=AsyncMock(return_value=(True, ())),
     ):
         result = runner.invoke(
             app,

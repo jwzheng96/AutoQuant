@@ -152,6 +152,12 @@ persisted internal snapshots; callers cannot supply those three risk metrics. Un
 initializer and scheduler exist, a missing daily state intentionally activates the kill switch
 and aborts submission.
 
+Schema v12 persists bounded QMT session leases so two gateway processes cannot claim the same
+XtQuant `session_id`. Acquisition is serialized in PostgreSQL; only a hash of the process-local
+bearer token is stored. Renewals require an unexpired matching lease, while acquire/release
+transitions are immutable audit events. This table is preparation for a Windows read-only
+gateway and does not enable broker mutations.
+
 The internal `PaperSessionInitializer` accepts only `pre_open`, requires a reconciled broker and
 internal snapshot plus zero current-session fill turnover, and freezes the opening state
 idempotently. It is not a manual bypass: no CLI or Web route exposes it, and production still

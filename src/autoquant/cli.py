@@ -21,6 +21,7 @@ from autoquant.data.quality import MinuteBarQualityGate
 from autoquant.errors import AutoQuantError, MissingCapabilityError
 from autoquant.execution.control_store import PostgresExecutionControlRepository
 from autoquant.execution.qmt_preflight import inspect_qmt_readiness
+from autoquant.execution.qmt_session_store import PostgresQmtSessionLeaseRepository
 from autoquant.operations import run_daily_ingestion, tushare_source
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
@@ -228,15 +229,17 @@ def db_check() -> None:
     _emit({"clickhouse": "ok", "postgres": "ok", "status": "ok"})
 
 
-async def _qmt_kill_switch_active(settings: AppSettings) -> bool:
-    repository = PostgresExecutionControlRepository.connect(
-        dsn=_require_dsn(settings.postgres_dsn, capability="PostgreSQL")
-    )
+async def _qmt_preflight_db_state(settings: AppSettings) -> tuple[bool, tuple[int, ...]]:
+    dsn = _require_dsn(settings.postgres_dsn, capability="PostgreSQL")
+    controls = PostgresExecutionControlRepository.connect(dsn=dsn)
+    sessions = PostgresQmtSessionLeaseRepository.connect(dsn=dsn)
     try:
-        control = await repository.replay(account_id=settings.paper_account_id)
-        return control.active
+        control = await controls.replay(account_id=settings.paper_account_id)
+        active_session_ids = await sessions.active_session_ids(now=datetime.now(UTC))
+        return control.active, active_session_ids
     finally:
-        await repository.close()
+        await controls.close()
+        await sessions.close()
 
 
 @app.command("qmt-check")
@@ -245,14 +248,16 @@ def qmt_check() -> None:
 
     settings = _settings()
     try:
-        kill_switch_active: bool | None = asyncio.run(
-            _qmt_kill_switch_active(settings)
+        kill_switch_active, active_session_ids = asyncio.run(
+            _qmt_preflight_db_state(settings)
         )
     except (AutoQuantError, LookupError, ValueError):
         kill_switch_active = None
+        active_session_ids = None
     report = inspect_qmt_readiness(
         settings,
         kill_switch_active=kill_switch_active,
+        active_session_ids=active_session_ids,
     )
     _emit(
         {
