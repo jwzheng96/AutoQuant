@@ -53,6 +53,13 @@ the durable kill switch inside the broker transaction, and closes callback gaps 
 It is not connected to a trusted session-risk-state source, continuous quote adapter, API or
 scheduling loop, so paper submission remains unavailable from the console.
 
+PostgreSQL schema v11 removes caller-supplied daily risk metrics. A paper session must be
+initialized from a persisted opening account snapshot before its first fill; peak equity and
+cumulative turnover then advance only from hash-verified snapshots and immutable fill deltas.
+The coordinator refuses to create a decision or order when that daily state is missing. A
+pre-market initializer and continuous scheduler are still required before the paper gateway can
+be exposed.
+
 All dependency, test, lint, type-check, migration, and Git mutation commands for this
 checkout must run on `rlocal`; see [the phase-1 runbook](docs/runbooks/phase1-data-foundation.md).
 

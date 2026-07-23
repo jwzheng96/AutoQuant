@@ -145,6 +145,13 @@ switch state hash as a broker-transaction dispatch fence. A trusted session-risk
 continuous quote adapter and scheduler must still be connected before paper submission can be
 exposed.
 
+Schema v11 persists a hash-chained paper-session risk state. It must be initialized from a
+persisted, reconciled opening snapshot before any fill for that Shanghai session. The coordinator
+derives cumulative turnover from immutable cumulative-fill deltas and advances peak equity from
+persisted internal snapshots; callers cannot supply those three risk metrics. Until a pre-market
+initializer and scheduler exist, a missing daily state intentionally activates the kill switch
+and aborts submission.
+
 ## Research execution boundary
 
 `autoquant.backtest` provides the deterministic cash-account ledger used by the research

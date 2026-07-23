@@ -400,7 +400,7 @@ class ConsoleService:
                 recent_decisions=(),
                 remaining_gates=(
                     "risk_audit_store",
-                    "trusted_session_risk_state",
+                    "session_risk_daily_initializer",
                     "quote_gateway",
                     "reconciliation_loop",
                     "kill_switch_drill",
@@ -416,7 +416,7 @@ class ConsoleService:
             decision_count=count,
             recent_decisions=recent,
             remaining_gates=(
-                "trusted_session_risk_state",
+                "session_risk_daily_initializer",
                 "quote_gateway",
                 "reconciliation_loop",
                 "kill_switch_drill",
@@ -488,7 +488,7 @@ class ConsoleService:
                 0 if broker_summary is None else broker_summary.fact_count
             ),
             remaining_gates=(
-                "trusted_session_risk_state",
+                "session_risk_daily_initializer",
                 "continuous_quote_source",
                 "coordinator_scheduler",
                 "restart_recovery_drill",

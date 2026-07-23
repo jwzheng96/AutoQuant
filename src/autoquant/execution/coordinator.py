@@ -6,6 +6,7 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Protocol
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from autoquant.backtest.models import InstrumentRules
 from autoquant.clock import to_utc
@@ -16,6 +17,7 @@ from autoquant.execution.control_store import PostgresExecutionControlRepository
 from autoquant.execution.models import (
     ApprovedPaperOrder,
     BrokerOrderUpdate,
+    PaperOrderHistory,
     PaperOrderProjection,
     PaperOrderState,
 )
@@ -23,6 +25,14 @@ from autoquant.execution.reconciliation import (
     AccountReconciler,
     ExecutionAccountSnapshot,
     ReconciliationReport,
+)
+from autoquant.execution.session_risk import (
+    PaperSessionRiskState,
+    SessionRiskObservation,
+    derive_session_turnover,
+)
+from autoquant.execution.session_risk_store import (
+    PostgresPaperSessionRiskRepository,
 )
 from autoquant.execution.simulated_broker import (
     PersistentSimulatedBroker,
@@ -41,6 +51,8 @@ from autoquant.risk.models import (
     RiskPolicy,
     RiskPosition,
 )
+
+_SHANGHAI = ZoneInfo("Asia/Shanghai")
 
 
 class StoredRiskDecision(Protocol):
@@ -64,9 +76,6 @@ class PaperSubmissionRequest:
     rules: InstrumentRules
     policy: RiskPolicy
     marks: dict[str, Decimal]
-    day_start_equity: Decimal
-    peak_equity: Decimal
-    daily_turnover: Decimal
     now: datetime
 
     def __post_init__(self) -> None:
@@ -79,15 +88,6 @@ class PaperSubmissionRequest:
         object.__setattr__(self, "marks", marks)
         if marks.get(self.order.instrument) != self.quote.last_price:
             raise ValueError("order instrument mark must equal the submitted quote last price")
-        for name, value in (
-            ("day_start_equity", self.day_start_equity),
-            ("peak_equity", self.peak_equity),
-            ("daily_turnover", self.daily_turnover),
-        ):
-            if not isinstance(value, Decimal) or not value.is_finite() or value < 0:
-                raise ValueError(f"{name} must be a nonnegative finite Decimal")
-        if self.day_start_equity == 0 or self.peak_equity == 0:
-            raise ValueError("equity references must be positive")
         object.__setattr__(self, "now", to_utc(self.now, name="coordination time"))
 
 
@@ -114,6 +114,7 @@ class PaperCoordinationResult:
 @dataclass(frozen=True, slots=True)
 class _AccountEvidence:
     snapshot: ExecutionAccountSnapshot
+    histories: tuple[PaperOrderHistory, ...]
     seen_client_order_ids: tuple[str, ...]
 
 
@@ -129,6 +130,7 @@ class PaperOrderCoordinator:
         executions: PostgresPaperExecutionRepository,
         controls: PostgresExecutionControlRepository,
         broker: PersistentSimulatedBroker,
+        sessions: PostgresPaperSessionRiskRepository,
         projector: PaperAccountProjector | None = None,
         reconciler: AccountReconciler | None = None,
         risk_engine: PreTradeRiskEngine | None = None,
@@ -147,6 +149,7 @@ class PaperOrderCoordinator:
         self._executions = executions
         self._controls = controls
         self._broker = broker
+        self._sessions = sessions
         self._projector = projector or PaperAccountProjector()
         self._reconciler = reconciler or AccountReconciler()
         self._risk_engine = risk_engine or PreTradeRiskEngine()
@@ -192,9 +195,11 @@ class PaperOrderCoordinator:
             now=request.now,
         )
         control = await self._guard_reconciliation(pre_report, now=request.now)
+        session = await self._observe_session(evidence=evidence, now=request.now)
         account = self._risk_account(
             request=request,
             evidence=evidence,
+            session=session,
             reconciled=pre_report.reconciled,
             control=control,
         )
@@ -252,7 +257,8 @@ class PaperOrderCoordinator:
             updates=updates,
             now=request.now,
         )
-        post_report, _ = await self._reconcile(marks=request.marks, now=request.now)
+        post_report, post_evidence = await self._reconcile(marks=request.marks, now=request.now)
+        await self._observe_session(evidence=post_evidence, now=request.now)
         control = await self._guard_reconciliation(post_report, now=request.now)
         return PaperCoordinationResult(
             status=(
@@ -328,7 +334,8 @@ class PaperOrderCoordinator:
             updates=updates,
             now=request.now,
         )
-        post_report, _ = await self._reconcile(marks=request.marks, now=request.now)
+        post_report, post_evidence = await self._reconcile(marks=request.marks, now=request.now)
+        await self._observe_session(evidence=post_evidence, now=request.now)
         control = await self._guard_reconciliation(post_report, now=request.now)
         return PaperCoordinationResult(
             status=(
@@ -353,10 +360,11 @@ class PaperOrderCoordinator:
         decision: RiskDecision | None,
         pre_report: ReconciliationReport | None,
     ) -> PaperCoordinationResult:
-        report, _ = await self._reconcile(
+        report, evidence = await self._reconcile(
             marks=request.marks,
             now=request.now,
         )
+        await self._observe_session(evidence=evidence, now=request.now)
         if not control.active:
             control = await self._controls.activate(
                 account_id=self._account_id,
@@ -444,6 +452,7 @@ class PaperOrderCoordinator:
         )
         return report, _AccountEvidence(
             snapshot=internal,
+            histories=internal_histories,
             seen_client_order_ids=tuple(
                 history.order.client_order_id for history in internal_histories
             ),
@@ -471,6 +480,7 @@ class PaperOrderCoordinator:
         *,
         request: PaperSubmissionRequest,
         evidence: _AccountEvidence,
+        session: PaperSessionRiskState,
         reconciled: bool,
         control: KillSwitchControl,
     ) -> RiskAccountState:
@@ -490,16 +500,41 @@ class PaperOrderCoordinator:
             as_of=snapshot.as_of,
             cash=snapshot.cash,
             equity=snapshot.equity,
-            day_start_equity=request.day_start_equity,
-            peak_equity=request.peak_equity,
+            day_start_equity=session.day_start_equity,
+            peak_equity=session.peak_equity,
             gross_exposure=gross_exposure,
-            daily_turnover=request.daily_turnover,
+            daily_turnover=session.cumulative_turnover,
             open_order_count=len(snapshot.open_client_order_ids),
             reconciled=reconciled,
             kill_switch=control.active,
             positions=positions,
             seen_client_order_ids=evidence.seen_client_order_ids,
         )
+
+    async def _observe_session(
+        self, *, evidence: _AccountEvidence, now: datetime
+    ) -> PaperSessionRiskState:
+        session_date = now.astimezone(_SHANGHAI).date()
+        turnover = derive_session_turnover(
+            account_id=self._account_id,
+            session_date=session_date,
+            histories=evidence.histories,
+        )
+        observation = SessionRiskObservation(
+            account_id=self._account_id,
+            session_date=session_date,
+            as_of=evidence.snapshot.as_of,
+            equity=evidence.snapshot.equity,
+            cumulative_turnover=turnover.cumulative_turnover,
+            snapshot_hash=evidence.snapshot.snapshot_hash,
+            turnover_evidence_hash=turnover.evidence_hash,
+        )
+        try:
+            return await self._sessions.observe(observation)
+        except LookupError:
+            raise PersistenceUnavailableError(
+                "Paper session risk state is not initialized"
+            ) from None
 
     def _dispatch_still_safe(
         self,

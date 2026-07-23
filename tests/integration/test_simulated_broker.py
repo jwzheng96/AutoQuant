@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from autoquant.adapters.postgres import PostgresControlRepository
 from autoquant.backtest.models import OrderSide
 from autoquant.backtest.rules import AshareRuleBook, SecurityStatus
+from autoquant.errors import PersistenceUnavailableError
 from autoquant.execution.account_projection import PaperAccountProjector
 from autoquant.execution.control import KillSwitchReason
 from autoquant.execution.control_store import PostgresExecutionControlRepository
@@ -29,6 +30,13 @@ from autoquant.execution.models import ApprovedPaperOrder, PaperOrderState
 from autoquant.execution.reconciliation import (
     AccountReconciler,
     ReconciliationCode,
+)
+from autoquant.execution.session_risk import (
+    SessionRiskObservation,
+    derive_session_turnover,
+)
+from autoquant.execution.session_risk_store import (
+    PostgresPaperSessionRiskRepository,
 )
 from autoquant.execution.simulated_broker import (
     PersistentSimulatedBroker,
@@ -57,18 +65,19 @@ pytestmark = [
     ),
 ]
 
+Repositories = tuple[
+    PostgresRiskDecisionRepository,
+    PostgresPaperExecutionRepository,
+    PostgresExecutionControlRepository,
+    PersistentSimulatedBroker,
+    PostgresPaperSessionRiskRepository,
+    AsyncEngine,
+    str,
+]
+
 
 @pytest_asyncio.fixture
-async def repositories() -> AsyncIterator[
-    tuple[
-        PostgresRiskDecisionRepository,
-        PostgresPaperExecutionRepository,
-        PostgresExecutionControlRepository,
-        PersistentSimulatedBroker,
-        AsyncEngine,
-        str,
-    ]
-]:
+async def repositories() -> AsyncIterator[Repositories]:
     schema = f"autoquant_test_{uuid4().hex}"
     engine = create_async_engine(POSTGRES_DSN, pool_pre_ping=True)
     control = PostgresControlRepository(engine=engine, schema=schema)
@@ -76,6 +85,7 @@ async def repositories() -> AsyncIterator[
     executions = PostgresPaperExecutionRepository(engine=engine, schema=schema)
     controls = PostgresExecutionControlRepository(engine=engine, schema=schema)
     broker = PersistentSimulatedBroker(engine=engine, schema=schema)
+    sessions = PostgresPaperSessionRiskRepository(engine=engine, schema=schema)
     migration = "\n".join(
         Path(path).read_text(encoding="utf-8")
         for path in (
@@ -84,11 +94,12 @@ async def repositories() -> AsyncIterator[
             "migrations/postgres/008_paper_execution.sql",
             "migrations/postgres/009_execution_controls.sql",
             "migrations/postgres/010_simulated_broker.sql",
+            "migrations/postgres/011_paper_session_risk.sql",
         )
     )
     try:
         await control.initialize(migration)
-        yield risks, executions, controls, broker, engine, schema
+        yield risks, executions, controls, broker, sessions, engine, schema
     finally:
         try:
             await control.drop_test_schema()
@@ -184,18 +195,15 @@ def _submission_request(
         ),
         policy=policy or RiskPolicy(allowed_instruments=(INSTRUMENT,)),
         marks={INSTRUMENT: Decimal("10")},
-        day_start_equity=Decimal("100000"),
-        peak_equity=Decimal("100000"),
-        daily_turnover=Decimal("0"),
         now=now,
     )
 
 
-async def _reset_kill_switch(
+async def _initialize_session(
     *,
     executions: PostgresPaperExecutionRepository,
-    controls: PostgresExecutionControlRepository,
-) -> None:
+    sessions: PostgresPaperSessionRiskRepository,
+) -> str:
     snapshot = PaperAccountProjector().project(
         account_id="paper-main",
         initial_cash=Decimal("100000"),
@@ -213,6 +221,35 @@ async def _reset_kill_switch(
         broker=snapshot,
         report=report,
     )
+    turnover = derive_session_turnover(
+        account_id="paper-main",
+        session_date=date(2026, 7, 22),
+        histories=(),
+    )
+    await sessions.initialize(
+        SessionRiskObservation(
+            account_id="paper-main",
+            session_date=date(2026, 7, 22),
+            as_of=NOW,
+            equity=snapshot.equity,
+            cumulative_turnover=turnover.cumulative_turnover,
+            snapshot_hash=snapshot.snapshot_hash,
+            turnover_evidence_hash=turnover.evidence_hash,
+        )
+    )
+    return report.report_hash
+
+
+async def _reset_kill_switch(
+    *,
+    executions: PostgresPaperExecutionRepository,
+    controls: PostgresExecutionControlRepository,
+    sessions: PostgresPaperSessionRiskRepository,
+) -> None:
+    report_hash = await _initialize_session(
+        executions=executions,
+        sessions=sessions,
+    )
     active = await controls.ensure_fail_closed(account_id="paper-main", now=NOW)
     await controls.reset(
         account_id="paper-main",
@@ -220,23 +257,16 @@ async def _reset_kill_switch(
         actor="integration-test",
         now=NOW,
         expected_version=active.version,
-        reconciliation_report_hash=report.report_hash,
+        reconciliation_report_hash=report_hash,
         recovery_verified=True,
     )
 
 
 @pytest.mark.asyncio
 async def test_simulated_broker_is_persistent_idempotent_and_independently_replayable(
-    repositories: tuple[
-        PostgresRiskDecisionRepository,
-        PostgresPaperExecutionRepository,
-        PostgresExecutionControlRepository,
-        PersistentSimulatedBroker,
-        AsyncEngine,
-        str,
-    ],
+    repositories: Repositories,
 ) -> None:
-    risks, executions, _, broker, engine, schema = repositories
+    risks, executions, _, broker, _, engine, schema = repositories
     order = await _persist_order(
         risks,
         executions,
@@ -310,16 +340,9 @@ async def test_simulated_broker_is_persistent_idempotent_and_independently_repla
 
 @pytest.mark.asyncio
 async def test_independent_account_projections_detect_and_close_callback_gap(
-    repositories: tuple[
-        PostgresRiskDecisionRepository,
-        PostgresPaperExecutionRepository,
-        PostgresExecutionControlRepository,
-        PersistentSimulatedBroker,
-        AsyncEngine,
-        str,
-    ],
+    repositories: Repositories,
 ) -> None:
-    risks, executions, _, broker, _, _ = repositories
+    risks, executions, _, broker, _, _, _ = repositories
     order = await _persist_order(
         risks,
         executions,
@@ -391,16 +414,9 @@ async def test_independent_account_projections_detect_and_close_callback_gap(
 
 @pytest.mark.asyncio
 async def test_simulated_broker_requires_an_unchanged_inactive_control_fence(
-    repositories: tuple[
-        PostgresRiskDecisionRepository,
-        PostgresPaperExecutionRepository,
-        PostgresExecutionControlRepository,
-        PersistentSimulatedBroker,
-        AsyncEngine,
-        str,
-    ],
+    repositories: Repositories,
 ) -> None:
-    risks, executions, controls, broker, _, _ = repositories
+    risks, executions, controls, broker, _, _, _ = repositories
     order = await _persist_order(
         risks,
         executions,
@@ -421,17 +437,14 @@ async def test_simulated_broker_requires_an_unchanged_inactive_control_fence(
 
 @pytest.mark.asyncio
 async def test_coordinator_runs_risk_submission_callback_and_reconciliation_idempotently(
-    repositories: tuple[
-        PostgresRiskDecisionRepository,
-        PostgresPaperExecutionRepository,
-        PostgresExecutionControlRepository,
-        PersistentSimulatedBroker,
-        AsyncEngine,
-        str,
-    ],
+    repositories: Repositories,
 ) -> None:
-    risks, executions, controls, broker, engine, schema = repositories
-    await _reset_kill_switch(executions=executions, controls=controls)
+    risks, executions, controls, broker, sessions, engine, schema = repositories
+    await _reset_kill_switch(
+        executions=executions,
+        controls=controls,
+        sessions=sessions,
+    )
     coordinator = PaperOrderCoordinator(
         account_id="paper-main",
         initial_cash=Decimal("100000"),
@@ -439,6 +452,7 @@ async def test_coordinator_runs_risk_submission_callback_and_reconciliation_idem
         executions=executions,
         controls=controls,
         broker=broker,
+        sessions=sessions,
     )
     request = _submission_request(order_id="coordinated-market-order-0001")
 
@@ -460,6 +474,21 @@ async def test_coordinator_runs_risk_submission_callback_and_reconciliation_idem
     assert repeated.projection == first.projection
     assert repeated.post_reconciliation is not None
     assert repeated.post_reconciliation.reconciled is True
+    session = await sessions.replay(
+        account_id="paper-main",
+        session_date=date(2026, 7, 22),
+    )
+    assert session.day_start_equity == Decimal("100000")
+    assert session.peak_equity == Decimal("100000")
+    assert session.cumulative_turnover == Decimal("1001.00")
+    with pytest.raises(DBAPIError):
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    f"UPDATE {schema}.paper_session_risk_events "
+                    "SET observation_payload = '{}'::jsonb"
+                )
+            )
     async with engine.connect() as connection:
         counts = (
             (
@@ -483,17 +512,14 @@ async def test_coordinator_runs_risk_submission_callback_and_reconciliation_idem
 
 @pytest.mark.asyncio
 async def test_account_lock_serializes_concurrent_risk_cycles(
-    repositories: tuple[
-        PostgresRiskDecisionRepository,
-        PostgresPaperExecutionRepository,
-        PostgresExecutionControlRepository,
-        PersistentSimulatedBroker,
-        AsyncEngine,
-        str,
-    ],
+    repositories: Repositories,
 ) -> None:
-    risks, executions, controls, broker, _, _ = repositories
-    await _reset_kill_switch(executions=executions, controls=controls)
+    risks, executions, controls, broker, sessions, _, _ = repositories
+    await _reset_kill_switch(
+        executions=executions,
+        controls=controls,
+        sessions=sessions,
+    )
     coordinator = PaperOrderCoordinator(
         account_id="paper-main",
         initial_cash=Decimal("100000"),
@@ -501,6 +527,7 @@ async def test_account_lock_serializes_concurrent_risk_cycles(
         executions=executions,
         controls=controls,
         broker=broker,
+        sessions=sessions,
     )
     policy = RiskPolicy(
         allowed_instruments=(INSTRUMENT,),
@@ -538,20 +565,20 @@ async def test_account_lock_serializes_concurrent_risk_cycles(
     assert (await risks.count()) == 2
     assert (await executions.verify_recovery()).order_count == 1
     assert (await broker.verify_recovery()).order_count == 1
+    assert (
+        await sessions.replay(
+            account_id="paper-main",
+            session_date=date(2026, 7, 22),
+        )
+    ).cumulative_turnover == Decimal("60060.00")
 
 
 @pytest.mark.asyncio
 async def test_coordinator_persists_rejection_while_kill_switch_is_active(
-    repositories: tuple[
-        PostgresRiskDecisionRepository,
-        PostgresPaperExecutionRepository,
-        PostgresExecutionControlRepository,
-        PersistentSimulatedBroker,
-        AsyncEngine,
-        str,
-    ],
+    repositories: Repositories,
 ) -> None:
-    risks, executions, controls, broker, _, _ = repositories
+    risks, executions, controls, broker, sessions, _, _ = repositories
+    await _initialize_session(executions=executions, sessions=sessions)
     active = await controls.ensure_fail_closed(account_id="paper-main", now=NOW)
     coordinator = PaperOrderCoordinator(
         account_id="paper-main",
@@ -560,6 +587,7 @@ async def test_coordinator_persists_rejection_while_kill_switch_is_active(
         executions=executions,
         controls=controls,
         broker=broker,
+        sessions=sessions,
     )
 
     result = await coordinator.submit(
@@ -576,18 +604,42 @@ async def test_coordinator_persists_rejection_while_kill_switch_is_active(
 
 
 @pytest.mark.asyncio
-async def test_coordinator_blocks_stale_unsubmitted_intent_and_activates_kill_switch(
-    repositories: tuple[
-        PostgresRiskDecisionRepository,
-        PostgresPaperExecutionRepository,
-        PostgresExecutionControlRepository,
-        PersistentSimulatedBroker,
-        AsyncEngine,
-        str,
-    ],
+async def test_coordinator_fails_closed_without_preinitialized_session_risk(
+    repositories: Repositories,
 ) -> None:
-    risks, executions, controls, broker, _, _ = repositories
-    await _reset_kill_switch(executions=executions, controls=controls)
+    risks, executions, controls, broker, sessions, _, _ = repositories
+    coordinator = PaperOrderCoordinator(
+        account_id="paper-main",
+        initial_cash=Decimal("100000"),
+        risks=risks,
+        executions=executions,
+        controls=controls,
+        broker=broker,
+        sessions=sessions,
+    )
+
+    with pytest.raises(PersistenceUnavailableError, match="not initialized"):
+        await coordinator.submit(
+            _submission_request(order_id="missing-session-risk-order-0001")
+        )
+
+    control = await controls.get(account_id="paper-main")
+    assert control.active is True
+    assert control.reason is KillSwitchReason.DEPENDENCY_UNAVAILABLE
+    assert await risks.count() == 0
+    assert (await broker.verify_recovery()).order_count == 0
+
+
+@pytest.mark.asyncio
+async def test_coordinator_blocks_stale_unsubmitted_intent_and_activates_kill_switch(
+    repositories: Repositories,
+) -> None:
+    risks, executions, controls, broker, sessions, _, _ = repositories
+    await _reset_kill_switch(
+        executions=executions,
+        controls=controls,
+        sessions=sessions,
+    )
     order = await _persist_order(
         risks,
         executions,
@@ -600,6 +652,7 @@ async def test_coordinator_blocks_stale_unsubmitted_intent_and_activates_kill_sw
         executions=executions,
         controls=controls,
         broker=broker,
+        sessions=sessions,
     )
 
     result = await coordinator.submit(
