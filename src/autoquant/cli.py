@@ -40,6 +40,7 @@ from autoquant.operations import (
     freeze_dynamic_regime_research_spec,
     freeze_dynamic_research_spec,
     freeze_fundamental_research_spec,
+    inspect_fundamental_data_backfill,
     inspect_paper_pre_open,
     inspect_paper_promotion,
     inspect_paper_runtime_readiness,
@@ -51,6 +52,7 @@ from autoquant.operations import (
     revoke_paper_strategy,
     run_daily_ingestion,
     run_dynamic_validation,
+    run_fundamental_data_backfill,
     run_fundamental_ingestion,
     run_qmt_readonly_acceptance,
     run_research_data_campaign,
@@ -1086,6 +1088,57 @@ def fundamental_spec_freeze(
     except (AutoQuantError, LookupError, ValueError):
         _fail("fundamental specification freeze failed")
     _emit(payload)
+
+
+@app.command("fundamental-data-status")
+def fundamental_data_status(
+    spec_hash: Annotated[str, typer.Option("--spec-hash")],
+) -> None:
+    """Inspect resumable v3 fundamental collection progress."""
+
+    try:
+        payload = asyncio.run(
+            inspect_fundamental_data_backfill(
+                _settings(),
+                spec_hash=spec_hash,
+            )
+        )
+    except (AutoQuantError, LookupError, ValueError):
+        _fail("fundamental data status failed")
+    _emit(payload)
+
+
+@app.command("fundamental-data-run")
+def fundamental_data_run(
+    spec_hash: Annotated[str, typer.Option("--spec-hash")],
+    max_items: Annotated[
+        int,
+        typer.Option("--max-items", min=1, max=25),
+    ] = 10,
+    pause_seconds: Annotated[
+        str,
+        typer.Option("--pause-seconds"),
+    ] = "0",
+) -> None:
+    """Run a bounded resumable v3 fundamental-data batch."""
+
+    try:
+        payload = asyncio.run(
+            run_fundamental_data_backfill(
+                _settings(),
+                spec_hash=spec_hash,
+                max_items=max_items,
+                pause_seconds=_parse_decimal(
+                    pause_seconds,
+                    name="pause-seconds",
+                ),
+            )
+        )
+    except (AutoQuantError, LookupError, ValueError):
+        _fail("fundamental data batch failed")
+    _emit(payload)
+    if payload["failed"] != 0:
+        raise typer.Exit(code=2)
 
 
 @app.command("research-input-shard-check")

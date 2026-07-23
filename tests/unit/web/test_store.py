@@ -275,3 +275,16 @@ def test_fundamental_research_migration_is_immutable_and_versioned() -> None:
     assert "dynamic-universe-quality-value-v3" in migration
     assert "live_trading_locked" in migration
     assert "VALUES ('postgres', 28)" in migration
+
+
+def test_fundamental_dataset_migration_binds_verified_shards() -> None:
+    migration = Path(
+        "migrations/postgres/029_fundamental_dataset.sql"
+    ).read_text(encoding="utf-8")
+
+    assert "CREATE TABLE IF NOT EXISTS fundamental_dataset_manifests" in migration
+    assert "CREATE TABLE IF NOT EXISTS fundamental_dataset_manifest_shards" in migration
+    assert "REFERENCES fundamental_research_specs(spec_hash)" in migration
+    assert "REFERENCES dataset_manifests(manifest_hash)" in migration
+    assert "fundamental_dataset_manifest_shards_immutable" in migration
+    assert "VALUES ('postgres', 29)" in migration

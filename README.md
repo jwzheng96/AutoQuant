@@ -9,8 +9,9 @@ local Web operator console, and an audited fixed-strategy backtest queue. It doe
 orders, promise profitability, or enable live trading.
 
 The research data foundation now also stores Tushare `daily_basic` valuation snapshots and
-announcement-dated `fina_indicator` revisions in ClickHouse schema v4. PostgreSQL schema v28
-freezes the independent quality/value v3 hypothesis before full-market collection. Financial
+announcement-dated `fina_indicator` revisions in ClickHouse schema v4. PostgreSQL schemas
+v28-v29 freeze the independent quality/value v3 hypothesis before full-market collection and
+atomically bind its restart-safe per-instrument shard union. Financial
 signals use the next exchange open after `ann_date`, never the report period, and every frozen
 read is bounded by both vendor availability and local ingestion time. The five-factor recipe,
 rebalance cadence, holding count, costs, risk caps, and evidence gates are immutable; this adds a

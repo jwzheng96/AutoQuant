@@ -138,6 +138,9 @@ from autoquant.web.dynamic_research_store import (
 from autoquant.web.dynamic_validation_store import (
     PostgresDynamicValidationRepository,
 )
+from autoquant.web.fundamental_data_store import (
+    PostgresFundamentalDatasetRepository,
+)
 from autoquant.web.fundamental_research_store import (
     PostgresFundamentalResearchSpecRepository,
 )
@@ -1369,6 +1372,238 @@ async def freeze_fundamental_research_spec(
         await fundamentals.close()
         await validations.close()
         await dynamic_specs.close()
+
+
+async def inspect_fundamental_data_backfill(
+    settings: AppSettings,
+    *,
+    spec_hash: str,
+) -> dict[str, object]:
+    dsn = configured_dsn(
+        settings.postgres_dsn,
+        capability="PostgreSQL",
+    )
+    specifications = (
+        PostgresFundamentalResearchSpecRepository.connect(dsn=dsn)
+    )
+    daily_datasets = PostgresResearchDataCampaignRepository.connect(
+        dsn=dsn
+    )
+    fundamentals = PostgresFundamentalDatasetRepository.connect(
+        dsn=dsn
+    )
+    try:
+        spec_record = await specifications.read(spec_hash)
+        daily = await daily_datasets.read_manifest(
+            spec_record.spec.daily_dataset_manifest_hash
+        )
+        if (
+            daily.start_date != spec_record.spec.start_date
+            or daily.end_date != spec_record.spec.end_date
+            or daily.policy_hash
+            != spec_record.spec.universe_policy_hash
+        ):
+            raise ValueError(
+                "fundamental spec daily dataset binding differs"
+            )
+        frozen = await fundamentals.read_for_spec(spec_hash)
+        completed = await fundamentals.completed_shards(
+            instruments=daily.instruments,
+            start_date=spec_record.spec.start_date,
+            end_date=spec_record.spec.end_date,
+        )
+        return {
+            "completed_instruments": len(completed),
+            "dataset_manifest_hash": (
+                None if frozen is None else frozen.manifest_hash
+            ),
+            "live_trading_locked": True,
+            "remaining_instruments": (
+                len(daily.instruments) - len(completed)
+            ),
+            "spec_hash": spec_hash,
+            "status": (
+                "completed"
+                if frozen is not None
+                else "collecting"
+            ),
+            "total_instruments": len(daily.instruments),
+        }
+    finally:
+        await fundamentals.close()
+        await daily_datasets.close()
+        await specifications.close()
+
+
+async def run_fundamental_data_backfill(
+    settings: AppSettings,
+    *,
+    spec_hash: str,
+    max_items: int,
+    pause_seconds: Decimal,
+) -> dict[str, object]:
+    """Resume a bounded v3 data batch from immutable shard manifests."""
+
+    if settings.live_trading_enabled:
+        raise MissingCapabilityError(
+            "fundamental data backfill requires live trading locked"
+        )
+    if max_items < 1 or max_items > 25:
+        raise ValueError("max_items must be between 1 and 25")
+    if pause_seconds < 0 or pause_seconds > Decimal("60"):
+        raise ValueError(
+            "pause_seconds must be between 0 and 60"
+        )
+    dsn = configured_dsn(
+        settings.postgres_dsn,
+        capability="PostgreSQL",
+    )
+    specifications = (
+        PostgresFundamentalResearchSpecRepository.connect(dsn=dsn)
+    )
+    daily_datasets = PostgresResearchDataCampaignRepository.connect(
+        dsn=dsn
+    )
+    fundamentals = PostgresFundamentalDatasetRepository.connect(
+        dsn=dsn
+    )
+    control = PostgresControlRepository.connect(dsn=dsn)
+    source: TushareDailySource | None = None
+    clickhouse: ClickHouseFundamentalRepository | None = None
+    processed = 0
+    completed_now = 0
+    failed = 0
+    try:
+        spec_record = await specifications.read(spec_hash)
+        spec = spec_record.spec
+        daily = await daily_datasets.read_manifest(
+            spec.daily_dataset_manifest_hash
+        )
+        if (
+            daily.start_date != spec.start_date
+            or daily.end_date != spec.end_date
+            or daily.policy_hash != spec.universe_policy_hash
+            or daily.instruments != tuple(sorted(daily.instruments))
+        ):
+            raise ValueError(
+                "fundamental spec daily dataset binding differs"
+            )
+        frozen = await fundamentals.read_for_spec(spec.spec_hash)
+        if frozen is not None:
+            return {
+                "completed_instruments": len(frozen.instruments),
+                "dataset_manifest_hash": frozen.manifest_hash,
+                "failed": 0,
+                "live_trading_locked": True,
+                "processed": 0,
+                "remaining_instruments": 0,
+                "spec_hash": spec.spec_hash,
+                "status": "completed",
+                "total_instruments": len(daily.instruments),
+            }
+        existing = await fundamentals.completed_shards(
+            instruments=daily.instruments,
+            start_date=spec.start_date,
+            end_date=spec.end_date,
+        )
+        completed_instruments = {
+            value.instrument for value in existing
+        }
+        missing = tuple(
+            value
+            for value in daily.instruments
+            if value not in completed_instruments
+        )
+        source = tushare_source(settings)
+        clickhouse = await ClickHouseFundamentalRepository.connect(
+            dsn=configured_dsn(
+                settings.clickhouse_dsn,
+                capability="ClickHouse",
+            ),
+            source="tushare",
+        )
+        service = FundamentalIngestionService(
+            source=source,
+            quality_gate=FundamentalQualityGate(),
+            fundamental_repository=clickhouse,
+            control_repository=control,
+            now=lambda: datetime.now(UTC),
+        )
+        for instrument in missing[:max_items]:
+            processed += 1
+            try:
+                result = await service.run(
+                    FundamentalIngestionRequest(
+                        instruments=(instrument,),
+                        start=spec.start_date,
+                        end=spec.end_date,
+                        as_of=None,
+                        production_complete_requested=True,
+                    )
+                )
+            except AutoQuantError:
+                failed += 1
+            else:
+                if (
+                    result.status == "completed"
+                    and result.manifest_hash is not None
+                ):
+                    completed_now += 1
+                else:
+                    failed += 1
+            if pause_seconds and processed < min(
+                max_items,
+                len(missing),
+            ):
+                await asyncio.sleep(float(pause_seconds))
+        completed = await fundamentals.completed_shards(
+            instruments=daily.instruments,
+            start_date=spec.start_date,
+            end_date=spec.end_date,
+        )
+        dataset = await fundamentals.finalize(
+            spec=spec,
+            instruments=daily.instruments,
+            created_at=datetime.now(UTC),
+        )
+        payload: dict[str, object] = {
+            "completed_instruments": len(completed),
+            "completed_now": completed_now,
+            "dataset_manifest_hash": (
+                None if dataset is None else dataset.manifest_hash
+            ),
+            "failed": failed,
+            "live_trading_locked": True,
+            "processed": processed,
+            "remaining_instruments": (
+                len(daily.instruments) - len(completed)
+            ),
+            "spec_hash": spec.spec_hash,
+            "status": (
+                "completed"
+                if dataset is not None
+                else "collecting"
+            ),
+            "total_instruments": len(daily.instruments),
+        }
+        await control.append_audit_event(
+            "research.fundamental.data.batch",
+            datetime.now(UTC),
+            {
+                **payload,
+                "requested_by": spec_record.requested_by,
+            },
+        )
+        return payload
+    finally:
+        if clickhouse is not None:
+            await clickhouse.client.close()
+        if source is not None:
+            await source.close()
+        await control.close()
+        await fundamentals.close()
+        await daily_datasets.close()
+        await specifications.close()
 
 
 async def inspect_research_input_shard(

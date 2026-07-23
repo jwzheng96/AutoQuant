@@ -37,6 +37,9 @@ from autoquant.web.dynamic_research_store import (
 from autoquant.web.dynamic_validation_store import (
     PostgresDynamicValidationRepository,
 )
+from autoquant.web.fundamental_data_store import (
+    PostgresFundamentalDatasetRepository,
+)
 from autoquant.web.fundamental_research_store import (
     PostgresFundamentalResearchSpecRepository,
 )
@@ -65,6 +68,7 @@ async def repositories() -> AsyncIterator[
         PostgresDynamicResearchSpecRepository,
         PostgresDynamicValidationRepository,
         PostgresFundamentalResearchSpecRepository,
+        PostgresFundamentalDatasetRepository,
     ]
 ]:
     schema = f"autoquant_test_{uuid4().hex}"
@@ -87,6 +91,10 @@ async def repositories() -> AsyncIterator[
             schema=schema,
         )
     )
+    fundamental_data = PostgresFundamentalDatasetRepository.connect(
+        dsn=POSTGRES_DSN,
+        schema=schema,
+    )
     migration = "\n".join(
         Path(path).read_text(encoding="utf-8")
         for path in (
@@ -97,6 +105,7 @@ async def repositories() -> AsyncIterator[
             "migrations/postgres/026_dynamic_validation_evidence.sql",
             "migrations/postgres/027_dynamic_regime_research.sql",
             "migrations/postgres/028_fundamental_research.sql",
+            "migrations/postgres/029_fundamental_dataset.sql",
         )
     )
     try:
@@ -107,8 +116,10 @@ async def repositories() -> AsyncIterator[
             specs,
             validations,
             fundamental_specs,
+            fundamental_data,
         )
     finally:
+        await fundamental_data.close()
         await fundamental_specs.close()
         await validations.close()
         await specs.close()
@@ -124,6 +135,7 @@ async def save_shard_manifest(
     *,
     instrument: str,
     record_hash: str,
+    source: str = "tushare",
 ) -> DatasetManifest:
     report = QualityReport(
         requested_instruments=(instrument,),
@@ -134,7 +146,7 @@ async def save_shard_manifest(
         production_complete=True,
     )
     manifest = DatasetManifest(
-        source="tushare",
+        source=source,
         instruments=(instrument,),
         start_time=START_TIME,
         end_time=END_TIME,
@@ -157,6 +169,7 @@ async def test_campaign_recovers_retries_and_finalizes_verified_shards(
         PostgresDynamicResearchSpecRepository,
         PostgresDynamicValidationRepository,
         PostgresFundamentalResearchSpecRepository,
+        PostgresFundamentalDatasetRepository,
     ],
 ) -> None:
     (
@@ -165,6 +178,7 @@ async def test_campaign_recovers_retries_and_finalizes_verified_shards(
         specs,
         validations,
         fundamental_specs,
+        fundamental_data,
     ) = repositories
     spec = ResearchDataCampaignSpec(
         campaign_key="integration-csi300-history-v1",
@@ -396,6 +410,42 @@ async def test_campaign_recovers_retries_and_finalizes_verified_shards(
     assert (
         await fundamental_specs.read(fundamental_spec.spec_hash)
         == fundamental_record
+    )
+    first_fundamental = await save_shard_manifest(
+        control,
+        instrument="000001.XSHE",
+        record_hash="1" * 64,
+        source="tushare-fundamental",
+    )
+    second_fundamental = await save_shard_manifest(
+        control,
+        instrument="600000.XSHG",
+        record_hash="2" * 64,
+        source="tushare-fundamental",
+    )
+    completed_fundamental = await fundamental_data.completed_shards(
+        instruments=spec.instruments,
+        start_date=spec.start_date,
+        end_date=spec.end_date,
+    )
+    aggregate_fundamental = await fundamental_data.finalize(
+        spec=fundamental_spec,
+        instruments=spec.instruments,
+        created_at=NOW,
+    )
+
+    assert tuple(
+        value.manifest_hash for value in completed_fundamental
+    ) == (
+        first_fundamental.manifest_hash,
+        second_fundamental.manifest_hash,
+    )
+    assert aggregate_fundamental is not None
+    assert (
+        await fundamental_data.read_for_spec(
+            fundamental_spec.spec_hash
+        )
+        == aggregate_fundamental
     )
     with pytest.raises(ValueError, match="already frozen"):
         await specs.freeze(

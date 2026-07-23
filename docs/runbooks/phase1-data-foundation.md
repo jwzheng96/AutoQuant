@@ -46,6 +46,7 @@ Apply `migrations/postgres/001_phase1.sql`,
 `migrations/postgres/026_dynamic_validation_evidence.sql`, then
 `migrations/postgres/027_dynamic_regime_research.sql`, then
 `migrations/postgres/028_fundamental_research.sql`, then
+`migrations/postgres/029_fundamental_dataset.sql`, then
 `migrations/clickhouse/001_phase1.sql` and
 `migrations/clickhouse/002_tushare_daily.sql` and
 `migrations/clickhouse/003_daily_coverage.sql` and
@@ -644,3 +645,21 @@ signal lag, and the existing conservative risk/evidence gates. There is no candi
 search. Do not change those values after inspecting outcomes; a different hypothesis requires a
 new version and a new independent test. Fundamental ingestion and even a passing backtest do not
 unlock real trading.
+
+Full-universe collection is bounded and restart-safe. Each successful instrument is first
+frozen as its own production-complete generic manifest. Schema v29 indexes the exact shard union
+only after every instrument in the predecessor daily dataset is present:
+
+```bash
+uv run autoquant fundamental-data-status \
+  --spec-hash <frozen-v3-spec-hash>
+
+uv run autoquant fundamental-data-run \
+  --spec-hash <frozen-v3-spec-hash> \
+  --max-items 10 \
+  --pause-seconds 0
+```
+
+`--max-items` is limited to 25. Repeating the command skips completed instruments; a worker or
+terminal failure therefore cannot silently bless a partial union. `dataset_manifest_hash`
+remains `null` until all shards pass and the normalized shard references are atomically frozen.
