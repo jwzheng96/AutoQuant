@@ -30,6 +30,11 @@ from autoquant.data.daily_models import (
     TradingSession,
 )
 from autoquant.data.models import SourceEvidence
+from autoquant.data.universe import (
+    DailyLiquidityMetric,
+    IndexConstituent,
+    IndexUniverseBatch,
+)
 from autoquant.errors import (
     AutoQuantError,
     VendorAuthenticationError,
@@ -334,6 +339,19 @@ class TushareDailySource:
     BASIC_FIELDS = ("ts_code", "list_status", "list_date", "delist_date")
     SUSPEND_FIELDS = ("ts_code", "trade_date", "suspend_type", "suspend_timing")
     LIMIT_FIELDS = ("ts_code", "trade_date", "pre_close", "up_limit", "down_limit")
+    INDEX_WEIGHT_FIELDS = (
+        "index_code",
+        "con_code",
+        "trade_date",
+        "weight",
+    )
+    DAILY_BASIC_FIELDS = (
+        "ts_code",
+        "trade_date",
+        "turnover_rate_f",
+        "volume_ratio",
+        "circ_mv",
+    )
 
     def __init__(
         self,
@@ -348,6 +366,53 @@ class TushareDailySource:
 
     async def close(self) -> None:
         await self._client.close()
+
+    async def fetch_index_universe(
+        self,
+        *,
+        index_code: str,
+        reference_date: date,
+    ) -> IndexUniverseBatch:
+        constituent_lookback_start = (
+            reference_date - timedelta(days=93)
+        )
+        weight_result = await self._client.post(
+            "index_weight",
+            params={
+                "index_code": index_code,
+                "start_date": self._date_text(
+                    constituent_lookback_start
+                ),
+                "end_date": self._date_text(reference_date),
+            },
+            fields=self.INDEX_WEIGHT_FIELDS,
+        )
+        basic_result = await self._client.post(
+            "daily_basic",
+            params={
+                "trade_date": self._date_text(reference_date),
+            },
+            fields=self.DAILY_BASIC_FIELDS,
+        )
+        constituents = self._map_index_constituents(
+                weight_result,
+                requested_index=index_code,
+                reference_date=reference_date,
+            )
+        return IndexUniverseBatch(
+            constituents=constituents,
+            liquidity=self._map_daily_liquidity(
+                basic_result,
+                reference_date=reference_date,
+                requested=frozenset(
+                    value.instrument for value in constituents
+                ),
+            ),
+            source_evidence=(
+                weight_result.evidence,
+                basic_result.evidence,
+            ),
+        )
 
     async def fetch_daily_dataset(
         self, instruments: tuple[str, ...], start: date, end: date
@@ -736,6 +801,107 @@ class TushareDailySource:
                     available_at=result.evidence.requested_at,
                     response_hash=result.evidence.response_hash,
                 )
+            )
+        return tuple(values)
+
+    @classmethod
+    def _map_index_constituents(
+        cls,
+        result: TushareApiResult,
+        *,
+        requested_index: str,
+        reference_date: date,
+    ) -> tuple[IndexConstituent, ...]:
+        values: list[IndexConstituent] = []
+        for row in result.rows:
+            index_code = cls._text(row, "index_code")
+            trade_date = cls._date(row, "trade_date")
+            if (
+                index_code != requested_index
+                or trade_date > reference_date
+            ):
+                raise VendorResponseError(
+                    "Tushare index_weight returned a row outside request"
+                )
+            try:
+                instrument = from_tushare_code(
+                    cls._text(row, "con_code")
+                )
+            except ValueError:
+                raise VendorResponseError(
+                    "Tushare index_weight returned unsupported constituent"
+                ) from None
+            values.append(
+                IndexConstituent(
+                    source=_SOURCE,
+                    index_code=index_code,
+                    instrument=instrument,
+                    trade_date=trade_date,
+                    weight=cls._decimal(row, "weight"),
+                    available_at=result.evidence.requested_at,
+                    response_hash=result.evidence.response_hash,
+                )
+            )
+        if len(
+            {
+                (value.trade_date, value.instrument)
+                for value in values
+            }
+        ) != len(values):
+            raise VendorResponseError(
+                "Tushare index_weight returned duplicate constituents"
+            )
+        return tuple(values)
+
+    @classmethod
+    def _map_daily_liquidity(
+        cls,
+        result: TushareApiResult,
+        *,
+        reference_date: date,
+        requested: frozenset[str],
+    ) -> tuple[DailyLiquidityMetric, ...]:
+        values: list[DailyLiquidityMetric] = []
+        for row in result.rows:
+            trade_date = cls._date(row, "trade_date")
+            if trade_date != reference_date:
+                raise VendorResponseError(
+                    "Tushare daily_basic returned a row outside request"
+                )
+            try:
+                instrument = from_tushare_code(
+                    cls._text(row, "ts_code")
+                )
+            except ValueError:
+                continue
+            if instrument not in requested:
+                continue
+            raw_volume_ratio = row.get("volume_ratio")
+            values.append(
+                DailyLiquidityMetric(
+                    source=_SOURCE,
+                    instrument=instrument,
+                    trade_date=trade_date,
+                    turnover_rate_f=cls._decimal(
+                        row,
+                        "turnover_rate_f",
+                    ),
+                    volume_ratio=(
+                        None
+                        if raw_volume_ratio in (None, "")
+                        else cls._decimal(row, "volume_ratio")
+                    ),
+                    circulating_market_value=cls._decimal(
+                        row,
+                        "circ_mv",
+                    ),
+                    available_at=result.evidence.requested_at,
+                    response_hash=result.evidence.response_hash,
+                )
+            )
+        if len({value.instrument for value in values}) != len(values):
+            raise VendorResponseError(
+                "Tushare daily_basic returned duplicate instruments"
             )
         return tuple(values)
 

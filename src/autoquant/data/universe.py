@@ -7,8 +7,32 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
+from autoquant.data.models import SourceEvidence
+
 _INDEX_CODE = re.compile(r"[0-9]{6}\.(?:SH|SZ)\Z")
 _INSTRUMENT = re.compile(r"[0-9]{6}\.(?:XSHG|XSHE)\Z")
+
+
+@dataclass(frozen=True, slots=True)
+class IndexUniverseBatch:
+    constituents: tuple[IndexConstituent, ...]
+    liquidity: tuple[DailyLiquidityMetric, ...]
+    source_evidence: tuple[SourceEvidence, ...]
+
+    def __post_init__(self) -> None:
+        if (
+            not self.constituents
+            or not self.liquidity
+            or len(self.source_evidence) != 2
+            or len(
+                {
+                    value.response_hash
+                    for value in self.source_evidence
+                }
+            )
+            != 2
+        ):
+            raise ValueError("index universe batch is incomplete")
 
 
 @dataclass(frozen=True, slots=True)
