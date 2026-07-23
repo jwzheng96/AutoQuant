@@ -443,6 +443,13 @@ WHERE database = currentDatabase()
             "end_date": end,
             "as_of_64": cutoff,
         }
+        if len(instruments) == 1:
+            parameters["instrument"] = instruments[0]
+        instrument_filter = (
+            "instrument = {instrument:String}"
+            if len(instruments) == 1
+            else "instrument IN {instruments:Array(String)}"
+        )
         sessions = await self._coverage_query(
             f"""
 SELECT source, session_date,
@@ -480,9 +487,9 @@ FROM
            argMax(tuple(list_date, delist_date, available_at, response_hash, content_hash),
                   tuple(available_at, record_id)) AS latest
     FROM {self._lifecycle_table}
-    WHERE source = {{source:String}}
-      AND instrument IN {{instruments:Array(String)}}
-      AND available_at <= {{as_of:DateTime64(6, 'UTC')}}
+    PREWHERE source = {{source:String}}
+      AND {instrument_filter}
+    WHERE available_at <= {{as_of:DateTime64(6, 'UTC')}}
     GROUP BY source, instrument
 )
 ORDER BY instrument
@@ -530,6 +537,16 @@ ORDER BY instrument
         parameters: dict[str, object],
     ) -> tuple[tuple[Any, ...], ...]:
         result_columns = ("source", "instrument", "session_date", *value_columns)
+        instruments = parameters.get("instruments")
+        if not isinstance(instruments, list) or not instruments:
+            raise ValueError(
+                "coverage query requires instruments"
+            )
+        instrument_filter = (
+            "instrument = {instrument:String}"
+            if len(instruments) == 1
+            else "instrument IN {instruments:Array(String)}"
+        )
         projected = ", ".join(
             f"tupleElement(latest, {index}) AS {column}"
             for index, column in enumerate(value_columns, start=1)
@@ -542,9 +559,9 @@ FROM
            argMax(tuple({', '.join(value_columns)}),
                   tuple(available_at, record_id)) AS latest
     FROM {table}
-    WHERE source = {{source:String}}
-      AND instrument IN {{instruments:Array(String)}}
-      AND session_date BETWEEN {{start_date:Date}} AND {{end_date:Date}}
+    PREWHERE source = {{source:String}}
+      AND {instrument_filter}
+    WHERE session_date BETWEEN {{start_date:Date}} AND {{end_date:Date}}
       AND available_at <= {{as_of:DateTime64(6, 'UTC')}}
     GROUP BY source, instrument, session_date
 )
@@ -640,7 +657,14 @@ ORDER BY instrument, session_date
             "instruments": list(instruments),
             "as_of_64": cutoff,
         }
-        sql = self._as_of_sql(table, result_columns, tuple_columns)
+        if len(instruments) == 1:
+            base_parameters["instrument"] = instruments[0]
+        sql = self._as_of_sql(
+            table,
+            result_columns,
+            tuple_columns,
+            single_instrument=len(instruments) == 1,
+        )
         rows: list[tuple[Any, ...]] = []
         for chunk_start, chunk_end in _year_intervals(start, end):
             parameters = {
@@ -675,7 +699,14 @@ ORDER BY instrument, session_date
         table: str,
         result_columns: tuple[str, ...],
         tuple_columns: tuple[str, ...],
+        *,
+        single_instrument: bool,
     ) -> str:
+        instrument_filter = (
+            "instrument = {instrument:String}"
+            if single_instrument
+            else "instrument IN {instruments:Array(String)}"
+        )
         outer = ["source", "instrument", "session_date"]
         outer.extend(
             f"tupleElement(latest, {index}) AS {column}"
@@ -695,9 +726,9 @@ FROM
             tuple(available_at, ingested_at, record_id)
         ) AS latest
     FROM {table}
-    WHERE source = {{source:String}}
-      AND instrument IN {{instruments:Array(String)}}
-      AND session_date >= {{start_date:Date}}
+    PREWHERE source = {{source:String}}
+      AND {instrument_filter}
+    WHERE session_date >= {{start_date:Date}}
       AND session_date <= {{end_date:Date}}
       AND available_at <= {{as_of:DateTime64(6, 'UTC')}}
     GROUP BY source, instrument, session_date
