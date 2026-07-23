@@ -47,10 +47,17 @@ uv run autoquant promotion-check
 | `scheduler_failure_free` | 上述窗口没有 scheduler 失败或错误码 |
 | `reconciliation_coverage` | 每个会话 14:55 后有通过的对账，窗口内没有失败报告 |
 | `filled_order_count` | 证据窗口内至少 30 个最终成交模拟订单 |
+| `closed_trade_count` | 至少 30 个可从窗口内买入成本追溯的闭环卖出交易 |
+| `effective_trade_sample_size` | 按收益自相关折减后的有效闭环交易样本至少 20 |
+| `expected_trade_return_lcb` | 扣费后闭环交易收益均值的单侧 95% 置信下界大于 0 |
+| `filled_instrument_count` | 成交覆盖至少 3 个证券，不能靠单标的样本晋级 |
+| `mean_slippage` | 平均不利滑点不超过已批准策略的悲观回测滑点 |
+| `rejection_rate` | 模拟券商拒单比例不超过 1% |
 | `unknown_order_free` | 没有 `unknown` 模拟订单 |
 | `paper_total_return` | 逐日收益复合后大于 0 |
-| `paper_max_drawdown` | 逐日复合净值最大回撤不超过 10% |
+| `paper_max_drawdown` | 逐日复合净值最大回撤不超过 8% |
 | `profitable_session_rate` | 盈利会话比例至少 50% |
+| `monthly_return_concentration` | 至少 2 个盈利月份，单月正收益贡献不超过 75% |
 | `kill_switch_drills` | 至少 3 个不同日期的 `reason=drill` 激活记录 |
 | `windows_recovery_drills` | 断线和 MiniQMT 重启恢复证据已持久化 |
 | `compliance_approval` | 存在明确、可撤销、可审计的合规批准工件 |
@@ -61,6 +68,11 @@ uv run autoquant promotion-check
 
 这些阈值是首版运营政策，不是盈利承诺或统计显著性证明。每次调整阈值都会改变
 `policy_hash`，不得为了让现有样本过关而临时降低门槛。
+
+闭环交易按证券逐笔使用 FIFO 成本，买卖两侧均扣除当前统一费用模型；证据窗口之前已经
+持有但在窗口内卖出的仓位不会被猜测为闭环样本。有效样本量使用收益序列的正自相关进行
+折减，置信下界使用单侧 95% 正态临界值。它们是晋级预筛，不替代更长样本、功效分析或
+真实券商交割单复核。
 
 ## 阻断处理
 
