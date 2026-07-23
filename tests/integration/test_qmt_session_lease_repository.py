@@ -73,6 +73,21 @@ async def test_session_lease_is_fenced_renewable_releasable_and_reacquirable(
     assert acquired.active_at(NOW)
     assert acquired.token_hash != TOKEN_ONE.get_secret_value()
     assert await repository.active_session_ids(now=NOW) == (731001,)
+    assert (
+        await repository.verify_owner(
+            session_id=731001,
+            holder_id="gateway-a",
+            token=TOKEN_ONE,
+            now=NOW + timedelta(seconds=1),
+        )
+    ) == acquired
+    with pytest.raises(QmtSessionLeaseLostError):
+        await repository.verify_owner(
+            session_id=731001,
+            holder_id="gateway-a",
+            token=TOKEN_TWO,
+            now=NOW + timedelta(seconds=1),
+        )
 
     renewed = await repository.acquire(
         session_id=731001,

@@ -85,7 +85,7 @@ class QmtSessionLease:
         return self.released_at is None and self.expires_at > instant
 
 
-def _lease_token_hash(token: SecretStr) -> str:
+def qmt_session_token_hash(token: SecretStr) -> str:
     raw = token.get_secret_value()
     if len(raw) < 32:
         raise ValueError("QMT lease token must contain at least 32 characters")
@@ -110,7 +110,7 @@ def _validate_request(
         raise ValueError("holder_id must be a safe 1-64 character identifier")
     if not timedelta(0) < ttl <= _MAX_TTL:
         raise ValueError("QMT lease ttl must be positive and no more than five minutes")
-    return _lease_token_hash(token), to_utc(now, name="lease time")
+    return qmt_session_token_hash(token), to_utc(now, name="lease time")
 
 
 def _event_payload(
@@ -180,6 +180,44 @@ class PostgresQmtSessionLeaseRepository:
             raise PersistenceUnavailableError("QMT session lease read failed") from None
         return tuple(int(value) for value in values)
 
+    async def verify_owner(
+        self,
+        *,
+        session_id: int,
+        holder_id: str,
+        token: SecretStr,
+        now: datetime,
+    ) -> QmtSessionLease:
+        token_hash, instant = _validate_request(
+            session_id=session_id,
+            holder_id=holder_id,
+            token=token,
+            now=now,
+            ttl=timedelta(seconds=1),
+        )
+        try:
+            async with self._engine.connect() as connection:
+                current = await self._select(
+                    connection,
+                    session_id,
+                    for_update=False,
+                )
+        except Exception:
+            raise PersistenceUnavailableError(
+                "QMT session lease ownership read failed"
+            ) from None
+        self._require_owner(
+            current,
+            token_hash=token_hash,
+            holder_id=holder_id,
+            now=instant,
+        )
+        if current is None:
+            raise QmtSessionLeaseLostError(
+                "QMT session lease is unavailable"
+            )
+        return current
+
     async def acquire(
         self,
         *,
@@ -199,7 +237,11 @@ class PostgresQmtSessionLeaseRepository:
         try:
             async with self._engine.begin() as connection:
                 await self._lock(connection, session_id)
-                current = await self._select(connection, session_id)
+                current = await self._select(
+                    connection,
+                    session_id,
+                    for_update=True,
+                )
                 if current is not None and current.active_at(instant):
                     if current.holder_id != holder_id or current.token_hash != token_hash:
                         raise QmtSessionConflictError("QMT session identifier has an active lease")
@@ -270,7 +312,11 @@ class PostgresQmtSessionLeaseRepository:
         try:
             async with self._engine.begin() as connection:
                 await self._lock(connection, session_id)
-                current = await self._select(connection, session_id)
+                current = await self._select(
+                    connection,
+                    session_id,
+                    for_update=True,
+                )
                 return await self._renew_locked(
                     connection,
                     current=current,
@@ -302,7 +348,11 @@ class PostgresQmtSessionLeaseRepository:
         try:
             async with self._engine.begin() as connection:
                 await self._lock(connection, session_id)
-                current = await self._select(connection, session_id)
+                current = await self._select(
+                    connection,
+                    session_id,
+                    for_update=True,
+                )
                 self._require_owner(
                     current,
                     token_hash=token_hash,
@@ -411,7 +461,14 @@ class PostgresQmtSessionLeaseRepository:
             {"key": f"autoquant:qmt-session:{session_id}"},
         )
 
-    async def _select(self, connection: AsyncConnection, session_id: int) -> QmtSessionLease | None:
+    async def _select(
+        self,
+        connection: AsyncConnection,
+        session_id: int,
+        *,
+        for_update: bool,
+    ) -> QmtSessionLease | None:
+        suffix = " FOR UPDATE" if for_update else ""
         row = (
             (
                 await connection.execute(
@@ -419,7 +476,7 @@ class PostgresQmtSessionLeaseRepository:
                         f"SELECT session_id, holder_id, token_hash, acquired_at, "
                         "heartbeat_at, expires_at, released_at, generation, version, "
                         f"event_sequence, last_event_hash FROM {self._schema}.qmt_session_leases "
-                        "WHERE session_id = :session_id FOR UPDATE"
+                        f"WHERE session_id = :session_id{suffix}"
                     ),
                     {"session_id": session_id},
                 )

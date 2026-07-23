@@ -378,6 +378,53 @@ def test_qmt_check_is_read_only_blocked_and_does_not_emit_configuration() -> Non
     assert "123456" not in result.stdout
 
 
+def test_qmt_readonly_accept_requires_explicit_confirmation() -> None:
+    result = runner.invoke(
+        app,
+        ["qmt-readonly-accept", "--actor", "operator"],
+    )
+
+    assert result.exit_code == 2
+    assert "explicit confirmation" in result.stdout
+
+
+def test_qmt_readonly_accept_emits_only_redacted_evidence() -> None:
+    payload = {
+        "account_snapshot_hash": "a" * 64,
+        "evidence_hash": "b" * 64,
+        "live_trading_locked": True,
+        "order_count": 0,
+        "position_count": 1,
+        "status": "qmt_readonly_accepted",
+        "trade_count": 0,
+    }
+    acceptance = AsyncMock(return_value=payload)
+    with patch(
+        "autoquant.cli.run_qmt_readonly_acceptance",
+        new=acceptance,
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "qmt-readonly-accept",
+                "--actor",
+                "operator",
+                "--confirm-read-only",
+            ],
+            env={
+                "AQ_QMT_ACCOUNT_ID": "sensitive-broker-account",
+                "AQ_QMT_LEASE_TOKEN": (
+                    "sensitive-qmt-lease-token-with-32-characters"
+                ),
+            },
+        )
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == payload
+    assert "sensitive" not in result.stdout
+    acceptance.assert_awaited_once()
+
+
 def test_paper_preopen_check_emits_hashes_but_no_marks_or_configuration() -> None:
     payload = {
         "instrument_count": 2,

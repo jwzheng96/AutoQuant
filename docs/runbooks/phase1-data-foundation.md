@@ -34,6 +34,7 @@ Apply `migrations/postgres/001_phase1.sql`,
 `migrations/postgres/014_paper_scheduler_leases.sql`, then
 `migrations/postgres/015_paper_strategy_registry.sql`, then
 `migrations/postgres/016_paper_runtime_unlock.sql`, then
+`migrations/postgres/017_qmt_readonly_acceptance.sql`, then
 `migrations/clickhouse/001_phase1.sql` and
 `migrations/clickhouse/002_tushare_daily.sql` and
 `migrations/clickhouse/003_daily_coverage.sql` in order, only to explicitly authorized

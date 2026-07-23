@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+import asyncio
+from datetime import UTC, date, datetime, timedelta
 from uuid import UUID, uuid4
 
 from pydantic import SecretStr
@@ -18,7 +19,10 @@ from autoquant.data.daily_ingestion import (
 )
 from autoquant.data.daily_quality import DailyQualityGate
 from autoquant.data.session_reference import SessionReferenceRefreshService
-from autoquant.errors import MissingCapabilityError
+from autoquant.errors import (
+    MissingCapabilityError,
+    PersistenceUnavailableError,
+)
 from autoquant.execution.control import KillSwitchReason
 from autoquant.execution.control_store import PostgresExecutionControlRepository
 from autoquant.execution.paper_policy import default_paper_policy
@@ -39,9 +43,22 @@ from autoquant.execution.paper_unlock_service import (
     PaperRuntimeUnlockService,
 )
 from autoquant.execution.pre_open_marks import DailyClosePreOpenMarkReader
+from autoquant.execution.qmt_preflight import inspect_qmt_readiness
 from autoquant.execution.qmt_quote_runtime import (
     ImportedXtDataClient,
     QmtFullTickSnapshotReader,
+)
+from autoquant.execution.qmt_readonly_store import (
+    PostgresQmtReadOnlyAcceptanceRepository,
+    QmtReadOnlyAcceptanceEvidence,
+)
+from autoquant.execution.qmt_session_store import (
+    PostgresQmtSessionLeaseRepository,
+)
+from autoquant.execution.qmt_windows_readonly import (
+    QmtReadOnlyAcceptance,
+    QmtReadOnlyWindowsSession,
+    QmtVendorBindings,
 )
 from autoquant.execution.session_risk_store import (
     PostgresPaperSessionRiskRepository,
@@ -381,6 +398,157 @@ async def unlock_paper_runtime(
             await evidence.close()
         if clickhouse is not None:
             await clickhouse.client.close()
+
+
+async def run_qmt_readonly_acceptance(
+    settings: AppSettings,
+    *,
+    actor: str,
+) -> dict[str, object]:
+    """Capture a redacted, lease-fenced XtTrader baseline without broker mutations."""
+
+    if settings.environment is not RuntimeEnvironment.PAPER:
+        raise MissingCapabilityError("paper environment is not configured")
+    if not actor.strip() or len(actor) > 128:
+        raise ValueError("QMT acceptance actor must contain 1-128 characters")
+    userdata_path = settings.qmt_userdata_path
+    account_secret = settings.qmt_account_id
+    session_id = settings.qmt_session_id
+    if userdata_path is None or account_secret is None or session_id is None:
+        raise MissingCapabilityError("QMT read-only settings are not configured")
+    broker_account_id = account_secret.get_secret_value().strip()
+    if not broker_account_id:
+        raise MissingCapabilityError("QMT account identifier is not configured")
+    credentials = settings.require_qmt_runtime()
+    postgres_dsn = configured_dsn(
+        settings.postgres_dsn,
+        capability="PostgreSQL",
+    )
+    controls: PostgresExecutionControlRepository | None = None
+    leases: PostgresQmtSessionLeaseRepository | None = None
+    acceptances: PostgresQmtReadOnlyAcceptanceRepository | None = None
+    acquired = False
+    completed = False
+    release_failed = False
+    try:
+        controls = PostgresExecutionControlRepository.connect(dsn=postgres_dsn)
+        leases = PostgresQmtSessionLeaseRepository.connect(dsn=postgres_dsn)
+        acceptances = PostgresQmtReadOnlyAcceptanceRepository.connect(
+            dsn=postgres_dsn
+        )
+        await acceptances.check_connection()
+        control = await controls.replay(account_id=settings.paper_account_id)
+        active_session_ids = await leases.active_session_ids(
+            now=datetime.now(UTC)
+        )
+        readiness = inspect_qmt_readiness(
+            settings,
+            kill_switch_active=control.active,
+            active_session_ids=active_session_ids,
+        )
+        if not readiness.read_only_ready:
+            blockers = ",".join(
+                check.code.value
+                for check in readiness.checks
+                if not check.passed
+            )
+            raise MissingCapabilityError(
+                f"QMT read-only preflight is blocked: {blockers}"
+            )
+        lease = await leases.acquire(
+            session_id=session_id,
+            holder_id=credentials.holder_id,
+            token=credentials.lease_token,
+            now=datetime.now(UTC),
+            ttl=timedelta(seconds=settings.qmt_lease_ttl_seconds),
+        )
+        acquired = True
+        bindings = QmtVendorBindings.load()
+
+        def query_once() -> QmtReadOnlyAcceptance:
+            qmt = QmtReadOnlyWindowsSession(
+                userdata_path=userdata_path,
+                session_id=session_id,
+                broker_account_id=broker_account_id,
+                logical_account_id=settings.paper_account_id,
+                bindings=bindings,
+            )
+            qmt.open()
+            try:
+                return qmt.query()
+            finally:
+                qmt.close()
+
+        acceptance = await asyncio.to_thread(query_once)
+        lease = await leases.verify_owner(
+            session_id=session_id,
+            holder_id=credentials.holder_id,
+            token=credentials.lease_token,
+            now=datetime.now(UTC),
+        )
+        latest_control = await controls.replay(
+            account_id=settings.paper_account_id
+        )
+        if not latest_control.active:
+            raise MissingCapabilityError(
+                "QMT acceptance requires the kill switch to remain active"
+            )
+        evidence = QmtReadOnlyAcceptanceEvidence.from_baseline(
+            baseline=acceptance.baseline,
+            package_manifest_hash=acceptance.package_manifest_hash,
+            lease=lease,
+        )
+        evidence = await acceptances.append(
+            evidence,
+            now=datetime.now(UTC),
+        )
+        completed = True
+        return {
+            "account_snapshot_hash": evidence.account_snapshot_hash,
+            "evidence_hash": evidence.evidence_hash,
+            "live_trading_locked": True,
+            "order_count": evidence.order_count,
+            "position_count": evidence.position_count,
+            "status": "qmt_readonly_accepted",
+            "trade_count": evidence.trade_count,
+        }
+    finally:
+        if acquired and leases is not None and session_id is not None:
+            try:
+                await leases.release(
+                    session_id=session_id,
+                    holder_id=credentials.holder_id,
+                    token=credentials.lease_token,
+                    now=datetime.now(UTC),
+                )
+            except Exception:
+                completed = False
+                release_failed = True
+        if not completed and controls is not None:
+            try:
+                state = await controls.replay(
+                    account_id=settings.paper_account_id
+                )
+                if not state.active:
+                    await controls.activate(
+                        account_id=settings.paper_account_id,
+                        command_id=f"qmt-readonly-failure-{uuid4()}",
+                        reason=KillSwitchReason.DEPENDENCY_UNAVAILABLE,
+                        actor="qmt-readonly-acceptance",
+                        now=datetime.now(UTC),
+                    )
+            except Exception:
+                pass
+        if acceptances is not None:
+            await acceptances.close()
+        if leases is not None:
+            await leases.close()
+        if controls is not None:
+            await controls.close()
+        if release_failed:
+            raise PersistenceUnavailableError(
+                "QMT session lease release failed"
+            )
 
 
 async def run_trading_calendar_refresh(

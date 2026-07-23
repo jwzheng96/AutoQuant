@@ -29,6 +29,7 @@ from autoquant.operations import (
     inspect_paper_runtime_readiness,
     revoke_paper_strategy,
     run_daily_ingestion,
+    run_qmt_readonly_acceptance,
     run_session_reference_refresh,
     run_trading_calendar_refresh,
     tushare_source,
@@ -284,6 +285,32 @@ def qmt_check() -> None:
     )
     if not report.order_drill_ready:
         raise typer.Exit(code=2)
+
+
+@app.command("qmt-readonly-accept")
+def qmt_readonly_accept(
+    actor: Annotated[str, typer.Option("--actor")],
+    confirm_read_only: Annotated[
+        bool,
+        typer.Option("--confirm-read-only"),
+    ] = False,
+) -> None:
+    """Connect to XtTrader for redacted read-only acceptance evidence."""
+
+    if not confirm_read_only:
+        _fail("QMT read-only acceptance requires explicit confirmation")
+    try:
+        payload = asyncio.run(
+            run_qmt_readonly_acceptance(
+                _settings(),
+                actor=actor,
+            )
+        )
+    except MissingCapabilityError as error:
+        _fail(str(error))
+    except (AutoQuantError, LookupError, ValueError):
+        _fail("QMT read-only acceptance failed closed")
+    _emit(payload)
 
 
 @app.command("paper-preopen-check")

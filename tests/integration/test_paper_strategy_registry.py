@@ -31,6 +31,17 @@ from autoquant.execution.paper_unlock import (
     PaperRuntimeUnlockEvidence,
     PostgresPaperRuntimeUnlockRepository,
 )
+from autoquant.execution.qmt_readonly import (
+    build_qmt_readonly_baseline,
+    normalize_qmt_asset,
+)
+from autoquant.execution.qmt_readonly_store import (
+    PostgresQmtReadOnlyAcceptanceRepository,
+    QmtReadOnlyAcceptanceEvidence,
+)
+from autoquant.execution.qmt_session_store import (
+    PostgresQmtSessionLeaseRepository,
+)
 from autoquant.execution.reconciliation import (
     AccountReconciler,
     ExecutionAccountSnapshot,
@@ -89,9 +100,11 @@ async def registry_fixture() -> AsyncIterator[
             "migrations/postgres/008_paper_execution.sql",
             "migrations/postgres/009_execution_controls.sql",
             "migrations/postgres/011_paper_session_risk.sql",
+            "migrations/postgres/012_qmt_session_leases.sql",
             "migrations/postgres/014_paper_scheduler_leases.sql",
             "migrations/postgres/015_paper_strategy_registry.sql",
             "migrations/postgres/016_paper_runtime_unlock.sql",
+            "migrations/postgres/017_qmt_readonly_acceptance.sql",
         )
     )
     report = QualityReport(
@@ -412,4 +425,116 @@ async def test_paper_runtime_reset_atomically_rechecks_persisted_fences(
             actor="operator",
             now=now + timedelta(seconds=2),
             expected_version=reactivated.version,
+        )
+
+
+@pytest.mark.asyncio
+async def test_qmt_readonly_acceptance_persists_only_redacted_fenced_evidence(
+    registry_fixture: tuple[
+        PostgresPaperStrategyRegistry,
+        ValidatedSmaRegistration,
+        AsyncEngine,
+        str,
+    ],
+) -> None:
+    _, _, engine, schema = registry_fixture
+    controls = PostgresExecutionControlRepository(
+        engine=engine,
+        schema=schema,
+    )
+    leases = PostgresQmtSessionLeaseRepository(
+        engine=engine,
+        schema=schema,
+    )
+    acceptances = PostgresQmtReadOnlyAcceptanceRepository(
+        engine=engine,
+        schema=schema,
+    )
+    await acceptances.check_connection()
+    now = datetime(2026, 7, 23, 3, tzinfo=UTC)
+    await controls.ensure_fail_closed(
+        account_id="paper-main",
+        now=now,
+    )
+    token = SecretStr("integration-qmt-readonly-token-0001")
+    lease = await leases.acquire(
+        session_id=731101,
+        holder_id="windows-qmt-01",
+        token=token,
+        now=now,
+        ttl=timedelta(seconds=30),
+    )
+    broker_account_id = "sensitive-broker-account"
+    baseline = build_qmt_readonly_baseline(
+        baseline_id="qmt-readonly-integration-0001",
+        generation=1,
+        logical_account_id="paper-main",
+        query_started_at=now,
+        query_completed_at=now + timedelta(milliseconds=10),
+        callback_cursor_before=0,
+        callback_cursor_after=0,
+        callback_stream_healthy=True,
+        asset=normalize_qmt_asset(
+            {
+                "account_id": broker_account_id,
+                "cash": 1_000_000,
+                "frozen_cash": 0,
+                "market_value": 0,
+                "total_asset": 1_000_000,
+            },
+            expected_account_id=broker_account_id,
+            observed_at=now + timedelta(milliseconds=10),
+        ),
+        positions=(),
+        orders=(),
+        trades=(),
+    )
+    evidence = QmtReadOnlyAcceptanceEvidence.from_baseline(
+        baseline=baseline,
+        package_manifest_hash="e" * 64,
+        lease=lease,
+    )
+
+    stored = await acceptances.append(
+        evidence,
+        now=now + timedelta(milliseconds=20),
+    )
+
+    assert stored == evidence
+    async with engine.connect() as connection:
+        payload = await connection.scalar(
+            text(
+                f"""
+                SELECT evidence_payload::text
+                FROM {schema}.qmt_readonly_acceptance_evidence
+                WHERE evidence_hash = :evidence_hash
+                """
+            ),
+            {"evidence_hash": evidence.evidence_hash},
+        )
+    assert broker_account_id not in str(payload)
+    assert token.get_secret_value() not in str(payload)
+    with pytest.raises(SQLAlchemyError):
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    f"""
+                    UPDATE {schema}.qmt_readonly_acceptance_evidence
+                    SET position_count = 99
+                    WHERE evidence_hash = :evidence_hash
+                    """
+                ),
+                {"evidence_hash": evidence.evidence_hash},
+            )
+
+    await leases.release(
+        session_id=731101,
+        holder_id="windows-qmt-01",
+        token=token,
+        now=now + timedelta(seconds=1),
+    )
+    with pytest.raises(ValueError, match="lease changed"):
+        await acceptances.append(
+            evidence,
+            now=now + timedelta(seconds=2),
         )

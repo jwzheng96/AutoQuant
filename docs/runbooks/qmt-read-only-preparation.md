@@ -20,6 +20,9 @@
 AQ_QMT_USERDATA_PATH=C:\path\to\userdata_mini
 AQ_QMT_ACCOUNT_ID=实际资金账号
 AQ_QMT_SESSION_ID=一个与同机其他策略不同的正整数
+AQ_QMT_HOLDER_ID=windows-qmt-readonly-01
+AQ_QMT_LEASE_TOKEN=至少32字符的独立随机秘密
+AQ_QMT_LEASE_TTL_SECONDS=30
 ```
 
 同时保留：
@@ -29,6 +32,7 @@ AQ_LIVE_TRADING_ENABLED=false
 ```
 
 确保 `.env` 仅当前运行账户可读。账号、路径和会话号不会出现在 `qmt-check` 输出中。
+租约令牌也不得写入日志、命令行或版本库；数据库仅保存其 SHA-256。
 
 ## 运行预检
 
@@ -45,6 +49,26 @@ uv run autoquant qmt-check
 未迁移或相同会话号已有有效租约时保持 `blocked`。实际网关连接前仍必须原子获取租约，
 预检本身不占用会话号。
 
+## 生成只读验收证据
+
+完成预检并确认 MiniQMT 已人工登录后，在 Windows 节点运行：
+
+```powershell
+uv run autoquant qmt-readonly-accept `
+  --actor operator `
+  --confirm-read-only
+```
+
+该命令会原子取得 schema v12 的 QMT 会话租约，加载券商 XtQuant 包，计算包目录制品清单
+SHA-256，连接并订阅配置账户，确认账户状态为正常，然后在回调游标不变化的窗口内依次读取
+资产、持仓、当日委托和当日成交；整组查询最多允许 5 秒。四项数据会经过账户一致性、
+资产平衡、委托/成交收敛校验。
+通过后仅把 schema v17 的脱敏验收证据写入 PostgreSQL；真实资金账号、余额、持仓明细、
+路径和租约原文都不会写入证据表或命令输出。
+
+无论成功失败，命令都会停止 XtTrader 并释放会话租约。租约释放失败或任一查询事实不明确时
+命令失败，持久化停机开关保持或恢复为激活。该命令不包含任何下单、撤单或资金划拨调用。
+
 ## 失败处理
 
 - `windows_runtime`：命令不在 Windows 节点运行。
@@ -55,6 +79,9 @@ uv run autoquant qmt-check
 - `xtquant_module`：当前 Python 环境无法发现券商提供的模块。
 - `order_permission`：缺少 `up_queue_xtquant`，联系券商确认权限。
 - `kill_switch`：停机开关未激活或数据库不可验证；先修复持久化控制面。
+- 查询期间出现回调：停止其他客户端操作后重试，不能拼接两次查询结果。
+- 查询返回 `None`：官方接口无法区分失败与空集合；按未知状态处理，不得手工改成空列表
+  绕过。
 
 ## 仍然禁止的操作
 

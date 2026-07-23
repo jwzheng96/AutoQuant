@@ -6,6 +6,7 @@ from pydantic import SecretStr
 from autoquant.config import (
     AppSettings,
     PaperRuntimeCredentials,
+    QmtRuntimeCredentials,
     RuntimeEnvironment,
     TushareCredentials,
     WebCredentials,
@@ -22,6 +23,8 @@ def test_defaults_are_non_live_and_fail_closed(monkeypatch: pytest.MonkeyPatch) 
         "AQ_QMT_USERDATA_PATH",
         "AQ_QMT_ACCOUNT_ID",
         "AQ_QMT_SESSION_ID",
+        "AQ_QMT_HOLDER_ID",
+        "AQ_QMT_LEASE_TOKEN",
         "AQ_PAPER_SCHEDULER_HOLDER_ID",
         "AQ_PAPER_SCHEDULER_LEASE_TOKEN",
     ):
@@ -41,6 +44,8 @@ def test_defaults_are_non_live_and_fail_closed(monkeypatch: pytest.MonkeyPatch) 
         settings.require_web()
     with pytest.raises(MissingCapabilityError, match="Paper runtime"):
         settings.require_paper_runtime()
+    with pytest.raises(MissingCapabilityError, match="QMT session lease"):
+        settings.require_qmt_runtime()
 
 
 def test_rqdata_credentials_are_secret_values() -> None:
@@ -83,6 +88,22 @@ def test_tushare_token_is_a_secret_value() -> None:
     assert isinstance(credentials.token, SecretStr)
     assert "new-local-token" not in repr(credentials)
     assert "new-local-token" not in repr(settings)
+
+
+def test_qmt_runtime_credentials_are_secret_values() -> None:
+    settings = AppSettings(
+        _env_file=None,
+        qmt_holder_id="windows-qmt-01",
+        qmt_lease_token="qmt-runtime-token-with-at-least-32-characters",
+    )
+
+    credentials = settings.require_qmt_runtime()
+
+    assert isinstance(credentials, QmtRuntimeCredentials)
+    assert isinstance(credentials.lease_token, SecretStr)
+    assert credentials.holder_id == "windows-qmt-01"
+    assert "qmt-runtime-token" not in repr(credentials)
+    assert "qmt-runtime-token" not in repr(settings)
 
 
 @pytest.mark.parametrize("token", ["", " ", "\t\n"])

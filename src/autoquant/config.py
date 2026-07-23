@@ -35,6 +35,11 @@ class PaperRuntimeCredentials(BaseModel):
     lease_token: SecretStr = Field(repr=False)
 
 
+class QmtRuntimeCredentials(BaseModel):
+    holder_id: str
+    lease_token: SecretStr = Field(repr=False)
+
+
 class AppSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="AQ_", env_file=".env", extra="forbid")
 
@@ -72,6 +77,9 @@ class AppSettings(BaseSettings):
     qmt_userdata_path: Path | None = None
     qmt_account_id: SecretStr | None = Field(default=None, repr=False)
     qmt_session_id: int | None = Field(default=None, ge=1, le=2_147_483_647)
+    qmt_holder_id: str | None = None
+    qmt_lease_token: SecretStr | None = Field(default=None, repr=False)
+    qmt_lease_ttl_seconds: int = Field(default=30, ge=5, le=300)
 
     @field_validator("qmt_userdata_path", mode="before")
     @classmethod
@@ -112,7 +120,7 @@ class AppSettings(BaseSettings):
             )
         return normalized
 
-    @field_validator("paper_scheduler_holder_id")
+    @field_validator("paper_scheduler_holder_id", "qmt_holder_id")
     @classmethod
     def require_safe_scheduler_holder_id(
         cls,
@@ -131,7 +139,7 @@ class AppSettings(BaseSettings):
             )
         ):
             raise ValueError(
-                "paper_scheduler_holder_id must be a 1-64 character safe identifier"
+                "runtime holder identifiers must be 1-64 character safe identifiers"
             )
         return normalized
 
@@ -194,6 +202,22 @@ class AppSettings(BaseSettings):
                 "Paper runtime scheduler lease credentials are not configured"
             )
         return PaperRuntimeCredentials(
+            holder_id=holder_id,
+            lease_token=token,
+        )
+
+    def require_qmt_runtime(self) -> QmtRuntimeCredentials:
+        holder_id = self.qmt_holder_id
+        token = self.qmt_lease_token
+        if (
+            holder_id is None
+            or token is None
+            or len(token.get_secret_value()) < 32
+        ):
+            raise MissingCapabilityError(
+                "QMT session lease credentials are not configured"
+            )
+        return QmtRuntimeCredentials(
             holder_id=holder_id,
             lease_token=token,
         )

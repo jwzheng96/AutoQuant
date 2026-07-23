@@ -221,6 +221,12 @@ locked. No strategy may enter the paper scheduler until a completed walk-forward
 passes every sample-out gate and an operator explicitly approves the resulting paper-only
 artifact. The current infrastructure canary is not profitable strategy evidence.
 
+On an authorized Windows node, `autoquant qmt-readonly-accept` acquires a bounded QMT
+session lease and persists only redacted schema v17 acceptance evidence after coherent
+asset, position, order, and trade queries. It does not persist the broker account identifier
+or expose any broker mutation method; live order submission and cancellation remain hard
+locked.
+
 Copy `.env.example` to an untracked `.env` and supply credentials/DSNs only on the trusted
 runtime host. The Tushare Token previously shared in chat must be rotated before use; set
 only the replacement as `AQ_TUSHARE_TOKEN`. Never commit or paste it into logs or chat.
