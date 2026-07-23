@@ -202,6 +202,9 @@ calendar refresh ahead of the session:
 uv run autoquant refresh-trading-calendar \
   --start 2026-07-24 \
   --end 2026-07-24
+uv run autoquant refresh-session-reference \
+  --instrument 600000.XSHG \
+  --date 2026-07-24
 ```
 
 The refresh interval is bounded to 32 calendar days and must contain exactly one vendor row per
@@ -209,6 +212,11 @@ calendar day. It calls no daily-price endpoint. Its source response, ClickHouse 
 PostgreSQL audit event must all persist before it reports `completed`. Run it before the target
 pre-open; its real request timestamp is retained and cannot prove that a late refresh was known
 earlier.
+
+The session-reference command separately requires an open calendar row plus exact lifecycle,
+suspension and `stk_limit` rows for every requested instrument. It never calls `daily` or
+`adj_factor`. Missing or source-unbacked controls fail closed; the resulting revisions and
+audit hash are the only accepted input to the current-session rule compiler.
 
 Then run the pre-open evidence gate during the target Shanghai pre-open window:
 

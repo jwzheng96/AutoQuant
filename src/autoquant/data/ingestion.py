@@ -35,6 +35,8 @@ class ControlTransaction(Protocol):
 class ControlRepository(Protocol):
     async def save_source_evidence(self, evidence: SourceEvidence) -> None: ...
 
+    async def read_source_evidence(self, evidence_hash: str) -> SourceEvidence: ...
+
     async def append_audit_event(
         self,
         event_type: str,

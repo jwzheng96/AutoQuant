@@ -6,6 +6,7 @@ from autoquant.data.daily_models import (
     DailyBarRevision,
     DailyCoverageEvidence,
     DailyDatasetBatch,
+    SessionReferenceBatch,
     TradingCalendarBatch,
 )
 
@@ -22,6 +23,14 @@ class TradingCalendarSource(Protocol):
         start: date,
         end: date,
     ) -> TradingCalendarBatch: ...
+
+
+class SessionReferenceSource(Protocol):
+    async def fetch_session_reference(
+        self,
+        instruments: tuple[str, ...],
+        session_date: date,
+    ) -> SessionReferenceBatch: ...
 
 
 class DailyMarketRepository(Protocol):

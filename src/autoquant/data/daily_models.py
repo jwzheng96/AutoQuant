@@ -473,6 +473,89 @@ class TradingCalendarBatch:
 
 
 @dataclass(frozen=True, slots=True)
+class SessionReferenceBatch:
+    session: TradingSession
+    lifecycles: tuple[InstrumentLifecycle, ...]
+    suspensions: tuple[DailySuspensionStatus, ...]
+    price_limits: tuple[DailyPriceLimit, ...]
+    source_evidence: tuple[SourceEvidence, ...]
+
+    def __post_init__(self) -> None:
+        lifecycles = tuple(
+            sorted(self.lifecycles, key=lambda value: value.instrument)
+        )
+        suspensions = tuple(
+            sorted(self.suspensions, key=lambda value: value.instrument)
+        )
+        price_limits = tuple(
+            sorted(self.price_limits, key=lambda value: value.instrument)
+        )
+        evidence = tuple(self.source_evidence)
+        object.__setattr__(self, "lifecycles", lifecycles)
+        object.__setattr__(self, "suspensions", suspensions)
+        object.__setattr__(self, "price_limits", price_limits)
+        object.__setattr__(self, "source_evidence", evidence)
+        if not isinstance(self.session, TradingSession):
+            raise TypeError("session reference requires one TradingSession")
+        if not self.session.is_open:
+            raise ValueError("session reference requires an open trading session")
+        if (
+            not lifecycles
+            or len(lifecycles) != len(suspensions)
+            or len(lifecycles) != len(price_limits)
+        ):
+            raise ValueError("session reference must exactly cover its instruments")
+        instruments = tuple(value.instrument for value in lifecycles)
+        if (
+            len(set(instruments)) != len(instruments)
+            or tuple(value.instrument for value in suspensions) != instruments
+            or tuple(value.instrument for value in price_limits) != instruments
+            or any(
+                value.session_date != self.session.session_date
+                for value in suspensions
+            )
+            or any(
+                value.session_date != self.session.session_date
+                for value in price_limits
+            )
+        ):
+            raise ValueError("session reference instruments or dates do not match")
+        if any(
+            value.list_date > self.session.session_date
+            or (
+                value.delist_date is not None
+                and value.delist_date < self.session.session_date
+            )
+            for value in lifecycles
+        ):
+            raise ValueError("session reference contains an inactive instrument")
+        if not evidence or any(
+            not isinstance(value, SourceEvidence) for value in evidence
+        ):
+            raise ValueError("session reference requires source evidence")
+        evidence_keys = {
+            (value.method, value.response_hash) for value in evidence
+        }
+        required = {
+            ("trade_cal", self.session.response_hash),
+            *(
+                ("stock_basic", value.response_hash)
+                for value in lifecycles
+            ),
+            *(
+                ("suspend_d", value.response_hash)
+                for value in suspensions
+            ),
+            *(
+                ("stk_limit", value.response_hash)
+                for value in price_limits
+            ),
+        }
+        if not required <= evidence_keys:
+            raise ValueError("session reference rows are not backed by source evidence")
+
+
+@dataclass(frozen=True, slots=True)
 class DailyDatasetBatch:
     bars: tuple[DailyBarRevision, ...]
     factors: tuple[AdjustmentFactorRevision, ...]

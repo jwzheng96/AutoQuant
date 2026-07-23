@@ -174,6 +174,9 @@ cd AutoQuant
 # Refresh an upcoming session before its pre-open window:
 /Users/zjw/.local/bin/uv run autoquant refresh-trading-calendar \
   --start 2026-07-24 --end 2026-07-24
+# Refresh exact rules without requesting the unfinished session daily bar:
+/Users/zjw/.local/bin/uv run autoquant refresh-session-reference \
+  --instrument 600000.XSHG --date 2026-07-24
 # Run during the target Shanghai pre-open window with the exact strategy universe:
 /Users/zjw/.local/bin/uv run autoquant paper-preopen-check \
   --instrument 000001.XSHE --instrument 600000.XSHG \

@@ -350,3 +350,31 @@ def test_calendar_refresh_emits_only_audit_metadata() -> None:
     assert json.loads(result.stdout) == payload
     assert "sensitive" not in result.stdout
     refresh.assert_awaited_once()
+
+
+def test_session_reference_refresh_emits_only_audit_metadata() -> None:
+    payload = {
+        "audit_event_hash": "a" * 64,
+        "instrument_count": 1,
+        "reference_hash": "b" * 64,
+        "session_date": "2026-07-23",
+        "status": "completed",
+    }
+    refresh = AsyncMock(return_value=payload)
+    with patch("autoquant.cli.run_session_reference_refresh", new=refresh):
+        result = runner.invoke(
+            app,
+            [
+                "refresh-session-reference",
+                "--instrument",
+                "600000.XSHG",
+                "--date",
+                "2026-07-23",
+            ],
+            env={"AQ_TUSHARE_TOKEN": "sensitive-token"},
+        )
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == payload
+    assert "sensitive" not in result.stdout
+    refresh.assert_awaited_once()

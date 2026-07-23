@@ -12,6 +12,7 @@ from autoquant.config import AppSettings
 from autoquant.data.calendar_refresh import TradingCalendarRefreshService
 from autoquant.data.daily_ingestion import DailyIngestionRequest, DailyIngestionService
 from autoquant.data.daily_quality import DailyQualityGate
+from autoquant.data.session_reference import SessionReferenceRefreshService
 from autoquant.errors import MissingCapabilityError
 from autoquant.execution.control_store import PostgresExecutionControlRepository
 from autoquant.execution.pre_open_marks import DailyClosePreOpenMarkReader
@@ -179,5 +180,46 @@ async def run_trading_calendar_refresh(
         "audit_event_hash": result.audit_event_hash,
         "session_count": result.session_count,
         "source_evidence_hash": result.source_evidence_hash,
+        "status": result.status,
+    }
+
+
+async def run_session_reference_refresh(
+    settings: AppSettings,
+    instruments: tuple[str, ...],
+    session_date: date,
+) -> dict[str, object]:
+    """Refresh exact session controls without requesting the unfinished daily bar."""
+
+    source: TushareDailySource | None = None
+    clickhouse: ClickHouseDailyRepository | None = None
+    postgres: PostgresControlRepository | None = None
+    try:
+        source = tushare_source(settings)
+        clickhouse = await ClickHouseDailyRepository.connect(
+            dsn=configured_dsn(settings.clickhouse_dsn, capability="ClickHouse"),
+            source="tushare",
+        )
+        postgres = PostgresControlRepository.connect(
+            dsn=configured_dsn(settings.postgres_dsn, capability="PostgreSQL")
+        )
+        result = await SessionReferenceRefreshService(
+            source=source,
+            market_repository=clickhouse,
+            control_repository=postgres,
+            now=lambda: datetime.now(UTC),
+        ).run(instruments=instruments, session_date=session_date)
+    finally:
+        if source is not None:
+            await source.close()
+        if postgres is not None:
+            await postgres.close()
+        if clickhouse is not None:
+            await clickhouse.client.close()
+    return {
+        "audit_event_hash": result.audit_event_hash,
+        "instrument_count": result.instrument_count,
+        "reference_hash": result.reference_hash,
+        "session_date": result.session_date.isoformat(),
         "status": result.status,
     }

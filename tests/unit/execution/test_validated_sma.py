@@ -20,6 +20,7 @@ from autoquant.data.models import DatasetManifest
 from autoquant.execution.market_clock import AShareTradingPhase
 from autoquant.execution.paper_scheduler import PaperStrategyContext
 from autoquant.execution.quote_book import ContinuousQuoteBook
+from autoquant.execution.session_rules import SessionRuleSet
 from autoquant.execution.strategy_account import PaperStrategyAccountEvidence
 from autoquant.execution.validated_sma import (
     ValidatedSmaRegistration,
@@ -207,13 +208,23 @@ def _provider(
     controls.read_manifest = AsyncMock(return_value=manifest)
     reader = MagicMock()
     reader.query = AsyncMock(return_value=dataset)
+    session_rules = MagicMock()
+    session_rules.read = AsyncMock(
+        return_value=SessionRuleSet(
+            session_date=NOW.date(),
+            as_of=NOW,
+            rules=(_rules(),),
+            suspended_instruments=(),
+            source_evidence_hashes=("7" * 64,),
+        )
+    )
     return (
         ValidatedSmaTargetProvider(
             strategy_id=STRATEGY_ID,
             registry=registry,
             control_repository=controls,
             dataset_reader=reader,
-            rules=_rules(),
+            session_rule_reader=session_rules,
             policy=policy,
         ),
         registration,
@@ -318,4 +329,21 @@ async def test_provider_rejects_adjustment_factor_change() -> None:
     )
 
     with pytest.raises(ValueError, match="adjustment factors"):
+        await provider.target(_context())
+
+
+@pytest.mark.asyncio
+async def test_provider_rejects_current_session_suspension() -> None:
+    provider, _ = _provider(dataset=_dataset())
+    provider._session_rules.read = AsyncMock(
+        return_value=SessionRuleSet(
+            session_date=NOW.date(),
+            as_of=NOW,
+            rules=(_rules(),),
+            suspended_instruments=(INSTRUMENT,),
+            source_evidence_hashes=("7" * 64,),
+        )
+    )
+
+    with pytest.raises(ValueError, match="do not permit"):
         await provider.target(_context())

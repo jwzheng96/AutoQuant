@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Protocol
 from uuid import UUID
@@ -21,6 +21,7 @@ from autoquant.data.models import (
     _require_nonblank,
 )
 from autoquant.execution.paper_scheduler import PaperStrategyContext
+from autoquant.execution.session_rules import SessionRuleSet
 from autoquant.execution.target_strategy import (
     TargetInstrumentPosition,
     TargetPortfolioSignal,
@@ -47,6 +48,16 @@ class PaperStrategyRegistry(Protocol):
         account_id: str,
         strategy_id: str,
     ) -> ValidatedSmaRegistration | None: ...
+
+
+class SessionRuleReader(Protocol):
+    async def read(
+        self,
+        *,
+        instruments: tuple[str, ...],
+        session_date: date,
+        as_of: datetime,
+    ) -> SessionRuleSet: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,23 +198,17 @@ class ValidatedSmaTargetProvider:
         registry: PaperStrategyRegistry,
         control_repository: ControlRepository,
         dataset_reader: DailyDatasetReader,
-        rules: InstrumentRules,
+        session_rule_reader: SessionRuleReader,
         policy: RiskPolicy,
     ) -> None:
         _require_nonblank(strategy_id, name="validated SMA strategy_id")
-        if (
-            rules.instrument not in policy.allowed_instruments
-            or rules.instrument != policy.allowed_instruments[0]
-            or len(policy.allowed_instruments) != 1
-        ):
-            raise ValueError(
-                "validated SMA provider requires one identical rule/policy instrument"
-            )
+        if len(policy.allowed_instruments) != 1:
+            raise ValueError("validated SMA provider requires one policy instrument")
         self._strategy_id = strategy_id
         self._registry = registry
         self._control = control_repository
         self._reader = dataset_reader
-        self._rules = rules
+        self._session_rules = session_rule_reader
         self._policy = policy
 
     async def target(
@@ -216,7 +221,25 @@ class ValidatedSmaTargetProvider:
         )
         if registration is None:
             raise ValueError("paper strategy has no active approved registration")
-        self._validate_registration(registration=registration, context=context)
+        rule_set = await self._session_rules.read(
+            instruments=(registration.instrument,),
+            session_date=context.session_date,
+            as_of=context.now,
+        )
+        if (
+            rule_set.session_date != context.session_date
+            or rule_set.as_of != context.now
+            or len(rule_set.rules) != 1
+            or rule_set.rules[0].instrument != registration.instrument
+            or registration.instrument in rule_set.suspended_instruments
+        ):
+            raise ValueError("current session rules do not permit strategy evaluation")
+        rules = rule_set.rules[0]
+        self._validate_registration(
+            registration=registration,
+            context=context,
+            rules=rules,
+        )
         manifest = await self._control.read_manifest(
             registration.signal_manifest_hash
         )
@@ -287,7 +310,7 @@ class ValidatedSmaTargetProvider:
                     )
                     // estimated_price
                 ),
-                self._rules.max_order_quantity,
+                rules.max_order_quantity,
             )
         evidence_hash = _canonical_hash(
             {
@@ -299,6 +322,7 @@ class ValidatedSmaTargetProvider:
                 "last_session_date": latest.session_date.isoformat(),
                 "quote_evidence_hash": context.quote_snapshot.evidence_hash,
                 "registration_hash": registration.registration_hash,
+                "rule_set_hash": rule_set.rule_set_hash,
                 "signal_manifest_hash": manifest.manifest_hash,
                 "signal_policy_version": registration.signal_policy_version,
                 "slow_average": _decimal_text(slow_average),
@@ -314,7 +338,7 @@ class ValidatedSmaTargetProvider:
                 TargetInstrumentPosition(
                     instrument=registration.instrument,
                     target_quantity=target_quantity,
-                    rules=self._rules,
+                    rules=rules,
                     policy=self._policy,
                 ),
             ),
@@ -326,14 +350,16 @@ class ValidatedSmaTargetProvider:
         *,
         registration: ValidatedSmaRegistration,
         context: PaperStrategyContext,
+        rules: InstrumentRules,
     ) -> None:
         if (
             not isinstance(registration, ValidatedSmaRegistration)
             or registration.execution_mode != "paper"
             or registration.account_id != context.account_id
             or registration.strategy_id != self._strategy_id
-            or registration.instrument != self._rules.instrument
-            or registration.rule_version != self._rules.rule_version
+            or registration.instrument != rules.instrument
+            or registration.instrument != self._policy.allowed_instruments[0]
+            or registration.rule_version != rules.rule_version
             or registration.risk_policy_hash != self._policy.policy_hash
         ):
             raise ValueError("active paper registration does not match runtime controls")

@@ -242,6 +242,86 @@ async def test_calendar_refresh_rejects_missing_calendar_dates() -> None:
 
 
 @pytest.mark.asyncio
+async def test_session_reference_fetches_controls_without_unfinished_daily_bar() -> None:
+    client = FakeClient(
+        {
+            "trade_cal": [
+                [{"exchange": "SSE", "cal_date": "20260723", "is_open": "1"}]
+            ],
+            "stock_basic": [
+                [
+                    {
+                        "ts_code": "000001.SZ",
+                        "list_status": "L",
+                        "list_date": "19910403",
+                        "delist_date": None,
+                    }
+                ]
+            ],
+            "suspend_d": [
+                [
+                    {
+                        "ts_code": "000001.SZ",
+                        "trade_date": "20260722",
+                        "suspend_type": "S",
+                        "suspend_timing": None,
+                    }
+                ]
+            ],
+            "stk_limit": [
+                [
+                    {
+                        "ts_code": "000001.SZ",
+                        "trade_date": "20260723",
+                        "pre_close": "10",
+                        "up_limit": "11",
+                        "down_limit": "9",
+                    }
+                ]
+            ],
+        }
+    )
+
+    batch = await source(client).fetch_session_reference(
+        ("000001.XSHE",),
+        date(2026, 7, 23),
+    )
+
+    assert [call[0] for call in client.calls] == [
+        "trade_cal",
+        "stock_basic",
+        "suspend_d",
+        "stk_limit",
+    ]
+    assert batch.session.is_open is True
+    assert batch.suspensions[0].suspended is True
+    assert batch.price_limits[0].up_limit == Decimal("11")
+    assert {value.method for value in batch.source_evidence} == {
+        "trade_cal",
+        "stock_basic",
+        "suspend_d",
+        "stk_limit",
+    }
+
+
+@pytest.mark.asyncio
+async def test_session_reference_rejects_a_closed_session() -> None:
+    client = FakeClient(
+        {
+            "trade_cal": [
+                [{"exchange": "SSE", "cal_date": "20260725", "is_open": "0"}]
+            ]
+        }
+    )
+
+    with pytest.raises(VendorResponseError, match="open requested session"):
+        await source(client).fetch_session_reference(
+            ("000001.XSHE",),
+            date(2026, 7, 25),
+        )
+
+
+@pytest.mark.asyncio
 async def test_stock_basic_ignores_out_of_scope_bse_rows_before_symbol_mapping() -> None:
     responses = base_responses()
     listed = responses["stock_basic"][0]

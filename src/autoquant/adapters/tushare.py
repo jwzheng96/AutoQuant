@@ -25,6 +25,7 @@ from autoquant.data.daily_models import (
     DailyPriceLimit,
     DailySuspensionStatus,
     InstrumentLifecycle,
+    SessionReferenceBatch,
     TradingCalendarBatch,
     TradingSession,
 )
@@ -521,6 +522,99 @@ class TushareDailySource:
         return TradingCalendarBatch(
             sessions=tuple(sorted(sessions, key=lambda value: value.session_date)),
             source_evidence=(result.evidence,),
+        )
+
+    async def fetch_session_reference(
+        self,
+        instruments: tuple[str, ...],
+        session_date: date,
+    ) -> SessionReferenceBatch:
+        """Fetch exact current-session controls without requesting an incomplete daily bar."""
+
+        self._validate_request(instruments, session_date, session_date)
+        day = self._date_text(session_date)
+        calendar = await self._client.post(
+            "trade_cal",
+            params={
+                "exchange": "SSE",
+                "start_date": day,
+                "end_date": day,
+            },
+            fields=self.CALENDAR_FIELDS,
+        )
+        sessions = self._map_sessions(calendar)
+        if (
+            len(sessions) != 1
+            or sessions[0].session_date != session_date
+            or not sessions[0].is_open
+        ):
+            raise VendorResponseError(
+                "Tushare trade_cal does not prove an open requested session"
+            )
+        evidence = [calendar.evidence]
+        lifecycles: list[InstrumentLifecycle] = []
+        suspensions: list[DailySuspensionStatus] = []
+        price_limits: list[DailyPriceLimit] = []
+        for instrument in instruments:
+            vendor_code = to_tushare_code(instrument)
+            basic = await self._client.post(
+                "stock_basic",
+                params={"ts_code": vendor_code},
+                fields=self.BASIC_FIELDS,
+            )
+            evidence.append(basic.evidence)
+            mapped_lifecycles = self._map_lifecycles(
+                basic,
+                requested=frozenset((instrument,)),
+            )
+            if len(mapped_lifecycles) != 1:
+                raise VendorResponseError(
+                    "Tushare stock_basic did not exactly cover the requested instrument"
+                )
+            lifecycles.extend(mapped_lifecycles)
+
+            suspension = await self._client.post(
+                "suspend_d",
+                params={"ts_code": vendor_code, "end_date": day},
+                fields=self.SUSPEND_FIELDS,
+            )
+            evidence.append(suspension.evidence)
+            mapped_suspensions = self._map_suspensions(
+                suspension,
+                requested=instrument,
+                start=session_date,
+                end=session_date,
+                sessions=sessions,
+            )
+            if len(mapped_suspensions) != 1:
+                raise VendorResponseError(
+                    "Tushare suspend_d did not exactly cover the requested instrument"
+                )
+            suspensions.extend(mapped_suspensions)
+
+            limit = await self._client.post(
+                "stk_limit",
+                params={"ts_code": vendor_code, "trade_date": day},
+                fields=self.LIMIT_FIELDS,
+            )
+            evidence.append(limit.evidence)
+            mapped_limits = self._map_price_limits(
+                limit,
+                requested=instrument,
+                start=session_date,
+                end=session_date,
+            )
+            if len(mapped_limits) != 1:
+                raise VendorResponseError(
+                    "Tushare stk_limit did not exactly cover the requested instrument"
+                )
+            price_limits.extend(mapped_limits)
+        return SessionReferenceBatch(
+            session=sessions[0],
+            lifecycles=tuple(lifecycles),
+            suspensions=tuple(suspensions),
+            price_limits=tuple(price_limits),
+            source_evidence=tuple(evidence),
         )
 
     async def probe_capabilities(

@@ -25,6 +25,7 @@ from autoquant.execution.qmt_session_store import PostgresQmtSessionLeaseReposit
 from autoquant.operations import (
     inspect_paper_pre_open,
     run_daily_ingestion,
+    run_session_reference_refresh,
     run_trading_calendar_refresh,
     tushare_source,
 )
@@ -324,6 +325,29 @@ def refresh_trading_calendar(
         )
     except (AutoQuantError, ValueError):
         _fail("trading calendar refresh failed")
+    _emit(payload)
+    if payload["status"] != "completed":
+        raise typer.Exit(code=2)
+
+
+@app.command("refresh-session-reference")
+def refresh_session_reference(
+    instrument: Annotated[list[str], typer.Option("--instrument")],
+    date_value: Annotated[str, typer.Option("--date")],
+) -> None:
+    """Persist exact Tushare session controls without fetching its unfinished daily bar."""
+
+    settings = _settings()
+    try:
+        payload = asyncio.run(
+            run_session_reference_refresh(
+                settings,
+                tuple(instrument),
+                _parse_date(date_value, name="date"),
+            )
+        )
+    except (AutoQuantError, ValueError):
+        _fail("session reference refresh failed")
     _emit(payload)
     if payload["status"] != "completed":
         raise typer.Exit(code=2)
