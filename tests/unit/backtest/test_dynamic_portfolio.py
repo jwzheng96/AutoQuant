@@ -6,8 +6,11 @@ from decimal import Decimal
 import pytest
 
 from autoquant.backtest.dynamic_portfolio import (
+    DYNAMIC_REGIME_PORTFOLIO_SPEC_VERSION,
+    DYNAMIC_REGIME_PORTFOLIO_STRATEGY_ID,
     DynamicPortfolioEvidencePolicy,
     DynamicPortfolioResearchSpec,
+    DynamicRegimeFilter,
 )
 from autoquant.backtest.portfolio_validation import (
     CrossSectionalMomentumParameters,
@@ -32,6 +35,7 @@ def test_dynamic_spec_is_conservative_canonical_and_round_trips() -> None:
     )
 
     assert restored == value
+    assert "regime_filter" not in value.payload()
     assert restored.spec_hash == value.spec_hash
     assert restored.gross_allocation == Decimal("0.50")
     assert restored.maximum_position_weight == Decimal("0.05")
@@ -76,6 +80,34 @@ def test_dynamic_spec_hash_changes_with_any_frozen_assumption() -> None:
     )
 
     assert changed.spec_hash != baseline.spec_hash
+
+
+def test_regime_filtered_v2_is_canonical_and_distinct_from_v1() -> None:
+    baseline = _spec()
+    value = DynamicPortfolioResearchSpec(
+        dataset_manifest_hash=baseline.dataset_manifest_hash,
+        plan_hash=baseline.plan_hash,
+        policy_hash=baseline.policy_hash,
+        start_date=baseline.start_date,
+        end_date=baseline.end_date,
+        regime_filter=DynamicRegimeFilter(
+            predecessor_result_hash="d" * 64
+        ),
+        strategy_id=DYNAMIC_REGIME_PORTFOLIO_STRATEGY_ID,
+        version=DYNAMIC_REGIME_PORTFOLIO_SPEC_VERSION,
+    )
+
+    restored = DynamicPortfolioResearchSpec.from_payload(
+        value.payload()
+    )
+
+    assert restored == value
+    assert restored.spec_hash != baseline.spec_hash
+    assert restored.regime_filter == DynamicRegimeFilter(
+        predecessor_result_hash="d" * 64,
+        lookback_sessions=120,
+        minimum_positive_breadth=Decimal("0.50"),
+    )
 
 
 def test_dynamic_spec_rejects_concentration_or_lookahead() -> None:

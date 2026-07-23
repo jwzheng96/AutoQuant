@@ -911,6 +911,40 @@ def test_dynamic_market_panel_compilation_is_live_locked() -> None:
     compilation.assert_awaited_once()
 
 
+def test_dynamic_regime_spec_freeze_is_live_locked() -> None:
+    payload = {
+        "live_trading_locked": True,
+        "predecessor_result_hash": "a" * 64,
+        "spec_hash": "b" * 64,
+        "status": "frozen",
+    }
+    freeze = AsyncMock(return_value=payload)
+    with patch(
+        "autoquant.cli.freeze_dynamic_regime_research_spec",
+        new=freeze,
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "dynamic-regime-spec-freeze",
+                "--predecessor-result-hash",
+                "a" * 64,
+                "--requested-by",
+                "operator",
+            ],
+            env={
+                "AQ_POSTGRES_DSN": (
+                    "postgresql+asyncpg://sensitive"
+                )
+            },
+        )
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == payload
+    assert "sensitive" not in result.stdout
+    freeze.assert_awaited_once()
+
+
 def test_dynamic_validation_run_is_live_locked_and_redacted() -> None:
     payload = {
         "evidence_status": "rejected",

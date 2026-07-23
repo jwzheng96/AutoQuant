@@ -52,7 +52,10 @@ class DynamicCandidateEvaluation:
 
     def __post_init__(self) -> None:
         if (
-            self.result.strategy_id != self.parameters.strategy_id
+            not _strategy_matches(
+                self.parameters,
+                self.result.strategy_id,
+            )
             or not isinstance(self.score, Decimal)
             or not self.score.is_finite()
             or self.score != _selection_score(self.result)
@@ -98,9 +101,11 @@ class DynamicValidationFold:
             < self.test_start
             <= self.test_end
             or self.training_result.strategy_id
-            != self.selected.strategy_id
-            or self.test_result.strategy_id
-            != self.selected.strategy_id
+            != self.test_result.strategy_id
+            or not _strategy_matches(
+                self.selected,
+                self.training_result.strategy_id,
+            )
             or self.benchmark_result.strategy_id
             != DYNAMIC_PORTFOLIO_BENCHMARK_VERSION
             or not isinstance(self.selection_score, Decimal)
@@ -567,7 +572,16 @@ def _run_momentum(
         start_index : start_index + trade_session_count
     ]
     return _engine(spec).run_dynamic(
-        strategy_id=parameters.strategy_id,
+        strategy_id=(
+            parameters.strategy_id
+            if spec.regime_filter is None
+            else (
+                f"{spec.strategy_id}:"
+                f"lookback={parameters.lookback_sessions}:"
+                f"rebalance={parameters.rebalance_sessions}:"
+                f"select={parameters.selection_count}"
+            )
+        ),
         manifest_hash=panel.dataset_manifest_hash,
         as_of=panel.as_of,
         initial_cash=spec.initial_cash,
@@ -620,6 +634,21 @@ def _selection_score(result: BacktestResult) -> Decimal:
         result.total_return
         - result.max_drawdown
         - result.turnover * Decimal("0.001")
+    )
+
+
+def _strategy_matches(
+    parameters: CrossSectionalMomentumParameters,
+    strategy_id: str,
+) -> bool:
+    suffix = (
+        f"lookback={parameters.lookback_sessions}:"
+        f"rebalance={parameters.rebalance_sessions}:"
+        f"select={parameters.selection_count}"
+    )
+    return (
+        strategy_id == parameters.strategy_id
+        or strategy_id.endswith(f":{suffix}")
     )
 
 

@@ -13,7 +13,11 @@ from autoquant.adapters.postgres import PostgresControlRepository
 from autoquant.adapters.tushare import TushareDailySource, TushareHttpClient
 from autoquant.backtest.dynamic_panel import DynamicMarketPanelCompiler
 from autoquant.backtest.dynamic_portfolio import (
+    DYNAMIC_PORTFOLIO_STRATEGY_ID,
+    DYNAMIC_REGIME_PORTFOLIO_SPEC_VERSION,
+    DYNAMIC_REGIME_PORTFOLIO_STRATEGY_ID,
     DynamicPortfolioResearchSpec,
+    DynamicRegimeFilter,
 )
 from autoquant.backtest.dynamic_validation import (
     DynamicWalkForwardValidator,
@@ -1051,6 +1055,125 @@ async def run_dynamic_validation(
         await control.close()
         await universes.close()
         await campaigns.close()
+        await validations.close()
+        await specifications.close()
+
+
+async def freeze_dynamic_regime_research_spec(
+    settings: AppSettings,
+    *,
+    predecessor_result_hash: str,
+    requested_by: str,
+) -> dict[str, object]:
+    """Pre-register v2 only from an immutable rejected v1 result."""
+
+    if settings.live_trading_enabled:
+        raise MissingCapabilityError(
+            "dynamic regime specification requires live trading locked"
+        )
+    postgres_dsn = configured_dsn(
+        settings.postgres_dsn,
+        capability="PostgreSQL",
+    )
+    specifications = PostgresDynamicResearchSpecRepository.connect(
+        dsn=postgres_dsn
+    )
+    validations = PostgresDynamicValidationRepository.connect(
+        dsn=postgres_dsn
+    )
+    control = PostgresControlRepository.connect(dsn=postgres_dsn)
+    try:
+        predecessor = await validations.read(
+            predecessor_result_hash
+        )
+        if predecessor.evidence.evidence_status != "rejected":
+            raise ValueError(
+                "dynamic regime v2 requires a rejected predecessor"
+            )
+        base_record = await specifications.read(
+            predecessor.result.spec_hash
+        )
+        base = base_record.spec
+        if (
+            base.regime_filter is not None
+            or base.strategy_id
+            != DYNAMIC_PORTFOLIO_STRATEGY_ID
+        ):
+            raise ValueError(
+                "dynamic regime predecessor must be the v1 strategy"
+            )
+        regime = DynamicRegimeFilter(
+            predecessor_result_hash=(
+                predecessor.result.result_hash
+            ),
+        )
+        spec = DynamicPortfolioResearchSpec(
+            dataset_manifest_hash=base.dataset_manifest_hash,
+            plan_hash=base.plan_hash,
+            policy_hash=base.policy_hash,
+            start_date=base.start_date,
+            end_date=base.end_date,
+            initial_cash=base.initial_cash,
+            gross_allocation=base.gross_allocation,
+            maximum_position_weight=base.maximum_position_weight,
+            maximum_order_notional=base.maximum_order_notional,
+            slippage_bps=base.slippage_bps,
+            maximum_volume_participation=(
+                base.maximum_volume_participation
+            ),
+            train_sessions=base.train_sessions,
+            test_sessions=base.test_sessions,
+            embargo_sessions=base.embargo_sessions,
+            signal_lag_sessions=base.signal_lag_sessions,
+            minimum_member_history_sessions=(
+                base.minimum_member_history_sessions
+            ),
+            candidates=base.candidates,
+            regime_filter=regime,
+            evidence_policy=base.evidence_policy,
+            strategy_id=DYNAMIC_REGIME_PORTFOLIO_STRATEGY_ID,
+            benchmark_version=base.benchmark_version,
+            valuation_version=base.valuation_version,
+            version=DYNAMIC_REGIME_PORTFOLIO_SPEC_VERSION,
+        )
+        created_at = datetime.now(UTC)
+        record = await specifications.freeze(
+            spec,
+            requested_by=requested_by,
+            created_at=created_at,
+        )
+        payload: dict[str, object] = {
+            "created_at": record.created_at.isoformat(),
+            "dataset_manifest_hash": (
+                record.spec.dataset_manifest_hash
+            ),
+            "live_trading_locked": True,
+            "minimum_positive_breadth": str(
+                regime.minimum_positive_breadth
+            ),
+            "predecessor_result_hash": (
+                regime.predecessor_result_hash
+            ),
+            "regime_lookback_sessions": (
+                regime.lookback_sessions
+            ),
+            "spec_hash": record.spec.spec_hash,
+            "status": "frozen",
+            "strategy_id": record.spec.strategy_id,
+            "version": record.spec.version,
+        }
+        await control.append_audit_event(
+            "research.dynamic_regime.spec.frozen",
+            created_at,
+            {
+                **payload,
+                "requested_by": requested_by,
+                "specification": record.spec.payload(),
+            },
+        )
+        return payload
+    finally:
+        await control.close()
         await validations.close()
         await specifications.close()
 

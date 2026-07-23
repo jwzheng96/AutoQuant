@@ -44,6 +44,7 @@ Apply `migrations/postgres/001_phase1.sql`,
 `migrations/postgres/024_research_data_campaigns.sql`, then
 `migrations/postgres/025_dynamic_research_specs.sql`, then
 `migrations/postgres/026_dynamic_validation_evidence.sql`, then
+`migrations/postgres/027_dynamic_regime_research.sql`, then
 `migrations/clickhouse/001_phase1.sql` and
 `migrations/clickhouse/002_tushare_daily.sql` and
 `migrations/clickhouse/003_daily_coverage.sql` in order, only to explicitly authorized

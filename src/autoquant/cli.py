@@ -37,6 +37,7 @@ from autoquant.operations import (
     create_research_data_campaign,
     create_research_universe_snapshot,
     create_validation_campaign,
+    freeze_dynamic_regime_research_spec,
     freeze_dynamic_research_spec,
     inspect_paper_pre_open,
     inspect_paper_promotion,
@@ -1016,6 +1017,29 @@ def dynamic_market_panel_compile(
         )
     except (AutoQuantError, LookupError, ValueError):
         _fail("dynamic market panel compilation failed")
+    _emit(payload)
+
+
+@app.command("dynamic-regime-spec-freeze")
+def dynamic_regime_spec_freeze(
+    predecessor_result_hash: Annotated[
+        str,
+        typer.Option("--predecessor-result-hash"),
+    ],
+    requested_by: Annotated[str, typer.Option("--requested-by")],
+) -> None:
+    """Freeze the v2 regime hypothesis from a rejected v1 result."""
+
+    try:
+        payload = asyncio.run(
+            freeze_dynamic_regime_research_spec(
+                _settings(),
+                predecessor_result_hash=predecessor_result_hash,
+                requested_by=requested_by,
+            )
+        )
+    except (AutoQuantError, LookupError, ValueError):
+        _fail("dynamic regime specification freeze failed")
     _emit(payload)
 
 

@@ -12,7 +12,10 @@ import pytest_asyncio
 
 from autoquant.adapters.postgres import PostgresControlRepository
 from autoquant.backtest.dynamic_portfolio import (
+    DYNAMIC_REGIME_PORTFOLIO_SPEC_VERSION,
+    DYNAMIC_REGIME_PORTFOLIO_STRATEGY_ID,
     DynamicPortfolioResearchSpec,
+    DynamicRegimeFilter,
 )
 from autoquant.backtest.dynamic_validation import (
     DynamicCandidateEvaluation,
@@ -79,6 +82,7 @@ async def repositories() -> AsyncIterator[
             "migrations/postgres/024_research_data_campaigns.sql",
             "migrations/postgres/025_dynamic_research_specs.sql",
             "migrations/postgres/026_dynamic_validation_evidence.sql",
+            "migrations/postgres/027_dynamic_regime_research.sql",
         )
     )
     try:
@@ -326,6 +330,27 @@ async def test_campaign_recovers_retries_and_finalizes_verified_shards(
         await validations.read(validation_result.result_hash)
         == validation_record
     )
+    regime_spec = DynamicPortfolioResearchSpec(
+        dataset_manifest_hash=frozen.dataset_manifest_hash,
+        plan_hash=frozen.plan_hash,
+        policy_hash=frozen.policy_hash,
+        start_date=frozen.start_date,
+        end_date=frozen.end_date,
+        regime_filter=DynamicRegimeFilter(
+            predecessor_result_hash=(
+                validation_result.result_hash
+            )
+        ),
+        strategy_id=DYNAMIC_REGIME_PORTFOLIO_STRATEGY_ID,
+        version=DYNAMIC_REGIME_PORTFOLIO_SPEC_VERSION,
+    )
+    regime_record = await specs.freeze(
+        regime_spec,
+        requested_by="test",
+        created_at=NOW,
+    )
+
+    assert await specs.read(regime_spec.spec_hash) == regime_record
     with pytest.raises(ValueError, match="already frozen"):
         await specs.freeze(
             DynamicPortfolioResearchSpec(

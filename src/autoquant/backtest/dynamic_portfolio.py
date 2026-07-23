@@ -17,6 +17,13 @@ DYNAMIC_PORTFOLIO_STRATEGY_ID = (
     "dynamic-universe-cross-sectional-momentum-v1"
 )
 DYNAMIC_PORTFOLIO_SPEC_VERSION = "dynamic-portfolio-research-spec-v1"
+DYNAMIC_REGIME_PORTFOLIO_STRATEGY_ID = (
+    "dynamic-universe-regime-filtered-momentum-v2"
+)
+DYNAMIC_REGIME_PORTFOLIO_SPEC_VERSION = (
+    "dynamic-regime-portfolio-research-spec-v2"
+)
+DYNAMIC_REGIME_FILTER_VERSION = "absolute-trend-breadth-regime-v1"
 DYNAMIC_PORTFOLIO_BENCHMARK_VERSION = (
     "point-in-time-equal-weight-quarterly-v1"
 )
@@ -142,6 +149,67 @@ class DynamicPortfolioEvidencePolicy:
 
 
 @dataclass(frozen=True, slots=True)
+class DynamicRegimeFilter:
+    predecessor_result_hash: str
+    lookback_sessions: int = 120
+    minimum_positive_breadth: Decimal = Decimal("0.50")
+    version: str = DYNAMIC_REGIME_FILTER_VERSION
+
+    def __post_init__(self) -> None:
+        _require_lowercase_sha256(
+            self.predecessor_result_hash,
+            name="dynamic regime predecessor result hash",
+        )
+        if not 60 <= self.lookback_sessions <= 252:
+            raise ValueError("dynamic regime lookback is invalid")
+        if (
+            not isinstance(self.minimum_positive_breadth, Decimal)
+            or not self.minimum_positive_breadth.is_finite()
+            or not Decimal("0.30")
+            <= self.minimum_positive_breadth
+            <= Decimal("0.70")
+        ):
+            raise ValueError("dynamic regime breadth is invalid")
+        if self.version != DYNAMIC_REGIME_FILTER_VERSION:
+            raise ValueError("dynamic regime filter version is unsupported")
+
+    def payload(self) -> dict[str, object]:
+        return {
+            "lookback_sessions": self.lookback_sessions,
+            "minimum_positive_breadth": _decimal_text(
+                self.minimum_positive_breadth
+            ),
+            "predecessor_result_hash": (
+                self.predecessor_result_hash
+            ),
+            "version": self.version,
+        }
+
+    @classmethod
+    def from_payload(
+        cls,
+        payload: dict[str, object],
+    ) -> DynamicRegimeFilter:
+        value = cls(
+            predecessor_result_hash=str(
+                payload["predecessor_result_hash"]
+            ),
+            lookback_sessions=int(
+                str(payload["lookback_sessions"])
+            ),
+            minimum_positive_breadth=Decimal(
+                str(payload["minimum_positive_breadth"])
+            ),
+            version=str(payload["version"]),
+        )
+        if value.payload() != payload:
+            raise ValueError(
+                "dynamic regime filter payload is not canonical"
+            )
+        return value
+
+
+@dataclass(frozen=True, slots=True)
 class DynamicPortfolioResearchSpec:
     dataset_manifest_hash: str
     plan_hash: str
@@ -165,6 +233,7 @@ class DynamicPortfolioResearchSpec:
         CrossSectionalMomentumParameters(120, 20, 10),
         CrossSectionalMomentumParameters(252, 21, 10),
     )
+    regime_filter: DynamicRegimeFilter | None = None
     evidence_policy: DynamicPortfolioEvidencePolicy = field(
         default_factory=DynamicPortfolioEvidencePolicy
     )
@@ -249,19 +318,36 @@ class DynamicPortfolioResearchSpec:
         ):
             raise ValueError("dynamic candidate exceeds frozen risk limits")
         if (
-            self.strategy_id != DYNAMIC_PORTFOLIO_STRATEGY_ID
-            or self.benchmark_version
+            self.benchmark_version
             != DYNAMIC_PORTFOLIO_BENCHMARK_VERSION
             or self.valuation_version
             != DYNAMIC_PORTFOLIO_VALUATION_VERSION
-            or self.version != DYNAMIC_PORTFOLIO_SPEC_VERSION
         ):
             raise ValueError("dynamic research version is unsupported")
+        if self.regime_filter is None:
+            if (
+                self.strategy_id != DYNAMIC_PORTFOLIO_STRATEGY_ID
+                or self.version != DYNAMIC_PORTFOLIO_SPEC_VERSION
+            ):
+                raise ValueError(
+                    "dynamic research version is unsupported"
+                )
+        elif (
+            self.strategy_id
+            != DYNAMIC_REGIME_PORTFOLIO_STRATEGY_ID
+            or self.version
+            != DYNAMIC_REGIME_PORTFOLIO_SPEC_VERSION
+            or self.regime_filter.lookback_sessions
+            >= self.train_sessions
+        ):
+            raise ValueError(
+                "dynamic regime research version is unsupported"
+            )
         object.__setattr__(self, "candidates", candidates)
         object.__setattr__(self, "spec_hash", _canonical_hash(self.payload()))
 
     def payload(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "benchmark_version": self.benchmark_version,
             "candidates": [value.payload() for value in self.candidates],
             "dataset_manifest_hash": self.dataset_manifest_hash,
@@ -293,6 +379,9 @@ class DynamicPortfolioResearchSpec:
             "valuation_version": self.valuation_version,
             "version": self.version,
         }
+        if self.regime_filter is not None:
+            payload["regime_filter"] = self.regime_filter.payload()
+        return payload
 
     @classmethod
     def from_payload(
@@ -301,9 +390,13 @@ class DynamicPortfolioResearchSpec:
     ) -> DynamicPortfolioResearchSpec:
         raw_candidates = payload.get("candidates")
         raw_evidence = payload.get("evidence_policy")
+        raw_regime = payload.get("regime_filter")
         if not isinstance(raw_candidates, list) or not isinstance(
             raw_evidence,
             dict,
+        ) or (
+            raw_regime is not None
+            and not isinstance(raw_regime, dict)
         ):
             raise TypeError("dynamic research nested payloads are invalid")
         candidates = tuple(
@@ -343,6 +436,16 @@ class DynamicPortfolioResearchSpec:
                 str(payload["minimum_member_history_sessions"])
             ),
             candidates=candidates,
+            regime_filter=(
+                None
+                if raw_regime is None
+                else DynamicRegimeFilter.from_payload(
+                    {
+                        str(key): item
+                        for key, item in raw_regime.items()
+                    }
+                )
+            ),
             evidence_policy=DynamicPortfolioEvidencePolicy.from_payload(
                 {str(key): item for key, item in raw_evidence.items()}
             ),

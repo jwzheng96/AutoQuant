@@ -5,7 +5,10 @@ from decimal import Decimal
 
 from autoquant.backtest.dynamic_panel import DynamicMarketSession
 from autoquant.backtest.dynamic_portfolio import (
+    DYNAMIC_REGIME_PORTFOLIO_SPEC_VERSION,
+    DYNAMIC_REGIME_PORTFOLIO_STRATEGY_ID,
     DynamicPortfolioResearchSpec,
+    DynamicRegimeFilter,
 )
 from autoquant.backtest.dynamic_strategy import (
     DynamicEqualWeightBenchmarkPolicy,
@@ -201,3 +204,69 @@ def test_dynamic_benchmark_rebalances_only_frozen_current_members() -> None:
 
     assert tuple(value.instrument for value in orders) == INSTRUMENTS[:2]
     assert all(value.side is OrderSide.BUY for value in orders)
+
+
+def test_regime_filter_uses_lagged_absolute_trend_and_breadth() -> None:
+    positive = _regime_sessions(signal_shift=Decimal("0"))
+    negative = _regime_sessions(signal_shift=Decimal("-5"))
+
+    assert _regime_orders(positive)
+    assert _regime_orders(negative) == ()
+
+
+def _regime_sessions(
+    *,
+    signal_shift: Decimal,
+) -> tuple[DynamicMarketSession, ...]:
+    return tuple(
+        DynamicMarketSession(
+            session_date=date(2026, 1, 1) + timedelta(days=index),
+            snapshot_hash=f"{index + 1:064x}",
+            active_members=INSTRUMENTS,
+            markets=tuple(
+                _market(
+                    instrument,
+                    index,
+                    close_shift=(
+                        signal_shift
+                        if index == 120
+                        else Decimal("0")
+                    ),
+                )
+                for instrument in INSTRUMENTS
+            ),
+        )
+        for index in range(123)
+    )
+
+
+def _regime_orders(
+    sessions: tuple[DynamicMarketSession, ...],
+) -> tuple[tuple[str, OrderSide], ...]:
+    spec = DynamicPortfolioResearchSpec(
+        dataset_manifest_hash="a" * 64,
+        plan_hash="b" * 64,
+        policy_hash="c" * 64,
+        start_date=date(2026, 1, 1),
+        end_date=date(2026, 12, 31),
+        gross_allocation=Decimal("0.10"),
+        maximum_position_weight=Decimal("0.05"),
+        minimum_member_history_sessions=20,
+        candidates=(PARAMETERS,),
+        regime_filter=DynamicRegimeFilter(
+            predecessor_result_hash="d" * 64
+        ),
+        strategy_id=DYNAMIC_REGIME_PORTFOLIO_STRATEGY_ID,
+        version=DYNAMIC_REGIME_PORTFOLIO_SPEC_VERSION,
+    )
+    policy = DynamicMomentumOrderPolicy(
+        sessions=sessions,
+        start_index=121,
+        trade_session_count=2,
+        parameters=PARAMETERS,
+        spec=spec,
+    )
+    return tuple(
+        (value.instrument, value.side)
+        for value in policy(0, sessions[121].markets, None)
+    )

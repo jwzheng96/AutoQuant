@@ -15,7 +15,10 @@ from autoquant.backtest.dynamic_panel import (
     InstrumentMarketHistory,
 )
 from autoquant.backtest.dynamic_portfolio import (
+    DYNAMIC_REGIME_PORTFOLIO_SPEC_VERSION,
+    DYNAMIC_REGIME_PORTFOLIO_STRATEGY_ID,
     DynamicPortfolioResearchSpec,
+    DynamicRegimeFilter,
 )
 from autoquant.backtest.dynamic_validation import (
     DynamicWalkForwardValidator,
@@ -245,3 +248,28 @@ def test_dynamic_validation_migration_is_additive_and_immutable() -> None:
     assert sql.count("autoquant_reject_immutable_change()") == 2
     assert "live_trading_locked" in sql
     assert "VALUES ('postgres', 26)" in sql
+
+
+def test_regime_v2_validation_preserves_strategy_identity() -> None:
+    count = 273
+    baseline = _spec(count)
+    spec = replace(
+        baseline,
+        regime_filter=DynamicRegimeFilter(
+            predecessor_result_hash="e" * 64
+        ),
+        strategy_id=DYNAMIC_REGIME_PORTFOLIO_STRATEGY_ID,
+        version=DYNAMIC_REGIME_PORTFOLIO_SPEC_VERSION,
+    )
+
+    result = DynamicWalkForwardValidator().run(
+        panel=_panel(count, spec),
+        spec=spec,
+    )
+
+    assert result.folds[0].training_result.strategy_id.startswith(
+        f"{DYNAMIC_REGIME_PORTFOLIO_STRATEGY_ID}:"
+    )
+    assert result.folds[0].test_result.strategy_id == (
+        result.folds[0].training_result.strategy_id
+    )

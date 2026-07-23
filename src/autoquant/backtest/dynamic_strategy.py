@@ -112,10 +112,17 @@ class DynamicMomentumOrderPolicy:
         if not rebalance:
             return ()
         self._last_rebalance = trade_index
-        selected = self._selected(
-            absolute_index=absolute_index,
-            signal_index=signal_index,
-            lookback_index=lookback_index,
+        selected = (
+            self._selected(
+                absolute_index=absolute_index,
+                signal_index=signal_index,
+                lookback_index=lookback_index,
+            )
+            if self._regime_is_active(
+                absolute_index=absolute_index,
+                signal_index=signal_index,
+            )
+            else set()
         )
         orders = list(
             self._exit_orders(
@@ -209,6 +216,55 @@ class DynamicMomentumOrderPolicy:
             ]
             if score > 0
         }
+
+    def _regime_is_active(
+        self,
+        *,
+        absolute_index: int,
+        signal_index: int,
+    ) -> bool:
+        regime = self._spec.regime_filter
+        if regime is None:
+            return True
+        lookback_index = signal_index - regime.lookback_sessions
+        if lookback_index < 0:
+            return False
+        members = set(
+            self._sessions[absolute_index].active_members
+        )
+        signal = {
+            value.bar.instrument: value
+            for value in self._sessions[signal_index].markets
+        }
+        lookback = {
+            value.bar.instrument: value
+            for value in self._sessions[lookback_index].markets
+        }
+        returns = tuple(
+            signal[instrument].bar.close_price
+            / lookback[instrument].bar.close_price
+            - Decimal("1")
+            for instrument in members
+            if instrument in signal
+            and instrument in lookback
+            and self._observed_session_count(
+                instrument,
+                signal_index,
+            )
+            >= self._spec.minimum_member_history_sessions
+        )
+        if not returns:
+            return False
+        average_return = sum(returns, Decimal("0")) / Decimal(
+            len(returns)
+        )
+        breadth = Decimal(
+            sum(value > 0 for value in returns)
+        ) / Decimal(len(returns))
+        return (
+            average_return > 0
+            and breadth >= regime.minimum_positive_breadth
+        )
 
     def _observed_session_count(
         self,
