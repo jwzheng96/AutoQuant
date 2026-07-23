@@ -55,6 +55,7 @@ from autoquant.operations import (
     run_dynamic_validation,
     run_fundamental_data_backfill,
     run_fundamental_ingestion,
+    run_fundamental_validation,
     run_qmt_readonly_acceptance,
     run_research_data_campaign,
     run_session_reference_refresh,
@@ -132,9 +133,7 @@ def _parse_sma_candidate(value: str) -> SmaParameters:
             slow_sessions=int(slow_text),
         )
     except (TypeError, ValueError):
-        _fail(
-            "candidate must use FAST:SLOW with valid SMA windows"
-        )
+        _fail("candidate must use FAST:SLOW with valid SMA windows")
 
 
 def _parse_momentum_candidate(
@@ -148,10 +147,7 @@ def _parse_momentum_candidate(
             selection_count=int(selection),
         )
     except (TypeError, ValueError):
-        _fail(
-            "candidate must use LOOKBACK:REBALANCE:COUNT "
-            "with valid momentum windows"
-        )
+        _fail("candidate must use LOOKBACK:REBALANCE:COUNT with valid momentum windows")
 
 
 def _require_dsn(value: SecretStr | None, *, capability: str) -> str:
@@ -202,9 +198,7 @@ async def _rqdata_read(
         credentials=settings.require_rqdata(),
         auth_url=settings.rqdata_auth_url,
         api_url=settings.rqdata_api_url,
-        availability=HistoricalMinutePolicy(
-            version="rqdata-minute-v1", delay=timedelta(seconds=5)
-        ),
+        availability=HistoricalMinutePolicy(version="rqdata-minute-v1", delay=timedelta(seconds=5)),
     )
     try:
         await source.authenticate()
@@ -245,9 +239,7 @@ async def _tushare_capabilities(
 ) -> dict[str, str]:
     source = _tushare_source(settings)
     try:
-        return await source.probe_capabilities(
-            instrument=instrument, session_date=session_date
-        )
+        return await source.probe_capabilities(instrument=instrument, session_date=session_date)
     finally:
         await source.close()
 
@@ -332,9 +324,7 @@ def qmt_check() -> None:
 
     settings = _settings()
     try:
-        kill_switch_active, active_session_ids = asyncio.run(
-            _qmt_preflight_db_state(settings)
-        )
+        kill_switch_active, active_session_ids = asyncio.run(_qmt_preflight_db_state(settings))
     except (AutoQuantError, LookupError, ValueError):
         kill_switch_active = None
         active_session_ids = None
@@ -346,8 +336,7 @@ def qmt_check() -> None:
     _emit(
         {
             "checks": {
-                check.code.value: "pass" if check.passed else "blocked"
-                for check in report.checks
+                check.code.value: "pass" if check.passed else "blocked" for check in report.checks
             },
             "live_trading_ready": report.live_trading_ready,
             "order_drill_ready": report.order_drill_ready,
@@ -450,11 +439,7 @@ def paper_preopen_check(
     """Inspect trusted pre-open marks while the paper kill switch remains active."""
 
     settings = _settings()
-    instant = (
-        datetime.now(UTC)
-        if as_of is None
-        else _parse_instant(as_of, name="as-of")
-    )
+    instant = datetime.now(UTC) if as_of is None else _parse_instant(as_of, name="as-of")
     try:
         payload = asyncio.run(
             inspect_paper_pre_open(
@@ -474,9 +459,7 @@ def paper_runtime_check() -> None:
     """Replay cold-start evidence without opening QMT or resetting controls."""
 
     try:
-        payload = asyncio.run(
-            inspect_paper_runtime_readiness(_settings())
-        )
+        payload = asyncio.run(inspect_paper_runtime_readiness(_settings()))
     except MissingCapabilityError as error:
         _fail(str(error))
     except (AutoQuantError, LookupError, ValueError):
@@ -511,14 +494,12 @@ async def _run_resident_paper(settings: AppSettings) -> None:
     client = ImportedXtDataClient.load()
     assembled = await assemble_paper_runtime(
         settings,
-        quote_runtime_factory=lambda bridge, instruments, calendar, clock: (
-            QmtWholeQuoteRuntime(
-                client=client,
-                bridge=bridge,
-                instruments=instruments,
-                calendar=calendar,
-                market_clock=clock,
-            )
+        quote_runtime_factory=lambda bridge, instruments, calendar, clock: QmtWholeQuoteRuntime(
+            client=client,
+            bridge=bridge,
+            instruments=instruments,
+            calendar=calendar,
+            market_clock=clock,
         ),
     )
     async with assembled:
@@ -572,9 +553,7 @@ def refresh_trading_calendar(
     start_date = _parse_date(start, name="start")
     end_date = _parse_date(end, name="end")
     try:
-        payload = asyncio.run(
-            run_trading_calendar_refresh(settings, start_date, end_date)
-        )
+        payload = asyncio.run(run_trading_calendar_refresh(settings, start_date, end_date))
     except (AutoQuantError, ValueError):
         _fail("trading calendar refresh failed")
     _emit(payload)
@@ -684,10 +663,7 @@ def validation_campaign_create(
                 train_sessions=train_sessions,
                 test_sessions=test_sessions,
                 embargo_sessions=embargo_sessions,
-                candidates=tuple(
-                    _parse_sma_candidate(value)
-                    for value in candidate
-                ),
+                candidates=tuple(_parse_sma_candidate(value) for value in candidate),
                 requested_by=requested_by,
             )
         )
@@ -781,10 +757,7 @@ def portfolio_validation_create(
             train_sessions=train_sessions,
             test_sessions=test_sessions,
             embargo_sessions=embargo_sessions,
-            candidates=tuple(
-                _parse_momentum_candidate(value)
-                for value in candidate
-            ),
+            candidates=tuple(_parse_momentum_candidate(value) for value in candidate),
             idempotency_key=idempotency_key,
         )
         payload = asyncio.run(
@@ -816,14 +789,9 @@ def portfolio_validation_status(
         _fail("portfolio validation status failed")
     _emit(payload)
     assessment = payload.get("assessment")
-    evidence_status = (
-        assessment.get("evidence_status")
-        if isinstance(assessment, dict)
-        else None
-    )
+    evidence_status = assessment.get("evidence_status") if isinstance(assessment, dict) else None
     if payload["state"] in {"failed", "interrupted"} or (
-        payload["state"] == "completed"
-        and evidence_status != "research_candidate"
+        payload["state"] == "completed" and evidence_status != "research_candidate"
     ):
         raise typer.Exit(code=2)
 
@@ -1162,6 +1130,26 @@ def fundamental_panel_compile(
     _emit(payload)
 
 
+@app.command("fundamental-validation-run")
+def fundamental_validation_run(
+    spec_hash: Annotated[str, typer.Option("--spec-hash")],
+    requested_by: Annotated[str, typer.Option("--requested-by")],
+) -> None:
+    """Run fixed v3 OOS validation; live trading remains locked."""
+
+    try:
+        payload = asyncio.run(
+            run_fundamental_validation(
+                _settings(),
+                spec_hash=spec_hash,
+                requested_by=requested_by,
+            )
+        )
+    except (AutoQuantError, LookupError, ValueError):
+        _fail("fundamental validation failed")
+    _emit(payload)
+
+
 @app.command("research-input-shard-check")
 def research_input_shard_check(
     manifest_hash: Annotated[str, typer.Option("--manifest-hash")],
@@ -1304,16 +1292,12 @@ def approve_paper_portfolio(
         or len(experiment_id) > 20
         or len(experiment_id) != len(signal_manifest_hash)
     ):
-        _fail(
-            "provide 3-20 matched experiment and signal manifest options"
-        )
+        _fail("provide 3-20 matched experiment and signal manifest options")
     try:
         payload = asyncio.run(
             approve_paper_sma_portfolio_strategy(
                 _settings(),
-                experiment_ids=tuple(
-                    UUID(value) for value in experiment_id
-                ),
+                experiment_ids=tuple(UUID(value) for value in experiment_id),
                 signal_manifest_hashes=tuple(signal_manifest_hash),
                 valuation_manifest_hash=valuation_manifest_hash,
                 reference_session_date=_parse_date(
@@ -1442,9 +1426,7 @@ def ingest_daily(
     start_date = _parse_date(start, name="start")
     end_date = _parse_date(end, name="end")
     try:
-        payload = asyncio.run(
-            _ingest_daily(settings, tuple(instrument), start_date, end_date)
-        )
+        payload = asyncio.run(_ingest_daily(settings, tuple(instrument), start_date, end_date))
     except (AutoQuantError, ValueError):
         _fail("daily ingestion failed")
     _emit(payload)
@@ -1477,10 +1459,7 @@ def ingest_fundamental(
     except (AutoQuantError, ValueError):
         _fail("fundamental ingestion failed")
     _emit(payload)
-    if (
-        payload["status"] != "completed"
-        or payload["manifest_hash"] is None
-    ):
+    if payload["status"] != "completed" or payload["manifest_hash"] is None:
         raise typer.Exit(code=2)
 
 

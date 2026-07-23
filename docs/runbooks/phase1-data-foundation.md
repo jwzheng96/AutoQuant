@@ -48,6 +48,7 @@ Apply `migrations/postgres/001_phase1.sql`,
 `migrations/postgres/028_fundamental_research.sql`, then
 `migrations/postgres/029_fundamental_dataset.sql`, then
 `migrations/postgres/030_fundamental_panels.sql`, then
+`migrations/postgres/031_fundamental_validation.sql`, then
 `migrations/clickhouse/001_phase1.sql` and
 `migrations/clickhouse/002_tushare_daily.sql` and
 `migrations/clickhouse/003_daily_coverage.sql` and
@@ -687,3 +688,26 @@ exchange session's valuation and only financial reports visible by that executio
 09:30 open. The panel records eligible and insufficient session counts; sessions below the
 frozen 60-member threshold cannot emit a portfolio signal. The command never changes the
 live-trading lock.
+
+After schema v31 is applied, run the pre-registered validation exactly once:
+
+```bash
+uv run autoquant fundamental-validation-run \
+  --spec-hash <frozen-v3-spec-hash> \
+  --requested-by operator
+```
+
+The job rebuilds the frozen feature panel and requires the same panel hash before it reads
+returns. Executable daily rows are loaded in bounded four-instrument batches. Each batch reads
+the immutable rows named by each manifest, discovers the corresponding calendar evidence
+without assuming equal row counts between endpoints, and verifies the original per-manifest
+record order before compiling adjusted market states. The fixed strategy uses no candidate
+search. It runs 504-session training windows, a five-session embargo, and independent
+63-session test folds against the point-in-time quarterly equal-weight benchmark.
+
+Schema v31 stores every training, test, and benchmark ledger as immutable JSON evidence plus
+the fold hashes and aggregate assessment. A candidate must pass the frozen return, excess
+return, profitable-fold, drawdown, train/test-gap, execution-rejection, sample-size, and
+zero-unresolved-position gates. A rerun for an already stored spec returns the existing
+immutable result. A passing result is only eligible for a separately controlled paper-trading
+stage; it does not unlock paper or live execution.

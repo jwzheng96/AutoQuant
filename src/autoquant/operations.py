@@ -30,9 +30,17 @@ from autoquant.backtest.fundamental_panel import (
     FundamentalMarketBinding,
     FundamentalMarketSessionBinding,
     FundamentalPanelCompiler,
+    FundamentalResearchPanel,
 )
 from autoquant.backtest.fundamental_portfolio import (
     FundamentalPortfolioResearchSpec,
+)
+from autoquant.backtest.fundamental_strategy import (
+    compile_fundamental_executable_panel,
+)
+from autoquant.backtest.fundamental_validation import (
+    FundamentalWalkForwardValidator,
+    assess_fundamental_validation,
 )
 from autoquant.backtest.runner import ManifestMarketCompiler
 from autoquant.backtest.validation import (
@@ -50,6 +58,7 @@ from autoquant.data.daily_ingestion import (
 )
 from autoquant.data.daily_quality import DailyQualityGate
 from autoquant.data.fundamental_dataset import (
+    FundamentalResearchDatasetManifest,
     ValidatedFundamentalDatasetReader,
 )
 from autoquant.data.fundamental_ingestion import (
@@ -59,6 +68,7 @@ from autoquant.data.fundamental_ingestion import (
 from autoquant.data.fundamental_quality import FundamentalQualityGate
 from autoquant.data.research_data_campaign import ResearchDataCampaignSpec
 from autoquant.data.research_input import (
+    ExactManifestResearchDatasetReader,
     ResearchInputPlan,
     ResearchUniverseBinding,
     ValidatedResearchDatasetReader,
@@ -155,6 +165,10 @@ from autoquant.web.fundamental_panel_store import (
 from autoquant.web.fundamental_research_store import (
     PostgresFundamentalResearchSpecRepository,
 )
+from autoquant.web.fundamental_validation_store import (
+    FundamentalValidationRecord,
+    PostgresFundamentalValidationRepository,
+)
 from autoquant.web.models import (
     PortfolioValidationExperiment,
     PortfolioWalkForwardJobRequest,
@@ -221,16 +235,11 @@ class _RecyclingDailyDatasetReader:
         manifest_hash: str,
         as_of: datetime,
     ) -> ValidatedDailyDataset:
-        if (
-            self._reader is None
-            or self._queries >= self._recycle_after
-        ):
+        if self._reader is None or self._queries >= self._recycle_after:
             await self._reconnect()
         reader = self._reader
         if reader is None:
-            raise PersistenceUnavailableError(
-                "ClickHouse recycling reader is unavailable"
-            )
+            raise PersistenceUnavailableError("ClickHouse recycling reader is unavailable")
         try:
             dataset = await reader.query(manifest_hash, as_of)
         except PersistenceUnavailableError:
@@ -262,14 +271,10 @@ class _RecyclingDailyDatasetReader:
         if self._market is None:
             return
         try:
-            await self._market.client.command(
-                "SYSTEM JEMALLOC PURGE"
-            )
+            await self._market.client.command("SYSTEM JEMALLOC PURGE")
         except Exception:
             if strict:
-                raise PersistenceUnavailableError(
-                    "ClickHouse allocator purge failed"
-                ) from None
+                raise PersistenceUnavailableError("ClickHouse allocator purge failed") from None
 
 
 async def run_daily_ingestion(
@@ -331,9 +336,7 @@ async def run_fundamental_ingestion(
     end: date,
 ) -> dict[str, object]:
     if settings.live_trading_enabled:
-        raise MissingCapabilityError(
-            "fundamental ingestion requires live trading locked"
-        )
+        raise MissingCapabilityError("fundamental ingestion requires live trading locked")
     source: TushareDailySource | None = None
     clickhouse: ClickHouseFundamentalRepository | None = None
     postgres: PostgresControlRepository | None = None
@@ -396,17 +399,9 @@ async def create_research_universe_snapshot(
     requested_by: str,
 ) -> dict[str, object]:
     if settings.live_trading_enabled:
-        raise MissingCapabilityError(
-            "research universe creation requires live trading locked"
-        )
-    if (
-        not requested_by.strip()
-        or requested_by != requested_by.strip()
-        or len(requested_by) > 128
-    ):
-        raise ValueError(
-            "requested_by must contain 1-128 trimmed characters"
-        )
+        raise MissingCapabilityError("research universe creation requires live trading locked")
+    if not requested_by.strip() or requested_by != requested_by.strip() or len(requested_by) > 128:
+        raise ValueError("requested_by must contain 1-128 trimmed characters")
     source: TushareDailySource | None = None
     control: PostgresControlRepository | None = None
     repository: PostgresResearchUniverseRepository | None = None
@@ -418,17 +413,13 @@ async def create_research_universe_snapshot(
             capability="PostgreSQL",
         )
         control = PostgresControlRepository.connect(dsn=dsn)
-        repository = PostgresResearchUniverseRepository.connect(
-            dsn=dsn
-        )
+        repository = PostgresResearchUniverseRepository.connect(dsn=dsn)
         policy = PointInTimeUniversePolicy(
             index_code=index_code,
             minimum_members=250,
             maximum_members=350,
             minimum_turnover_rate_f=minimum_turnover_rate_f,
-            minimum_circulating_market_value=(
-                minimum_circulating_market_value
-            ),
+            minimum_circulating_market_value=(minimum_circulating_market_value),
         )
         existing = await repository.find(
             policy_hash=policy.policy_hash,
@@ -488,9 +479,7 @@ def _research_universe_payload(
     status: str,
 ) -> dict[str, object]:
     return {
-        "index_constituent_date": (
-            snapshot.index_constituent_date.isoformat()
-        ),
+        "index_constituent_date": (snapshot.index_constituent_date.isoformat()),
         "index_code": snapshot.index_code,
         "knowledge_as_of": snapshot.knowledge_as_of.isoformat(),
         "liquidity_date": snapshot.liquidity_date.isoformat(),
@@ -512,17 +501,9 @@ async def backfill_research_universe_snapshots(
     requested_by: str,
 ) -> dict[str, object]:
     if settings.live_trading_enabled:
-        raise MissingCapabilityError(
-            "research universe backfill requires live trading locked"
-        )
-    if (
-        not requested_by.strip()
-        or requested_by != requested_by.strip()
-        or len(requested_by) > 128
-    ):
-        raise ValueError(
-            "requested_by must contain 1-128 trimmed characters"
-        )
+        raise MissingCapabilityError("research universe backfill requires live trading locked")
+    if not requested_by.strip() or requested_by != requested_by.strip() or len(requested_by) > 128:
+        raise ValueError("requested_by must contain 1-128 trimmed characters")
     months = _month_intervals(start_month, end_month)
     source = tushare_source(settings)
     control = PostgresControlRepository.connect(
@@ -532,33 +513,22 @@ async def backfill_research_universe_snapshots(
         )
     )
     results: list[dict[str, object]] = []
-    safe_reference_cutoff = (
-        to_shanghai(datetime.now(UTC)).date()
-        - timedelta(days=1)
-    )
+    safe_reference_cutoff = to_shanghai(datetime.now(UTC)).date() - timedelta(days=1)
     try:
         for month_start, month_end in months:
             bounded_end = min(month_end, safe_reference_cutoff)
             if month_start > bounded_end:
-                raise ValueError(
-                    "universe backfill cannot include a future month"
-                )
+                raise ValueError("universe backfill cannot include a future month")
             calendar_batch = await source.fetch_trading_calendar(
                 month_start,
                 bounded_end,
             )
             open_dates = tuple(
-                value.session_date
-                for value in calendar_batch.sessions
-                if value.is_open
+                value.session_date for value in calendar_batch.sessions if value.is_open
             )
             if not open_dates:
-                raise ValueError(
-                    "universe backfill month contains no open session"
-                )
-            await control.save_source_evidence(
-                calendar_batch.source_evidence[0]
-            )
+                raise ValueError("universe backfill month contains no open session")
+            await control.save_source_evidence(calendar_batch.source_evidence[0])
             results.append(
                 await create_research_universe_snapshot(
                     settings,
@@ -576,24 +546,15 @@ async def backfill_research_universe_snapshots(
                 "index_code": index_code,
                 "month_count": len(months),
                 "requested_by": requested_by,
-                "snapshot_hashes": [
-                    str(value["snapshot_hash"])
-                    for value in results
-                ],
+                "snapshot_hashes": [str(value["snapshot_hash"]) for value in results],
             },
         )
         return {
-            "created_count": sum(
-                value["status"] == "created" for value in results
-            ),
-            "existing_count": sum(
-                value["status"] == "existing" for value in results
-            ),
+            "created_count": sum(value["status"] == "created" for value in results),
+            "existing_count": sum(value["status"] == "existing" for value in results),
             "live_trading_locked": True,
             "month_count": len(months),
-            "snapshot_hashes": [
-                str(value["snapshot_hash"]) for value in results
-            ],
+            "snapshot_hashes": [str(value["snapshot_hash"]) for value in results],
             "status": "completed",
         }
     finally:
@@ -607,14 +568,8 @@ def _month_intervals(
 ) -> tuple[tuple[date, date], ...]:
     start = start_month.replace(day=1)
     end = end_month.replace(day=1)
-    if (
-        start_month != start
-        or end_month != end
-        or start > end
-    ):
-        raise ValueError(
-            "backfill bounds must be ordered first days of months"
-        )
+    if start_month != start or end_month != end or start > end:
+        raise ValueError("backfill bounds must be ordered first days of months")
     values: list[tuple[date, date]] = []
     current = start
     while current <= end:
@@ -622,18 +577,14 @@ def _month_intervals(
             current.year,
             current.month,
         )[1]
-        values.append(
-            (current, current.replace(day=last_day))
-        )
+        values.append((current, current.replace(day=last_day)))
         current = (
             date(current.year + 1, 1, 1)
             if current.month == 12
             else date(current.year, current.month + 1, 1)
         )
     if len(values) > 12:
-        raise ValueError(
-            "one universe backfill cannot exceed 12 months"
-        )
+        raise ValueError("one universe backfill cannot exceed 12 months")
     return tuple(values)
 
 
@@ -650,9 +601,7 @@ async def create_research_data_campaign(
     """Freeze one survivorship-free daily data plan without enabling trading."""
 
     if settings.live_trading_enabled:
-        raise MissingCapabilityError(
-            "research data campaign creation requires live trading locked"
-        )
+        raise MissingCapabilityError("research data campaign creation requires live trading locked")
     if start_date > end_date:
         raise ValueError("research data campaign start cannot follow end")
     safe_cutoff = to_shanghai(datetime.now(UTC)).date() - timedelta(days=1)
@@ -681,20 +630,10 @@ async def create_research_data_campaign(
         )
         policy_hashes = {value.policy_hash for value in views}
         if len(policy_hashes) != 1:
-            raise ValueError(
-                "research data campaign requires one universe policy"
-            )
-        details = tuple(
-            [await universes.detail(value.snapshot_hash) for value in views]
-        )
+            raise ValueError("research data campaign requires one universe policy")
+        details = tuple([await universes.detail(value.snapshot_hash) for value in views])
         instruments = tuple(
-            sorted(
-                {
-                    member.instrument
-                    for detail in details
-                    for member in detail.members
-                }
-            )
+            sorted({member.instrument for detail in details for member in detail.members})
         )
         spec = ResearchDataCampaignSpec(
             campaign_key=campaign_key,
@@ -739,9 +678,7 @@ async def inspect_research_data_campaign(
         )
     )
     try:
-        return _research_data_campaign_payload(
-            await repository.status(campaign_hash=campaign_hash)
-        )
+        return _research_data_campaign_payload(await repository.status(campaign_hash=campaign_hash))
     finally:
         await repository.close()
 
@@ -755,17 +692,9 @@ async def compile_research_input(
     """Compile an immutable aggregate manifest into a point-in-time plan."""
 
     if settings.live_trading_enabled:
-        raise MissingCapabilityError(
-            "research input compilation requires live trading locked"
-        )
-    if (
-        not requested_by.strip()
-        or requested_by != requested_by.strip()
-        or len(requested_by) > 128
-    ):
-        raise ValueError(
-            "requested_by must contain 1-128 trimmed characters"
-        )
+        raise MissingCapabilityError("research input compilation requires live trading locked")
+    if not requested_by.strip() or requested_by != requested_by.strip() or len(requested_by) > 128:
+        raise ValueError("requested_by must contain 1-128 trimmed characters")
     dsn = configured_dsn(
         settings.postgres_dsn,
         capability="PostgreSQL",
@@ -783,13 +712,9 @@ async def compile_research_input(
             "activation_rule": plan.activation_rule,
             "campaign_hash": plan.campaign_hash,
             "end_date": plan.end_date.isoformat(),
-            "first_reference_date": (
-                plan.universes[0].reference_date.isoformat()
-            ),
+            "first_reference_date": (plan.universes[0].reference_date.isoformat()),
             "instrument_count": len(plan.shards),
-            "last_reference_date": (
-                plan.universes[-1].reference_date.isoformat()
-            ),
+            "last_reference_date": (plan.universes[-1].reference_date.isoformat()),
             "live_trading_locked": True,
             "manifest_hash": plan.dataset_manifest_hash,
             "plan_hash": plan.plan_hash,
@@ -826,23 +751,15 @@ async def freeze_dynamic_research_spec(
         raise MissingCapabilityError(
             "dynamic research pre-registration requires live trading locked"
         )
-    if (
-        not requested_by.strip()
-        or requested_by != requested_by.strip()
-        or len(requested_by) > 128
-    ):
-        raise ValueError(
-            "requested_by must contain 1-128 trimmed characters"
-        )
+    if not requested_by.strip() or requested_by != requested_by.strip() or len(requested_by) > 128:
+        raise ValueError("requested_by must contain 1-128 trimmed characters")
     dsn = configured_dsn(
         settings.postgres_dsn,
         capability="PostgreSQL",
     )
     campaigns = PostgresResearchDataCampaignRepository.connect(dsn=dsn)
     universes = PostgresResearchUniverseRepository.connect(dsn=dsn)
-    specifications = PostgresDynamicResearchSpecRepository.connect(
-        dsn=dsn
-    )
+    specifications = PostgresDynamicResearchSpecRepository.connect(dsn=dsn)
     control = PostgresControlRepository.connect(dsn=dsn)
     try:
         plan = await _load_research_input_plan(
@@ -865,18 +782,12 @@ async def freeze_dynamic_research_spec(
         payload: dict[str, object] = {
             "candidate_count": len(record.spec.candidates),
             "created_at": record.created_at.isoformat(),
-            "dataset_manifest_hash": (
-                record.spec.dataset_manifest_hash
-            ),
+            "dataset_manifest_hash": (record.spec.dataset_manifest_hash),
             "embargo_sessions": record.spec.embargo_sessions,
-            "evidence_policy_hash": (
-                record.spec.evidence_policy.policy_hash
-            ),
+            "evidence_policy_hash": (record.spec.evidence_policy.policy_hash),
             "gross_allocation": str(record.spec.gross_allocation),
             "live_trading_locked": record.live_trading_locked,
-            "maximum_position_weight": str(
-                record.spec.maximum_position_weight
-            ),
+            "maximum_position_weight": str(record.spec.maximum_position_weight),
             "plan_hash": record.spec.plan_hash,
             "requested_by": record.requested_by,
             "slippage_bps": str(record.spec.slippage_bps),
@@ -915,27 +826,15 @@ async def compile_dynamic_market_panel(
         raise MissingCapabilityError(
             "dynamic market panel compilation requires live trading locked"
         )
-    if (
-        not requested_by.strip()
-        or requested_by != requested_by.strip()
-        or len(requested_by) > 128
-    ):
-        raise ValueError(
-            "requested_by must contain 1-128 trimmed characters"
-        )
+    if not requested_by.strip() or requested_by != requested_by.strip() or len(requested_by) > 128:
+        raise ValueError("requested_by must contain 1-128 trimmed characters")
     postgres_dsn = configured_dsn(
         settings.postgres_dsn,
         capability="PostgreSQL",
     )
-    specifications = PostgresDynamicResearchSpecRepository.connect(
-        dsn=postgres_dsn
-    )
-    campaigns = PostgresResearchDataCampaignRepository.connect(
-        dsn=postgres_dsn
-    )
-    universes = PostgresResearchUniverseRepository.connect(
-        dsn=postgres_dsn
-    )
+    specifications = PostgresDynamicResearchSpecRepository.connect(dsn=postgres_dsn)
+    campaigns = PostgresResearchDataCampaignRepository.connect(dsn=postgres_dsn)
+    universes = PostgresResearchUniverseRepository.connect(dsn=postgres_dsn)
     control = PostgresControlRepository.connect(dsn=postgres_dsn)
     dataset_reader: _RecyclingDailyDatasetReader | None = None
     try:
@@ -963,29 +862,17 @@ async def compile_dynamic_market_panel(
             plan=plan,
             spec=record.spec,
         )
-        market_count = sum(
-            len(value.markets) for value in panel.histories
-        )
+        market_count = sum(len(value.markets) for value in panel.histories)
         payload: dict[str, object] = {
             "as_of": panel.as_of.isoformat(),
             "dataset_manifest_hash": panel.dataset_manifest_hash,
-            "first_session": (
-                panel.sessions[0].session_date.isoformat()
-            ),
+            "first_session": (panel.sessions[0].session_date.isoformat()),
             "history_count": len(panel.histories),
-            "last_session": (
-                panel.sessions[-1].session_date.isoformat()
-            ),
+            "last_session": (panel.sessions[-1].session_date.isoformat()),
             "live_trading_locked": True,
             "market_state_count": market_count,
-            "maximum_active_members": max(
-                len(value.active_members)
-                for value in panel.sessions
-            ),
-            "minimum_active_members": min(
-                len(value.active_members)
-                for value in panel.sessions
-            ),
+            "maximum_active_members": max(len(value.active_members) for value in panel.sessions),
+            "minimum_active_members": min(len(value.active_members) for value in panel.sessions),
             "panel_hash": panel.panel_hash,
             "plan_hash": panel.plan_hash,
             "session_count": len(panel.sessions),
@@ -1020,33 +907,17 @@ async def run_dynamic_validation(
     """Run and persist the frozen nested walk-forward validation."""
 
     if settings.live_trading_enabled:
-        raise MissingCapabilityError(
-            "dynamic validation requires live trading locked"
-        )
-    if (
-        not requested_by.strip()
-        or requested_by != requested_by.strip()
-        or len(requested_by) > 128
-    ):
-        raise ValueError(
-            "requested_by must contain 1-128 trimmed characters"
-        )
+        raise MissingCapabilityError("dynamic validation requires live trading locked")
+    if not requested_by.strip() or requested_by != requested_by.strip() or len(requested_by) > 128:
+        raise ValueError("requested_by must contain 1-128 trimmed characters")
     postgres_dsn = configured_dsn(
         settings.postgres_dsn,
         capability="PostgreSQL",
     )
-    specifications = PostgresDynamicResearchSpecRepository.connect(
-        dsn=postgres_dsn
-    )
-    validations = PostgresDynamicValidationRepository.connect(
-        dsn=postgres_dsn
-    )
-    campaigns = PostgresResearchDataCampaignRepository.connect(
-        dsn=postgres_dsn
-    )
-    universes = PostgresResearchUniverseRepository.connect(
-        dsn=postgres_dsn
-    )
+    specifications = PostgresDynamicResearchSpecRepository.connect(dsn=postgres_dsn)
+    validations = PostgresDynamicValidationRepository.connect(dsn=postgres_dsn)
+    campaigns = PostgresResearchDataCampaignRepository.connect(dsn=postgres_dsn)
+    universes = PostgresResearchUniverseRepository.connect(dsn=postgres_dsn)
     control = PostgresControlRepository.connect(dsn=postgres_dsn)
     dataset_reader: _RecyclingDailyDatasetReader | None = None
     try:
@@ -1054,9 +925,7 @@ async def run_dynamic_validation(
         plan = await _load_research_input_plan(
             campaigns=campaigns,
             universes=universes,
-            manifest_hash=(
-                spec_record.spec.dataset_manifest_hash
-            ),
+            manifest_hash=(spec_record.spec.dataset_manifest_hash),
         )
         dataset_reader = _RecyclingDailyDatasetReader(
             clickhouse_dsn=configured_dsn(
@@ -1091,43 +960,23 @@ async def run_dynamic_validation(
             completed_at=completed_at,
         )
         payload: dict[str, object] = {
-            "assessment_hash": (
-                record.evidence.assessment_hash
-            ),
-            "benchmark_compounded_oos_return": str(
-                record.result.benchmark_compounded_oos_return
-            ),
-            "compounded_oos_return": str(
-                record.result.compounded_oos_return
-            ),
-            "evidence_status": (
-                record.evidence.evidence_status
-            ),
-            "excess_oos_return": str(
-                record.result.excess_oos_return
-            ),
+            "assessment_hash": (record.evidence.assessment_hash),
+            "benchmark_compounded_oos_return": str(record.result.benchmark_compounded_oos_return),
+            "compounded_oos_return": str(record.result.compounded_oos_return),
+            "evidence_status": (record.evidence.evidence_status),
+            "excess_oos_return": str(record.result.excess_oos_return),
             "fold_count": record.evidence.fold_count,
-            "gate_failures": list(
-                record.evidence.gate_failures
-            ),
+            "gate_failures": list(record.evidence.gate_failures),
             "live_trading_locked": True,
             "oos_sessions": record.evidence.oos_sessions,
             "panel_hash": record.result.panel_hash,
-            "profitable_fold_rate": str(
-                record.result.profitable_fold_rate
-            ),
-            "rejected_order_count": (
-                record.evidence.rejected_order_count
-            ),
+            "profitable_fold_rate": str(record.result.profitable_fold_rate),
+            "rejected_order_count": (record.evidence.rejected_order_count),
             "result_hash": record.result.result_hash,
-            "selection_optimism": str(
-                record.result.selection_optimism
-            ),
+            "selection_optimism": str(record.result.selection_optimism),
             "spec_hash": record.result.spec_hash,
             "status": "completed",
-            "worst_oos_drawdown": str(
-                record.result.worst_oos_drawdown
-            ),
+            "worst_oos_drawdown": str(record.result.worst_oos_drawdown),
         }
         await control.append_audit_event(
             "research.dynamic_validation.completed",
@@ -1157,44 +1006,24 @@ async def freeze_dynamic_regime_research_spec(
     """Pre-register v2 only from an immutable rejected v1 result."""
 
     if settings.live_trading_enabled:
-        raise MissingCapabilityError(
-            "dynamic regime specification requires live trading locked"
-        )
+        raise MissingCapabilityError("dynamic regime specification requires live trading locked")
     postgres_dsn = configured_dsn(
         settings.postgres_dsn,
         capability="PostgreSQL",
     )
-    specifications = PostgresDynamicResearchSpecRepository.connect(
-        dsn=postgres_dsn
-    )
-    validations = PostgresDynamicValidationRepository.connect(
-        dsn=postgres_dsn
-    )
+    specifications = PostgresDynamicResearchSpecRepository.connect(dsn=postgres_dsn)
+    validations = PostgresDynamicValidationRepository.connect(dsn=postgres_dsn)
     control = PostgresControlRepository.connect(dsn=postgres_dsn)
     try:
-        predecessor = await validations.read(
-            predecessor_result_hash
-        )
+        predecessor = await validations.read(predecessor_result_hash)
         if predecessor.evidence.evidence_status != "rejected":
-            raise ValueError(
-                "dynamic regime v2 requires a rejected predecessor"
-            )
-        base_record = await specifications.read(
-            predecessor.result.spec_hash
-        )
+            raise ValueError("dynamic regime v2 requires a rejected predecessor")
+        base_record = await specifications.read(predecessor.result.spec_hash)
         base = base_record.spec
-        if (
-            base.regime_filter is not None
-            or base.strategy_id
-            != DYNAMIC_PORTFOLIO_STRATEGY_ID
-        ):
-            raise ValueError(
-                "dynamic regime predecessor must be the v1 strategy"
-            )
+        if base.regime_filter is not None or base.strategy_id != DYNAMIC_PORTFOLIO_STRATEGY_ID:
+            raise ValueError("dynamic regime predecessor must be the v1 strategy")
         regime = DynamicRegimeFilter(
-            predecessor_result_hash=(
-                predecessor.result.result_hash
-            ),
+            predecessor_result_hash=(predecessor.result.result_hash),
         )
         spec = DynamicPortfolioResearchSpec(
             dataset_manifest_hash=base.dataset_manifest_hash,
@@ -1207,16 +1036,12 @@ async def freeze_dynamic_regime_research_spec(
             maximum_position_weight=base.maximum_position_weight,
             maximum_order_notional=base.maximum_order_notional,
             slippage_bps=base.slippage_bps,
-            maximum_volume_participation=(
-                base.maximum_volume_participation
-            ),
+            maximum_volume_participation=(base.maximum_volume_participation),
             train_sessions=base.train_sessions,
             test_sessions=base.test_sessions,
             embargo_sessions=base.embargo_sessions,
             signal_lag_sessions=base.signal_lag_sessions,
-            minimum_member_history_sessions=(
-                base.minimum_member_history_sessions
-            ),
+            minimum_member_history_sessions=(base.minimum_member_history_sessions),
             candidates=base.candidates,
             regime_filter=regime,
             evidence_policy=base.evidence_policy,
@@ -1233,19 +1058,11 @@ async def freeze_dynamic_regime_research_spec(
         )
         payload: dict[str, object] = {
             "created_at": record.created_at.isoformat(),
-            "dataset_manifest_hash": (
-                record.spec.dataset_manifest_hash
-            ),
+            "dataset_manifest_hash": (record.spec.dataset_manifest_hash),
             "live_trading_locked": True,
-            "minimum_positive_breadth": str(
-                regime.minimum_positive_breadth
-            ),
-            "predecessor_result_hash": (
-                regime.predecessor_result_hash
-            ),
-            "regime_lookback_sessions": (
-                regime.lookback_sessions
-            ),
+            "minimum_positive_breadth": str(regime.minimum_positive_breadth),
+            "predecessor_result_hash": (regime.predecessor_result_hash),
+            "regime_lookback_sessions": (regime.lookback_sessions),
             "spec_hash": record.spec.spec_hash,
             "status": "frozen",
             "strategy_id": record.spec.strategy_id,
@@ -1276,52 +1093,26 @@ async def freeze_fundamental_research_spec(
     """Pre-register v3 only from the immutable rejected v2 result."""
 
     if settings.live_trading_enabled:
-        raise MissingCapabilityError(
-            "fundamental specification requires live trading locked"
-        )
+        raise MissingCapabilityError("fundamental specification requires live trading locked")
     postgres_dsn = configured_dsn(
         settings.postgres_dsn,
         capability="PostgreSQL",
     )
-    dynamic_specs = PostgresDynamicResearchSpecRepository.connect(
-        dsn=postgres_dsn
-    )
-    validations = PostgresDynamicValidationRepository.connect(
-        dsn=postgres_dsn
-    )
-    fundamentals = (
-        PostgresFundamentalResearchSpecRepository.connect(
-            dsn=postgres_dsn
-        )
-    )
+    dynamic_specs = PostgresDynamicResearchSpecRepository.connect(dsn=postgres_dsn)
+    validations = PostgresDynamicValidationRepository.connect(dsn=postgres_dsn)
+    fundamentals = PostgresFundamentalResearchSpecRepository.connect(dsn=postgres_dsn)
     control = PostgresControlRepository.connect(dsn=postgres_dsn)
     try:
-        predecessor = await validations.read(
-            predecessor_result_hash
-        )
+        predecessor = await validations.read(predecessor_result_hash)
         if predecessor.evidence.evidence_status != "rejected":
-            raise ValueError(
-                "fundamental v3 requires a rejected predecessor"
-            )
-        dynamic_record = await dynamic_specs.read(
-            predecessor.result.spec_hash
-        )
+            raise ValueError("fundamental v3 requires a rejected predecessor")
+        dynamic_record = await dynamic_specs.read(predecessor.result.spec_hash)
         base = dynamic_record.spec
-        if (
-            base.regime_filter is None
-            or base.strategy_id
-            != DYNAMIC_REGIME_PORTFOLIO_STRATEGY_ID
-        ):
-            raise ValueError(
-                "fundamental predecessor must be the v2 strategy"
-            )
+        if base.regime_filter is None or base.strategy_id != DYNAMIC_REGIME_PORTFOLIO_STRATEGY_ID:
+            raise ValueError("fundamental predecessor must be the v2 strategy")
         spec = FundamentalPortfolioResearchSpec(
-            predecessor_result_hash=(
-                predecessor.result.result_hash
-            ),
-            daily_dataset_manifest_hash=(
-                base.dataset_manifest_hash
-            ),
+            predecessor_result_hash=(predecessor.result.result_hash),
+            daily_dataset_manifest_hash=(base.dataset_manifest_hash),
             plan_hash=base.plan_hash,
             universe_policy_hash=base.policy_hash,
             start_date=base.start_date,
@@ -1329,14 +1120,10 @@ async def freeze_fundamental_research_spec(
             evidence_policy=base.evidence_policy,
             initial_cash=base.initial_cash,
             gross_allocation=base.gross_allocation,
-            maximum_position_weight=(
-                base.maximum_position_weight
-            ),
+            maximum_position_weight=(base.maximum_position_weight),
             maximum_order_notional=base.maximum_order_notional,
             slippage_bps=base.slippage_bps,
-            maximum_volume_participation=(
-                base.maximum_volume_participation
-            ),
+            maximum_volume_participation=(base.maximum_volume_participation),
             train_sessions=base.train_sessions,
             test_sessions=base.test_sessions,
             embargo_sessions=base.embargo_sessions,
@@ -1350,17 +1137,11 @@ async def freeze_fundamental_research_spec(
         )
         payload: dict[str, object] = {
             "created_at": record.created_at.isoformat(),
-            "data_policy_hash": (
-                record.spec.data_policy.policy_hash
-            ),
+            "data_policy_hash": (record.spec.data_policy.policy_hash),
             "factor_count": len(record.spec.factors),
             "live_trading_locked": True,
-            "predecessor_result_hash": (
-                record.spec.predecessor_result_hash
-            ),
-            "rebalance_sessions": (
-                record.spec.rebalance_sessions
-            ),
+            "predecessor_result_hash": (record.spec.predecessor_result_hash),
+            "rebalance_sessions": (record.spec.rebalance_sessions),
             "selection_count": record.spec.selection_count,
             "spec_hash": record.spec.spec_hash,
             "status": "frozen",
@@ -1393,29 +1174,18 @@ async def inspect_fundamental_data_backfill(
         settings.postgres_dsn,
         capability="PostgreSQL",
     )
-    specifications = (
-        PostgresFundamentalResearchSpecRepository.connect(dsn=dsn)
-    )
-    daily_datasets = PostgresResearchDataCampaignRepository.connect(
-        dsn=dsn
-    )
-    fundamentals = PostgresFundamentalDatasetRepository.connect(
-        dsn=dsn
-    )
+    specifications = PostgresFundamentalResearchSpecRepository.connect(dsn=dsn)
+    daily_datasets = PostgresResearchDataCampaignRepository.connect(dsn=dsn)
+    fundamentals = PostgresFundamentalDatasetRepository.connect(dsn=dsn)
     try:
         spec_record = await specifications.read(spec_hash)
-        daily = await daily_datasets.read_manifest(
-            spec_record.spec.daily_dataset_manifest_hash
-        )
+        daily = await daily_datasets.read_manifest(spec_record.spec.daily_dataset_manifest_hash)
         if (
             daily.start_date != spec_record.spec.start_date
             or daily.end_date != spec_record.spec.end_date
-            or daily.policy_hash
-            != spec_record.spec.universe_policy_hash
+            or daily.policy_hash != spec_record.spec.universe_policy_hash
         ):
-            raise ValueError(
-                "fundamental spec daily dataset binding differs"
-            )
+            raise ValueError("fundamental spec daily dataset binding differs")
         frozen = await fundamentals.read_for_spec(spec_hash)
         completed = await fundamentals.completed_shards(
             instruments=daily.instruments,
@@ -1424,19 +1194,11 @@ async def inspect_fundamental_data_backfill(
         )
         return {
             "completed_instruments": len(completed),
-            "dataset_manifest_hash": (
-                None if frozen is None else frozen.manifest_hash
-            ),
+            "dataset_manifest_hash": (None if frozen is None else frozen.manifest_hash),
             "live_trading_locked": True,
-            "remaining_instruments": (
-                len(daily.instruments) - len(completed)
-            ),
+            "remaining_instruments": (len(daily.instruments) - len(completed)),
             "spec_hash": spec_hash,
-            "status": (
-                "completed"
-                if frozen is not None
-                else "collecting"
-            ),
+            "status": ("completed" if frozen is not None else "collecting"),
             "total_instruments": len(daily.instruments),
         }
     finally:
@@ -1455,28 +1217,18 @@ async def run_fundamental_data_backfill(
     """Resume a bounded v3 data batch from immutable shard manifests."""
 
     if settings.live_trading_enabled:
-        raise MissingCapabilityError(
-            "fundamental data backfill requires live trading locked"
-        )
+        raise MissingCapabilityError("fundamental data backfill requires live trading locked")
     if max_items < 1 or max_items > 25:
         raise ValueError("max_items must be between 1 and 25")
     if pause_seconds < 0 or pause_seconds > Decimal("60"):
-        raise ValueError(
-            "pause_seconds must be between 0 and 60"
-        )
+        raise ValueError("pause_seconds must be between 0 and 60")
     dsn = configured_dsn(
         settings.postgres_dsn,
         capability="PostgreSQL",
     )
-    specifications = (
-        PostgresFundamentalResearchSpecRepository.connect(dsn=dsn)
-    )
-    daily_datasets = PostgresResearchDataCampaignRepository.connect(
-        dsn=dsn
-    )
-    fundamentals = PostgresFundamentalDatasetRepository.connect(
-        dsn=dsn
-    )
+    specifications = PostgresFundamentalResearchSpecRepository.connect(dsn=dsn)
+    daily_datasets = PostgresResearchDataCampaignRepository.connect(dsn=dsn)
+    fundamentals = PostgresFundamentalDatasetRepository.connect(dsn=dsn)
     control = PostgresControlRepository.connect(dsn=dsn)
     source: TushareDailySource | None = None
     clickhouse: ClickHouseFundamentalRepository | None = None
@@ -1489,18 +1241,14 @@ async def run_fundamental_data_backfill(
     try:
         spec_record = await specifications.read(spec_hash)
         spec = spec_record.spec
-        daily = await daily_datasets.read_manifest(
-            spec.daily_dataset_manifest_hash
-        )
+        daily = await daily_datasets.read_manifest(spec.daily_dataset_manifest_hash)
         if (
             daily.start_date != spec.start_date
             or daily.end_date != spec.end_date
             or daily.policy_hash != spec.universe_policy_hash
             or daily.instruments != tuple(sorted(daily.instruments))
         ):
-            raise ValueError(
-                "fundamental spec daily dataset binding differs"
-            )
+            raise ValueError("fundamental spec daily dataset binding differs")
         frozen = await fundamentals.read_for_spec(spec.spec_hash)
         if frozen is not None:
             return {
@@ -1519,14 +1267,8 @@ async def run_fundamental_data_backfill(
             start_date=spec.start_date,
             end_date=spec.end_date,
         )
-        completed_instruments = {
-            value.instrument for value in existing
-        }
-        missing = tuple(
-            value
-            for value in daily.instruments
-            if value not in completed_instruments
-        )
+        completed_instruments = {value.instrument for value in existing}
+        missing = tuple(value for value in daily.instruments if value not in completed_instruments)
         source = tushare_source(settings)
         clickhouse = await ClickHouseFundamentalRepository.connect(
             dsn=configured_dsn(
@@ -1546,10 +1288,8 @@ async def run_fundamental_data_backfill(
         inactive_bytes = pressure.inactive_bytes
         inactive_parts = pressure.inactive_parts
         maintenance_wait = (
-            inactive_bytes
-            >= settings.research_data_max_inactive_bytes
-            or inactive_parts
-            >= settings.research_data_max_inactive_parts
+            inactive_bytes >= settings.research_data_max_inactive_bytes
+            or inactive_parts >= settings.research_data_max_inactive_parts
         )
         for instrument in missing[:max_items]:
             if maintenance_wait:
@@ -1568,10 +1308,7 @@ async def run_fundamental_data_backfill(
             except AutoQuantError:
                 failed += 1
             else:
-                if (
-                    result.status == "completed"
-                    and result.manifest_hash is not None
-                ):
+                if result.status == "completed" and result.manifest_hash is not None:
                     completed_now += 1
                 else:
                     failed += 1
@@ -1581,10 +1318,8 @@ async def run_fundamental_data_backfill(
                 inactive_bytes = pressure.inactive_bytes
                 inactive_parts = pressure.inactive_parts
                 maintenance_wait = (
-                    inactive_bytes
-                    >= settings.research_data_max_inactive_bytes
-                    or inactive_parts
-                    >= settings.research_data_max_inactive_parts
+                    inactive_bytes >= settings.research_data_max_inactive_bytes
+                    or inactive_parts >= settings.research_data_max_inactive_parts
                 )
             if pause_seconds and processed < min(
                 max_items,
@@ -1605,24 +1340,16 @@ async def run_fundamental_data_backfill(
         payload: dict[str, object] = {
             "completed_instruments": len(completed),
             "completed_now": completed_now,
-            "dataset_manifest_hash": (
-                None if dataset is None else dataset.manifest_hash
-            ),
+            "dataset_manifest_hash": (None if dataset is None else dataset.manifest_hash),
             "failed": failed,
             "inactive_bytes": inactive_bytes,
             "inactive_parts": inactive_parts,
             "live_trading_locked": True,
             "maintenance_wait": maintenance_wait,
             "processed": processed,
-            "remaining_instruments": (
-                len(daily.instruments) - len(completed)
-            ),
+            "remaining_instruments": (len(daily.instruments) - len(completed)),
             "spec_hash": spec.spec_hash,
-            "status": (
-                "completed"
-                if dataset is not None
-                else "collecting"
-            ),
+            "status": ("completed" if dataset is not None else "collecting"),
             "total_instruments": len(daily.instruments),
         }
         await control.append_audit_event(
@@ -1654,27 +1381,15 @@ async def compile_fundamental_research_panel(
     """Compile and freeze the v3 point-in-time feature panel."""
 
     if settings.live_trading_enabled:
-        raise MissingCapabilityError(
-            "fundamental panel compilation requires live trading locked"
-        )
-    if (
-        not requested_by.strip()
-        or requested_by != requested_by.strip()
-        or len(requested_by) > 128
-    ):
-        raise ValueError(
-            "requested_by must contain 1-128 trimmed characters"
-        )
+        raise MissingCapabilityError("fundamental panel compilation requires live trading locked")
+    if not requested_by.strip() or requested_by != requested_by.strip() or len(requested_by) > 128:
+        raise ValueError("requested_by must contain 1-128 trimmed characters")
     dsn = configured_dsn(
         settings.postgres_dsn,
         capability="PostgreSQL",
     )
-    specifications = (
-        PostgresFundamentalResearchSpecRepository.connect(dsn=dsn)
-    )
-    campaigns = PostgresResearchDataCampaignRepository.connect(
-        dsn=dsn
-    )
+    specifications = PostgresFundamentalResearchSpecRepository.connect(dsn=dsn)
+    campaigns = PostgresResearchDataCampaignRepository.connect(dsn=dsn)
     universes = PostgresResearchUniverseRepository.connect(dsn=dsn)
     datasets = PostgresFundamentalDatasetRepository.connect(dsn=dsn)
     panels = PostgresFundamentalPanelRepository.connect(dsn=dsn)
@@ -1695,31 +1410,21 @@ async def compile_fundamental_research_panel(
             or plan.start_date != spec.start_date
             or plan.end_date != spec.end_date
         ):
-            raise ValueError(
-                "fundamental spec research plan binding differs"
-            )
+            raise ValueError("fundamental spec research plan binding differs")
         dataset = await datasets.read_for_spec(spec.spec_hash)
         if dataset is None:
-            raise LookupError(
-                "fundamental dataset is not complete"
-            )
+            raise LookupError("fundamental dataset is not complete")
         daily_cutoffs: list[datetime] = []
         for shard in plan.shards:
-            manifest = await control.read_manifest(
-                shard.manifest_hash
-            )
+            manifest = await control.read_manifest(shard.manifest_hash)
             if (
                 manifest.source != "tushare"
                 or not manifest.production_complete
                 or manifest.instruments != (shard.instrument,)
-                or to_shanghai(manifest.start_time).date()
-                != plan.start_date
-                or to_shanghai(manifest.end_time).date()
-                != plan.end_date
+                or to_shanghai(manifest.start_time).date() != plan.start_date
+                or to_shanghai(manifest.end_time).date() != plan.end_date
             ):
-                raise ValueError(
-                    "daily shard does not match the research plan"
-                )
+                raise ValueError("daily shard does not match the research plan")
             daily_cutoffs.append(manifest.as_of)
         calendar_as_of = min(daily_cutoffs)
         daily_market = await ClickHouseDailyRepository.connect(
@@ -1734,9 +1439,7 @@ async def compile_fundamental_research_panel(
             plan.end_date,
             calendar_as_of,
         )
-        market_sessions: list[
-            FundamentalMarketSessionBinding
-        ] = []
+        market_sessions: list[FundamentalMarketSessionBinding] = []
         for session in trading_sessions:
             if not session.is_open:
                 continue
@@ -1751,9 +1454,7 @@ async def compile_fundamental_research_panel(
                 )
             )
         daily_binding = FundamentalMarketBinding(
-            daily_dataset_manifest_hash=(
-                spec.daily_dataset_manifest_hash
-            ),
+            daily_dataset_manifest_hash=(spec.daily_dataset_manifest_hash),
             plan_hash=plan.plan_hash,
             spec_hash=spec.spec_hash,
             as_of=max(daily_cutoffs),
@@ -1761,14 +1462,12 @@ async def compile_fundamental_research_panel(
             instruments=plan.instruments,
             sessions=tuple(market_sessions),
         )
-        fundamental_reader = (
-            await ClickHouseFundamentalRepository.connect(
-                dsn=configured_dsn(
-                    settings.clickhouse_dsn,
-                    capability="ClickHouse",
-                ),
-                source="tushare",
-            )
+        fundamental_reader = await ClickHouseFundamentalRepository.connect(
+            dsn=configured_dsn(
+                settings.clickhouse_dsn,
+                capability="ClickHouse",
+            ),
+            source="tushare",
         )
         fundamental_shards = ValidatedFundamentalDatasetReader(
             aggregate=dataset,
@@ -1788,35 +1487,20 @@ async def compile_fundamental_research_panel(
             requested_by=requested_by,
             created_at=created_at,
         )
-        counts = [
-            len(value.observations) for value in panel.sessions
-        ]
-        eligible_session_count = sum(
-            value >= spec.minimum_eligible_members
-            for value in counts
-        )
+        counts = [len(value.observations) for value in panel.sessions]
+        eligible_session_count = sum(value >= spec.minimum_eligible_members for value in counts)
         payload: dict[str, object] = {
             "as_of": panel.as_of.isoformat(),
             "daily_panel_hash": panel.daily_panel_hash,
             "eligible_session_count": eligible_session_count,
-            "first_execution_date": (
-                panel.sessions[0].execution_date.isoformat()
-            ),
-            "fundamental_dataset_manifest_hash": (
-                panel.fundamental_dataset_manifest_hash
-            ),
-            "insufficient_session_count": (
-                len(panel.sessions) - eligible_session_count
-            ),
-            "last_execution_date": (
-                panel.sessions[-1].execution_date.isoformat()
-            ),
+            "first_execution_date": (panel.sessions[0].execution_date.isoformat()),
+            "fundamental_dataset_manifest_hash": (panel.fundamental_dataset_manifest_hash),
+            "insufficient_session_count": (len(panel.sessions) - eligible_session_count),
+            "last_execution_date": (panel.sessions[-1].execution_date.isoformat()),
             "live_trading_locked": record.live_trading_locked,
             "maximum_eligible_members": max(counts),
             "minimum_eligible_members": min(counts),
-            "minimum_required_members": (
-                panel.minimum_required_members
-            ),
+            "minimum_required_members": (panel.minimum_required_members),
             "observation_count": sum(counts),
             "panel_hash": record.panel_hash,
             "requested_by": record.requested_by,
@@ -1844,6 +1528,238 @@ async def compile_fundamental_research_panel(
         await specifications.close()
 
 
+async def run_fundamental_validation(
+    settings: AppSettings,
+    *,
+    spec_hash: str,
+    requested_by: str,
+) -> dict[str, object]:
+    """Run the pre-registered v3 validation with live trading locked."""
+
+    if settings.live_trading_enabled:
+        raise MissingCapabilityError("fundamental validation requires live trading locked")
+    if not requested_by.strip() or requested_by != requested_by.strip() or len(requested_by) > 128:
+        raise ValueError("requested_by must contain 1-128 trimmed characters")
+    dsn = configured_dsn(
+        settings.postgres_dsn,
+        capability="PostgreSQL",
+    )
+    specifications = PostgresFundamentalResearchSpecRepository.connect(dsn=dsn)
+    campaigns = PostgresResearchDataCampaignRepository.connect(dsn=dsn)
+    universes = PostgresResearchUniverseRepository.connect(dsn=dsn)
+    datasets = PostgresFundamentalDatasetRepository.connect(dsn=dsn)
+    panels = PostgresFundamentalPanelRepository.connect(dsn=dsn)
+    validations = PostgresFundamentalValidationRepository.connect(dsn=dsn)
+    control = PostgresControlRepository.connect(dsn=dsn)
+    daily_market: ClickHouseDailyRepository | None = None
+    fundamental_reader: ClickHouseFundamentalRepository | None = None
+    try:
+        spec_record = await specifications.read(spec_hash)
+        spec = spec_record.spec
+        existing = await validations.read_for_spec(spec.spec_hash)
+        if existing is not None:
+            return _fundamental_validation_payload(
+                existing,
+                status="stored",
+            )
+        plan = await _load_research_input_plan(
+            campaigns=campaigns,
+            universes=universes,
+            manifest_hash=spec.daily_dataset_manifest_hash,
+        )
+        if (
+            plan.plan_hash != spec.plan_hash
+            or plan.policy_hash != spec.universe_policy_hash
+            or plan.start_date != spec.start_date
+            or plan.end_date != spec.end_date
+        ):
+            raise ValueError("fundamental spec research plan binding differs")
+        dataset = await datasets.read_for_spec(spec.spec_hash)
+        if dataset is None:
+            raise LookupError("fundamental dataset is not complete")
+        frozen_feature = await panels.read_for_spec(spec.spec_hash)
+        if frozen_feature is None:
+            raise LookupError("fundamental feature panel is not frozen")
+        clickhouse_dsn = configured_dsn(
+            settings.clickhouse_dsn,
+            capability="ClickHouse",
+        )
+        daily_market = await ClickHouseDailyRepository.connect(
+            dsn=clickhouse_dsn,
+            source="tushare",
+        )
+        fundamental_reader = await ClickHouseFundamentalRepository.connect(
+            dsn=clickhouse_dsn,
+            source="tushare",
+        )
+        feature_panel = await _rebuild_fundamental_feature_panel(
+            spec=spec,
+            plan=plan,
+            dataset=dataset,
+            control=control,
+            daily_market=daily_market,
+            fundamental_reader=fundamental_reader,
+        )
+        if feature_panel.panel_hash != frozen_feature.panel_hash:
+            raise ValueError("rebuilt fundamental panel differs from frozen evidence")
+        await fundamental_reader.client.close()
+        fundamental_reader = None
+        await daily_market.purge_allocator(strict=True)
+        market_panel = await DynamicMarketPanelCompiler(
+            shard_reader=ExactManifestResearchDatasetReader(
+                plan=plan,
+                control_reader=control,
+                record_reader=daily_market,
+                batch_size=4,
+            )
+        ).compile_bound(
+            plan=plan,
+            dataset_manifest_hash=(spec.daily_dataset_manifest_hash),
+            policy_hash=spec.universe_policy_hash,
+            start_date=spec.start_date,
+            end_date=spec.end_date,
+            spec_hash=spec.spec_hash,
+        )
+        executable = compile_fundamental_executable_panel(
+            spec=spec,
+            features=feature_panel,
+            markets=market_panel,
+        )
+        result = FundamentalWalkForwardValidator().run(
+            panel=executable,
+            spec=spec,
+        )
+        evidence = assess_fundamental_validation(
+            result,
+            spec=spec,
+        )
+        completed_at = datetime.now(UTC)
+        record = await validations.save(
+            result,
+            evidence,
+            requested_by=requested_by,
+            completed_at=completed_at,
+        )
+        payload = _fundamental_validation_payload(
+            record,
+            status="completed",
+        )
+        await control.append_audit_event(
+            "research.fundamental.validation.completed",
+            completed_at,
+            payload,
+        )
+        return payload
+    finally:
+        if fundamental_reader is not None:
+            await fundamental_reader.client.close()
+        if daily_market is not None:
+            await daily_market.client.close()
+        await control.close()
+        await validations.close()
+        await panels.close()
+        await datasets.close()
+        await universes.close()
+        await campaigns.close()
+        await specifications.close()
+
+
+async def _rebuild_fundamental_feature_panel(
+    *,
+    spec: FundamentalPortfolioResearchSpec,
+    plan: ResearchInputPlan,
+    dataset: FundamentalResearchDatasetManifest,
+    control: PostgresControlRepository,
+    daily_market: ClickHouseDailyRepository,
+    fundamental_reader: ClickHouseFundamentalRepository,
+) -> FundamentalResearchPanel:
+    daily_cutoffs: list[datetime] = []
+    for shard in plan.shards:
+        manifest = await control.read_manifest(shard.manifest_hash)
+        if (
+            manifest.source != "tushare"
+            or not manifest.production_complete
+            or manifest.instruments != (shard.instrument,)
+            or to_shanghai(manifest.start_time).date() != plan.start_date
+            or to_shanghai(manifest.end_time).date() != plan.end_date
+        ):
+            raise ValueError("daily shard does not match the research plan")
+        daily_cutoffs.append(manifest.as_of)
+    calendar_as_of = min(daily_cutoffs)
+    trading_sessions = await daily_market.query_sessions_as_of(
+        plan.start_date,
+        plan.end_date,
+        calendar_as_of,
+    )
+    bindings: list[FundamentalMarketSessionBinding] = []
+    for session in trading_sessions:
+        if not session.is_open:
+            continue
+        universe = plan.universe_for(session.session_date)
+        if universe is None:
+            continue
+        bindings.append(
+            FundamentalMarketSessionBinding(
+                session_date=session.session_date,
+                snapshot_hash=universe.snapshot_hash,
+                active_members=universe.members,
+            )
+        )
+    daily_binding = FundamentalMarketBinding(
+        daily_dataset_manifest_hash=(spec.daily_dataset_manifest_hash),
+        plan_hash=plan.plan_hash,
+        spec_hash=spec.spec_hash,
+        as_of=max(daily_cutoffs),
+        calendar_as_of=calendar_as_of,
+        instruments=plan.instruments,
+        sessions=tuple(bindings),
+    )
+    return await FundamentalPanelCompiler(
+        shard_reader=ValidatedFundamentalDatasetReader(
+            aggregate=dataset,
+            manifest_reader=control,
+            data_reader=fundamental_reader,
+        ),
+    ).compile(
+        spec=spec,
+        daily_binding=daily_binding,
+        dataset=dataset,
+    )
+
+
+def _fundamental_validation_payload(
+    record: FundamentalValidationRecord,
+    *,
+    status: str,
+) -> dict[str, object]:
+    result = record.result
+    evidence = record.evidence
+    return {
+        "assessment_hash": evidence.assessment_hash,
+        "benchmark_compounded_oos_return": str(result.benchmark_compounded_oos_return),
+        "compounded_oos_return": str(result.compounded_oos_return),
+        "evidence_status": evidence.evidence_status,
+        "excess_oos_return": str(result.excess_oos_return),
+        "feature_panel_hash": result.feature_panel_hash,
+        "fold_count": evidence.fold_count,
+        "gate_failures": list(evidence.gate_failures),
+        "live_trading_locked": True,
+        "market_panel_hash": result.market_panel_hash,
+        "oos_sessions": evidence.oos_sessions,
+        "panel_hash": result.panel_hash,
+        "profitable_fold_rate": str(result.profitable_fold_rate),
+        "rejected_order_count": (result.rejected_order_count),
+        "requested_by": record.requested_by,
+        "result_hash": result.result_hash,
+        "spec_hash": result.spec_hash,
+        "status": status,
+        "train_test_gap": str(result.train_test_gap),
+        "unresolved_position_count": (result.unresolved_position_count),
+        "version": result.version,
+        "worst_oos_drawdown": str(result.worst_oos_drawdown),
+    }
+
+
 async def inspect_research_input_shard(
     settings: AppSettings,
     *,
@@ -1854,27 +1770,15 @@ async def inspect_research_input_shard(
     """Verify one aggregate shard through quality and record-hash checks."""
 
     if settings.live_trading_enabled:
-        raise MissingCapabilityError(
-            "research shard verification requires live trading locked"
-        )
-    if (
-        not requested_by.strip()
-        or requested_by != requested_by.strip()
-        or len(requested_by) > 128
-    ):
-        raise ValueError(
-            "requested_by must contain 1-128 trimmed characters"
-        )
+        raise MissingCapabilityError("research shard verification requires live trading locked")
+    if not requested_by.strip() or requested_by != requested_by.strip() or len(requested_by) > 128:
+        raise ValueError("requested_by must contain 1-128 trimmed characters")
     postgres_dsn = configured_dsn(
         settings.postgres_dsn,
         capability="PostgreSQL",
     )
-    campaigns = PostgresResearchDataCampaignRepository.connect(
-        dsn=postgres_dsn
-    )
-    universes = PostgresResearchUniverseRepository.connect(
-        dsn=postgres_dsn
-    )
+    campaigns = PostgresResearchDataCampaignRepository.connect(dsn=postgres_dsn)
+    universes = PostgresResearchUniverseRepository.connect(dsn=postgres_dsn)
     control = PostgresControlRepository.connect(dsn=postgres_dsn)
     market: ClickHouseDailyRepository | None = None
     try:
@@ -1904,21 +1808,15 @@ async def inspect_research_input_shard(
             "bar_count": len(shard.dataset.bars),
             "factor_count": len(shard.dataset.factors),
             "instrument": shard.instrument,
-            "lifecycle_count": len(
-                shard.dataset.coverage.lifecycles
-            ),
+            "lifecycle_count": len(shard.dataset.coverage.lifecycles),
             "live_trading_locked": True,
             "manifest_hash": plan.dataset_manifest_hash,
             "plan_hash": plan.plan_hash,
-            "price_limit_count": len(
-                shard.dataset.coverage.price_limits
-            ),
+            "price_limit_count": len(shard.dataset.coverage.price_limits),
             "session_count": len(shard.dataset.coverage.sessions),
             "shard_manifest_hash": shard.manifest.manifest_hash,
             "status": "verified",
-            "suspension_count": len(
-                shard.dataset.coverage.suspensions
-            ),
+            "suspension_count": len(shard.dataset.coverage.suspensions),
         }
         await control.append_audit_event(
             "research.input.shard.verified",
@@ -1945,10 +1843,7 @@ async def _load_research_input_plan(
 ) -> ResearchInputPlan:
     manifest = await campaigns.read_manifest(manifest_hash)
     details = tuple(
-        [
-            await universes.detail(snapshot_hash)
-            for snapshot_hash in manifest.snapshot_hashes
-        ]
+        [await universes.detail(snapshot_hash) for snapshot_hash in manifest.snapshot_hashes]
     )
     bindings = tuple(
         ResearchUniverseBinding(
@@ -1957,12 +1852,7 @@ async def _load_research_input_plan(
             policy_hash=detail.snapshot.policy_hash,
             reference_date=detail.snapshot.reference_date,
             knowledge_as_of=detail.snapshot.knowledge_as_of,
-            members=tuple(
-                sorted(
-                    member.instrument
-                    for member in detail.members
-                )
-            ),
+            members=tuple(sorted(member.instrument for member in detail.members)),
         )
         for sequence, detail in enumerate(details, start=1)
     )
@@ -2004,9 +1894,7 @@ async def run_research_data_campaign(
     last_inactive_parts = 0
     try:
         status = await repository.status(campaign_hash=campaign_hash)
-        recovered = await repository.recover_running(
-            campaign_hash=status.spec.campaign_hash
-        )
+        recovered = await repository.recover_running(campaign_hash=status.spec.campaign_hash)
         source = tushare_source(settings)
         market = await ClickHouseDailyRepository.connect(
             dsn=configured_dsn(
@@ -2027,10 +1915,8 @@ async def run_research_data_campaign(
             last_inactive_bytes = pressure.inactive_bytes
             last_inactive_parts = pressure.inactive_parts
             if (
-                pressure.inactive_bytes
-                >= settings.research_data_max_inactive_bytes
-                or pressure.inactive_parts
-                >= settings.research_data_max_inactive_parts
+                pressure.inactive_bytes >= settings.research_data_max_inactive_bytes
+                or pressure.inactive_parts >= settings.research_data_max_inactive_parts
             ):
                 maintenance_wait = True
                 break
@@ -2088,16 +1974,12 @@ async def run_research_data_campaign(
                     failed += 1
             if pause_seconds and processed < max_items:
                 await asyncio.sleep(float(pause_seconds))
-        final_status = await repository.status(
-            campaign_hash=status.spec.campaign_hash
-        )
+        final_status = await repository.status(campaign_hash=status.spec.campaign_hash)
         manifest = await repository.finalize(
             campaign_hash=status.spec.campaign_hash,
             created_at=datetime.now(UTC),
         )
-        final_status = await repository.status(
-            campaign_hash=status.spec.campaign_hash
-        )
+        final_status = await repository.status(campaign_hash=status.spec.campaign_hash)
         await control.append_audit_event(
             "research.data.campaign.batch.completed",
             datetime.now(UTC),
@@ -2105,9 +1987,7 @@ async def run_research_data_campaign(
                 "campaign_hash": status.spec.campaign_hash,
                 "completed_count": completed,
                 "failed_count": failed,
-                "manifest_hash": (
-                    None if manifest is None else manifest.manifest_hash
-                ),
+                "manifest_hash": (None if manifest is None else manifest.manifest_hash),
                 "maintenance_wait": maintenance_wait,
                 "processed_count": processed,
                 "recovered_count": recovered,
@@ -2147,9 +2027,7 @@ async def retry_research_data_campaign_item(
     """Explicitly requeue one terminal data shard while live stays locked."""
 
     if settings.live_trading_enabled:
-        raise MissingCapabilityError(
-            "research data retry requires live trading locked"
-        )
+        raise MissingCapabilityError("research data retry requires live trading locked")
     if (
         not authorized_by.strip()
         or authorized_by != authorized_by.strip()
@@ -2212,14 +2090,9 @@ def _require_monthly_snapshot_coverage(
             else date(current.year, current.month + 1, 1)
         )
     expected = tuple(expected_values)
-    actual = tuple(
-        (value.reference_date.year, value.reference_date.month)
-        for value in views
-    )
+    actual = tuple((value.reference_date.year, value.reference_date.month) for value in views)
     if actual != expected or len(set(actual)) != len(actual):
-        raise ValueError(
-            "research data campaign requires one snapshot for every month"
-        )
+        raise ValueError("research data campaign requires one snapshot for every month")
 
 
 def _research_data_campaign_payload(
@@ -2237,9 +2110,7 @@ def _research_data_campaign_payload(
         "instrument_count": len(status.spec.instruments),
         "item_counts": counts,
         "live_trading_locked": True,
-        "manifest_hash": (
-            None if status.manifest is None else status.manifest.manifest_hash
-        ),
+        "manifest_hash": (None if status.manifest is None else status.manifest.manifest_hash),
         "policy_hash": status.spec.policy_hash,
         "snapshot_count": len(status.spec.snapshot_hashes),
         "start_date": status.spec.start_date.isoformat(),
@@ -2264,9 +2135,7 @@ async def create_validation_campaign(
     """Preflight one common data cutoff and atomically queue aligned validations."""
 
     if settings.live_trading_enabled:
-        raise MissingCapabilityError(
-            "validation campaigns require live trading to remain locked"
-        )
+        raise MissingCapabilityError("validation campaigns require live trading to remain locked")
     normalized = tuple(sorted(instruments))
     policy = default_paper_policy(normalized)
     if (
@@ -2276,9 +2145,7 @@ async def create_validation_campaign(
         or allocation > policy.max_position_weight
         or allocation * len(normalized) > policy.max_gross_exposure
     ):
-        raise ValueError(
-            "campaign universe or allocation exceeds paper risk controls"
-        )
+        raise ValueError("campaign universe or allocation exceeds paper risk controls")
     postgres_dsn = configured_dsn(
         settings.postgres_dsn,
         capability="PostgreSQL",
@@ -2295,17 +2162,10 @@ async def create_validation_campaign(
             source="tushare",
         )
         control = PostgresControlRepository.connect(dsn=postgres_dsn)
-        campaigns = PostgresValidationCampaignRepository.connect(
-            dsn=postgres_dsn
-        )
+        campaigns = PostgresValidationCampaignRepository.connect(dsn=postgres_dsn)
         manifest = await control.read_manifest(manifest_hash)
-        if (
-            not manifest.production_complete
-            or tuple(sorted(manifest.instruments)) != normalized
-        ):
-            raise ValueError(
-                "campaign manifest must exactly cover the requested universe"
-            )
+        if not manifest.production_complete or tuple(sorted(manifest.instruments)) != normalized:
+            raise ValueError("campaign manifest must exactly cover the requested universe")
         dataset = await ValidatedDailyDatasetReader(
             control_repository=control,
             market_repository=clickhouse,
@@ -2316,11 +2176,7 @@ async def create_validation_campaign(
         _validate_campaign_dataset(
             dataset=dataset,
             instruments=normalized,
-            minimum_sessions=(
-                train_sessions
-                + embargo_sessions
-                + 6 * test_sessions
-            ),
+            minimum_sessions=(train_sessions + embargo_sessions + 6 * test_sessions),
             initial_cash=settings.paper_initial_cash,
             allocation=allocation,
             slippage_bps=slippage_bps,
@@ -2365,9 +2221,7 @@ async def inspect_validation_campaign(
         )
     )
     try:
-        return _validation_campaign_payload(
-            await repository.status(campaign_hash=campaign_hash)
-        )
+        return _validation_campaign_payload(await repository.status(campaign_hash=campaign_hash))
     finally:
         await repository.close()
 
@@ -2381,35 +2235,25 @@ async def create_portfolio_validation(
     """Queue one live-locked, immutable portfolio validation."""
 
     if settings.live_trading_enabled:
-        raise MissingCapabilityError(
-            "portfolio validation requires live trading to remain locked"
-        )
+        raise MissingCapabilityError("portfolio validation requires live trading to remain locked")
     dsn = configured_dsn(
         settings.postgres_dsn,
         capability="PostgreSQL",
     )
     control = PostgresControlRepository.connect(dsn=dsn)
-    repository = PostgresPortfolioValidationRepository.connect(
-        dsn=dsn
-    )
+    repository = PostgresPortfolioValidationRepository.connect(dsn=dsn)
     try:
         manifest = await control.read_manifest(request.manifest_hash)
         if not manifest.production_complete:
-            raise ValueError(
-                "portfolio validation requires a "
-                "production-complete manifest"
-            )
+            raise ValueError("portfolio validation requires a production-complete manifest")
         if len(manifest.instruments) < 3:
-            raise ValueError(
-                "portfolio validation requires at least three instruments"
-            )
+            raise ValueError("portfolio validation requires at least three instruments")
         if any(
             candidate.selection_count > len(manifest.instruments)
             for candidate in request.candidates
         ):
             raise ValueError(
-                "portfolio candidate selects more instruments "
-                "than the manifest contains"
+                "portfolio candidate selects more instruments than the manifest contains"
             )
         experiment = await repository.create_experiment(
             request,
@@ -2435,9 +2279,7 @@ async def create_portfolio_validation(
                 now=datetime.now(UTC),
                 queued=True,
             )
-            raise PersistenceUnavailableError(
-                "portfolio validation audit is unavailable"
-            ) from None
+            raise PersistenceUnavailableError("portfolio validation audit is unavailable") from None
         return _portfolio_validation_payload(
             experiment,
             fold_count=0,
@@ -2466,9 +2308,7 @@ async def inspect_portfolio_validation(
             detail.experiment,
             fold_count=len(detail.folds),
             diagnostics=(
-                None
-                if detail.diagnostics is None
-                else detail.diagnostics.model_dump(mode="json")
+                None if detail.diagnostics is None else detail.diagnostics.model_dump(mode="json")
             ),
         )
     finally:
@@ -2487,27 +2327,16 @@ def _validate_campaign_dataset(
     compiler: ManifestMarketCompiler | None = None,
 ) -> None:
     market_compiler = compiler or ManifestMarketCompiler()
-    bar_keys = tuple(
-        (value.instrument, value.session_date)
-        for value in dataset.bars
-    )
-    factor_keys = tuple(
-        (value.instrument, value.session_date)
-        for value in dataset.factors
-    )
+    bar_keys = tuple((value.instrument, value.session_date) for value in dataset.bars)
+    factor_keys = tuple((value.instrument, value.session_date) for value in dataset.factors)
     common_markets = compile_common_calendar_markets(
         instruments=instruments,
         dataset=dataset,
         compiler=market_compiler,
     )
-    common_dates = tuple(
-        value.bar.session_date
-        for value in common_markets[instruments[0]]
-    )
+    common_dates = tuple(value.bar.session_date for value in common_markets[instruments[0]])
     allocated_cash = initial_cash * allocation
-    slippage_multiplier = (
-        Decimal("1") + slippage_bps / Decimal("10000")
-    )
+    slippage_multiplier = Decimal("1") + slippage_bps / Decimal("10000")
     minimum_lots_affordable = all(
         (
             max(
@@ -2536,9 +2365,7 @@ def _validate_campaign_dataset(
         or len(common_dates) < minimum_sessions
         or not minimum_lots_affordable
     ):
-        raise ValueError(
-            "campaign data lacks aligned, adjusted, affordable minimum OOS history"
-        )
+        raise ValueError("campaign data lacks aligned, adjusted, affordable minimum OOS history")
 
 
 def _validation_campaign_payload(
@@ -2573,14 +2400,10 @@ def _portfolio_validation_payload(
 ) -> dict[str, object]:
     return {
         "assessment": (
-            None
-            if experiment.summary is None
-            else experiment.summary.model_dump(mode="json")
+            None if experiment.summary is None else experiment.summary.model_dump(mode="json")
         ),
         "completed_at": (
-            None
-            if experiment.completed_at is None
-            else experiment.completed_at.isoformat()
+            None if experiment.completed_at is None else experiment.completed_at.isoformat()
         ),
         "diagnostics": diagnostics,
         "error_code": experiment.error_code,
@@ -2682,9 +2505,7 @@ async def inspect_paper_runtime_readiness(
         controls = PostgresExecutionControlRepository.connect(dsn=postgres_dsn)
         executions = PostgresPaperExecutionRepository.connect(dsn=postgres_dsn)
         broker = PersistentSimulatedBroker.connect(dsn=postgres_dsn)
-        scheduler_events = PostgresPaperSchedulerRepository.connect(
-            dsn=postgres_dsn
-        )
+        scheduler_events = PostgresPaperSchedulerRepository.connect(dsn=postgres_dsn)
         registry = PostgresPaperDeploymentRegistry.connect(dsn=postgres_dsn)
         cold_start_control = await controls.ensure_fail_closed(
             account_id=settings.paper_account_id,
@@ -2706,9 +2527,7 @@ async def inspect_paper_runtime_readiness(
             strategy_id=settings.paper_strategy_id,
         )
         if registration is None:
-            raise MissingCapabilityError(
-                "paper runtime requires an active approved strategy"
-            )
+            raise MissingCapabilityError("paper runtime requires an active approved strategy")
         now = datetime.now(UTC)
         report = await PaperRuntimeReadinessGate(
             account_id=settings.paper_account_id,
@@ -2730,11 +2549,7 @@ async def inspect_paper_runtime_readiness(
             "calendar_hash": report.calendar_hash,
             "checked_at": report.checked_at.isoformat(),
             "execution_order_count": report.execution_order_count,
-            "instrument": (
-                report.instruments[0]
-                if len(report.instruments) == 1
-                else None
-            ),
+            "instrument": (report.instruments[0] if len(report.instruments) == 1 else None),
             "instruments": list(report.instruments),
             "kill_switch_active": True,
             "live_trading_locked": True,
@@ -2828,9 +2643,7 @@ async def start_qmt_recovery_drill(
             now=datetime.now(UTC),
         )
         return {
-            "baseline_qmt_evidence_hash": (
-                event.baseline_qmt_evidence_hash
-            ),
+            "baseline_qmt_evidence_hash": (event.baseline_qmt_evidence_hash),
             "drill_id": str(event.drill_id),
             "event_hash": event.event_hash,
             "expires_at": event.expires_at.isoformat(),
@@ -2867,14 +2680,10 @@ async def complete_qmt_recovery_drill(
         return {
             "drill_id": str(event.drill_id),
             "event_hash": event.event_hash,
-            "failure_control_event_hash": (
-                event.failure_control_event_hash
-            ),
+            "failure_control_event_hash": (event.failure_control_event_hash),
             "kind": event.kind.value,
             "live_trading_locked": True,
-            "recovery_qmt_evidence_hash": (
-                event.recovery_qmt_evidence_hash
-            ),
+            "recovery_qmt_evidence_hash": (event.recovery_qmt_evidence_hash),
             "status": "drill_completed",
         }
     finally:
@@ -2917,9 +2726,7 @@ async def unlock_paper_runtime(
         executions = PostgresPaperExecutionRepository.connect(dsn=postgres_dsn)
         broker = PersistentSimulatedBroker.connect(dsn=postgres_dsn)
         sessions = PostgresPaperSessionRiskRepository.connect(dsn=postgres_dsn)
-        strategies = PostgresPaperDeploymentRegistry.connect(
-            dsn=postgres_dsn
-        )
+        strategies = PostgresPaperDeploymentRegistry.connect(dsn=postgres_dsn)
         leases = PostgresPaperSchedulerLeaseRepository.connect(dsn=postgres_dsn)
         unlocks = PostgresPaperRuntimeUnlockRepository.connect(dsn=postgres_dsn)
         await unlocks.check_connection()
@@ -2928,9 +2735,7 @@ async def unlock_paper_runtime(
             strategy_id=settings.paper_strategy_id,
         )
         if registration is None:
-            raise MissingCapabilityError(
-                "paper unlock requires an active approved strategy"
-            )
+            raise MissingCapabilityError("paper unlock requires an active approved strategy")
         result = await PaperRuntimeUnlockService(
             account_id=settings.paper_account_id,
             strategy_id=settings.paper_strategy_id,
@@ -3016,28 +2821,18 @@ async def run_qmt_readonly_acceptance(
     try:
         controls = PostgresExecutionControlRepository.connect(dsn=postgres_dsn)
         leases = PostgresQmtSessionLeaseRepository.connect(dsn=postgres_dsn)
-        acceptances = PostgresQmtReadOnlyAcceptanceRepository.connect(
-            dsn=postgres_dsn
-        )
+        acceptances = PostgresQmtReadOnlyAcceptanceRepository.connect(dsn=postgres_dsn)
         await acceptances.check_connection()
         control = await controls.replay(account_id=settings.paper_account_id)
-        active_session_ids = await leases.active_session_ids(
-            now=datetime.now(UTC)
-        )
+        active_session_ids = await leases.active_session_ids(now=datetime.now(UTC))
         readiness = inspect_qmt_readiness(
             settings,
             kill_switch_active=control.active,
             active_session_ids=active_session_ids,
         )
         if not readiness.read_only_ready:
-            blockers = ",".join(
-                check.code.value
-                for check in readiness.checks
-                if not check.passed
-            )
-            raise MissingCapabilityError(
-                f"QMT read-only preflight is blocked: {blockers}"
-            )
+            blockers = ",".join(check.code.value for check in readiness.checks if not check.passed)
+            raise MissingCapabilityError(f"QMT read-only preflight is blocked: {blockers}")
         lease = await leases.acquire(
             session_id=session_id,
             holder_id=credentials.holder_id,
@@ -3069,13 +2864,9 @@ async def run_qmt_readonly_acceptance(
             token=credentials.lease_token,
             now=datetime.now(UTC),
         )
-        latest_control = await controls.replay(
-            account_id=settings.paper_account_id
-        )
+        latest_control = await controls.replay(account_id=settings.paper_account_id)
         if not latest_control.active:
-            raise MissingCapabilityError(
-                "QMT acceptance requires the kill switch to remain active"
-            )
+            raise MissingCapabilityError("QMT acceptance requires the kill switch to remain active")
         evidence = QmtReadOnlyAcceptanceEvidence.from_baseline(
             baseline=acceptance.baseline,
             package_manifest_hash=acceptance.package_manifest_hash,
@@ -3109,9 +2900,7 @@ async def run_qmt_readonly_acceptance(
                 release_failed = True
         if not completed and controls is not None:
             try:
-                state = await controls.replay(
-                    account_id=settings.paper_account_id
-                )
+                state = await controls.replay(account_id=settings.paper_account_id)
                 if not state.active:
                     await controls.activate(
                         account_id=settings.paper_account_id,
@@ -3129,9 +2918,7 @@ async def run_qmt_readonly_acceptance(
         if controls is not None:
             await controls.close()
         if release_failed:
-            raise PersistenceUnavailableError(
-                "QMT session lease release failed"
-            )
+            raise PersistenceUnavailableError("QMT session lease release failed")
 
 
 async def run_trading_calendar_refresh(
@@ -3231,9 +3018,7 @@ async def approve_paper_sma_strategy(
     shanghai_today = to_shanghai(now).date()
     lag_days = (shanghai_today - reference_session_date).days
     if lag_days < 0 or lag_days > 4:
-        raise ValueError(
-            "paper approval requires a current or recent exact session reference"
-        )
+        raise ValueError("paper approval requires a current or recent exact session reference")
     postgres_dsn = configured_dsn(
         settings.postgres_dsn,
         capability="PostgreSQL",
@@ -3249,14 +3034,10 @@ async def approve_paper_sma_strategy(
             source="tushare",
         )
         control = PostgresControlRepository.connect(dsn=postgres_dsn)
-        execution_controls = PostgresExecutionControlRepository.connect(
-            dsn=postgres_dsn
-        )
+        execution_controls = PostgresExecutionControlRepository.connect(dsn=postgres_dsn)
         validations = PostgresValidationRepository.connect(dsn=postgres_dsn)
         registry = PostgresPaperStrategyRegistry.connect(dsn=postgres_dsn)
-        fence = await execution_controls.replay(
-            account_id=settings.paper_account_id
-        )
+        fence = await execution_controls.replay(account_id=settings.paper_account_id)
         if not fence.active:
             raise MissingCapabilityError(
                 "paper strategy approval requires the kill switch to remain active"
@@ -3337,17 +3118,11 @@ async def approve_paper_sma_portfolio_strategy(
         or len(experiment_ids) > 20
         or len(experiment_ids) != len(signal_manifest_hashes)
     ):
-        raise ValueError(
-            "paper portfolio requires 3-20 matched experiments and manifests"
-        )
+        raise ValueError("paper portfolio requires 3-20 matched experiments and manifests")
     now = datetime.now(UTC)
-    lag_days = (
-        to_shanghai(now).date() - reference_session_date
-    ).days
+    lag_days = (to_shanghai(now).date() - reference_session_date).days
     if lag_days < 0 or lag_days > 4:
-        raise ValueError(
-            "paper approval requires a current or recent exact session reference"
-        )
+        raise ValueError("paper approval requires a current or recent exact session reference")
     postgres_dsn = configured_dsn(
         settings.postgres_dsn,
         capability="PostgreSQL",
@@ -3366,38 +3141,20 @@ async def approve_paper_sma_portfolio_strategy(
             source="tushare",
         )
         control = PostgresControlRepository.connect(dsn=postgres_dsn)
-        execution_controls = PostgresExecutionControlRepository.connect(
-            dsn=postgres_dsn
-        )
-        validations = PostgresValidationRepository.connect(
-            dsn=postgres_dsn
-        )
-        registry = PostgresPaperPortfolioRegistry.connect(
-            dsn=postgres_dsn
-        )
-        fence = await execution_controls.replay(
-            account_id=settings.paper_account_id
-        )
+        execution_controls = PostgresExecutionControlRepository.connect(dsn=postgres_dsn)
+        validations = PostgresValidationRepository.connect(dsn=postgres_dsn)
+        registry = PostgresPaperPortfolioRegistry.connect(dsn=postgres_dsn)
+        fence = await execution_controls.replay(account_id=settings.paper_account_id)
         if not fence.active:
             raise MissingCapabilityError(
                 "portfolio approval requires the kill switch to remain active"
             )
         details = tuple(
-            [
-                await validations.detail(experiment_id)
-                for experiment_id in experiment_ids
-            ]
+            [await validations.detail(experiment_id) for experiment_id in experiment_ids]
         )
-        instruments = tuple(
-            sorted(
-                value.experiment.request.instrument
-                for value in details
-            )
-        )
+        instruments = tuple(sorted(value.experiment.request.instrument for value in details))
         if len(set(instruments)) != len(instruments):
-            raise ValueError(
-                "paper portfolio experiments must use unique instruments"
-            )
+            raise ValueError("paper portfolio experiments must use unique instruments")
         rule_set = await ExactSessionRuleReader(
             market_repository=clickhouse,
             control_repository=control,
@@ -3407,16 +3164,10 @@ async def approve_paper_sma_portfolio_strategy(
             as_of=now,
         )
         if rule_set.suspended_instruments:
-            raise ValueError(
-                "paper portfolio cannot be approved while a component is suspended"
-            )
-        rules_by_instrument = {
-            value.instrument: value for value in rule_set.rules
-        }
+            raise ValueError("paper portfolio cannot be approved while a component is suspended")
+        rules_by_instrument = {value.instrument: value for value in rule_set.rules}
         if set(rules_by_instrument) != set(instruments):
-            raise ValueError(
-                "paper portfolio session rules are incomplete"
-            )
+            raise ValueError("paper portfolio session rules are incomplete")
         policy = default_paper_policy(instruments)
         registration = await PaperPortfolioPromotionService(
             validations=validations,
@@ -3433,9 +3184,7 @@ async def approve_paper_sma_portfolio_strategy(
                 PaperPortfolioComponentApproval(
                     experiment_id=experiment_id,
                     signal_manifest_hash=signal_manifest_hash,
-                    rules=rules_by_instrument[
-                        detail.experiment.request.instrument
-                    ],
+                    rules=rules_by_instrument[detail.experiment.request.instrument],
                 )
                 for experiment_id, signal_manifest_hash, detail in zip(
                     experiment_ids,
@@ -3466,45 +3215,26 @@ async def approve_paper_sma_portfolio_strategy(
             "instruments": list(registration.instruments),
             "live_trading_locked": True,
             "oos_assessment": {
-                "assessment_hash": (
-                    registration.oos_assessment.assessment_hash
-                ),
-                "compounded_return": str(
-                    registration.oos_assessment.compounded_return
-                ),
-                "fold_count": (
-                    registration.oos_assessment.fold_count
-                ),
+                "assessment_hash": (registration.oos_assessment.assessment_hash),
+                "compounded_return": str(registration.oos_assessment.compounded_return),
+                "fold_count": (registration.oos_assessment.fold_count),
                 "maximum_component_contribution": str(
-                    registration.oos_assessment
-                    .maximum_component_contribution
+                    registration.oos_assessment.maximum_component_contribution
                 ),
-                "maximum_drawdown": str(
-                    registration.oos_assessment.maximum_drawdown
-                ),
+                "maximum_drawdown": str(registration.oos_assessment.maximum_drawdown),
                 "maximum_pairwise_correlation": (
                     None
-                    if registration.oos_assessment
-                    .maximum_pairwise_correlation is None
-                    else str(
-                        registration.oos_assessment
-                        .maximum_pairwise_correlation
-                    )
+                    if registration.oos_assessment.maximum_pairwise_correlation is None
+                    else str(registration.oos_assessment.maximum_pairwise_correlation)
                 ),
-                "policy_hash": (
-                    registration.oos_assessment.policy_hash
-                ),
-                "profitable_fold_rate": str(
-                    registration.oos_assessment.profitable_fold_rate
-                ),
+                "policy_hash": (registration.oos_assessment.policy_hash),
+                "profitable_fold_rate": str(registration.oos_assessment.profitable_fold_rate),
             },
             "registration_hash": registration.registration_hash,
             "status": "approved",
             "strategy_id": registration.strategy_id,
             "strategy_version": registration.strategy_version,
-            "valuation_manifest_hash": (
-                registration.valuation_manifest_hash
-            ),
+            "valuation_manifest_hash": (registration.valuation_manifest_hash),
         }
     finally:
         if registry is not None:

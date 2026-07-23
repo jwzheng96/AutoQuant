@@ -7,12 +7,18 @@ from datetime import UTC, date, datetime
 from typing import Protocol
 
 from autoquant.clock import to_shanghai
-from autoquant.data.daily_ingestion import ValidatedDailyDataset
+from autoquant.data.daily_ingestion import (
+    ExactDailyRecordBatch,
+    ValidatedDailyDataset,
+    validate_daily_manifest_dataset,
+)
+from autoquant.data.daily_models import DailyCoverageEvidence
 from autoquant.data.models import (
     DatasetManifest,
     _canonical_hash,
     _require_lowercase_sha256,
 )
+from autoquant.data.quality import QualityReport
 from autoquant.data.research_data_campaign import (
     ResearchDatasetManifest,
     ResearchDatasetShard,
@@ -187,6 +193,24 @@ class ValidatedDailyReader(Protocol):
     ) -> ValidatedDailyDataset: ...
 
 
+class ExactDailyRecordReader(Protocol):
+    async def query_exact_records(
+        self,
+        *,
+        instruments: tuple[str, ...],
+        start: date,
+        end: date,
+        record_hash_groups: tuple[tuple[str, ...], ...],
+    ) -> ExactDailyRecordBatch: ...
+
+
+class DailyManifestEvidenceReader(DailyManifestReader, Protocol):
+    async def read_quality_report(
+        self,
+        report_hash: str,
+    ) -> QualityReport: ...
+
+
 @dataclass(frozen=True, slots=True)
 class ValidatedResearchShard:
     instrument: str
@@ -206,11 +230,7 @@ class ValidatedResearchDatasetReader:
         max_read_attempts: int = 3,
         retry_delay_seconds: float = 0.25,
     ) -> None:
-        if (
-            not 1 <= max_read_attempts <= 5
-            or retry_delay_seconds < 0
-            or retry_delay_seconds > 5
-        ):
+        if not 1 <= max_read_attempts <= 5 or retry_delay_seconds < 0 or retry_delay_seconds > 5:
             raise ValueError("research shard retry policy is invalid")
         self._plan = plan
         self._manifests = manifest_reader
@@ -229,14 +249,10 @@ class ValidatedResearchDatasetReader:
             or manifest.source != "tushare"
             or not manifest.production_complete
             or manifest.instruments != (instrument,)
-            or to_shanghai(manifest.start_time).date()
-            != self._plan.start_date
-            or to_shanghai(manifest.end_time).date()
-            != self._plan.end_date
+            or to_shanghai(manifest.start_time).date() != self._plan.start_date
+            or to_shanghai(manifest.end_time).date() != self._plan.end_date
         ):
-            raise ValueError(
-                "daily shard does not match the research input plan"
-            )
+            raise ValueError("daily shard does not match the research input plan")
         for attempt in range(1, self._max_read_attempts + 1):
             try:
                 dataset = await self._datasets.query(
@@ -251,8 +267,7 @@ class ValidatedResearchDatasetReader:
             except PersistenceUnavailableError as error:
                 if attempt == self._max_read_attempts:
                     raise PersistenceUnavailableError(
-                        f"research shard {instrument} remained unavailable "
-                        f"after {attempt} attempts"
+                        f"research shard {instrument} remained unavailable after {attempt} attempts"
                     ) from error
                 if self._retry_delay_seconds:
                     await asyncio.sleep(self._retry_delay_seconds)
@@ -272,6 +287,166 @@ class ValidatedResearchDatasetReader:
     ) -> AsyncIterator[ValidatedResearchShard]:
         for instrument in self._plan.members_for(session_date):
             yield await self.query_instrument(instrument)
+
+
+class ExactManifestResearchDatasetReader:
+    """Read frozen daily rows in bounded hash-addressed batches."""
+
+    def __init__(
+        self,
+        *,
+        plan: ResearchInputPlan,
+        control_reader: DailyManifestEvidenceReader,
+        record_reader: ExactDailyRecordReader,
+        batch_size: int = 4,
+        max_read_attempts: int = 3,
+        retry_delay_seconds: float = 0.25,
+    ) -> None:
+        if (
+            not 1 <= batch_size <= 25
+            or not 1 <= max_read_attempts <= 5
+            or retry_delay_seconds < 0
+            or retry_delay_seconds > 5
+        ):
+            raise ValueError("exact research reader resource policy is invalid")
+        self._plan = plan
+        self._control = control_reader
+        self._records = record_reader
+        self._batch_size = batch_size
+        self._max_read_attempts = max_read_attempts
+        self._retry_delay_seconds = retry_delay_seconds
+
+    async def iter_all(
+        self,
+    ) -> AsyncIterator[ValidatedResearchShard]:
+        shards = self._plan.shards
+        for offset in range(0, len(shards), self._batch_size):
+            batch = shards[offset : offset + self._batch_size]
+            manifests = tuple(
+                [
+                    await self._read_manifest(
+                        instrument=value.instrument,
+                        manifest_hash=value.manifest_hash,
+                    )
+                    for value in batch
+                ]
+            )
+            dataset = await self._read_batch(manifests)
+            for manifest in manifests:
+                yield ValidatedResearchShard(
+                    instrument=manifest.instruments[0],
+                    manifest=manifest,
+                    dataset=self._validated_shard(
+                        manifest=manifest,
+                        batch=dataset,
+                    ),
+                )
+
+    async def _read_manifest(
+        self,
+        *,
+        instrument: str,
+        manifest_hash: str,
+    ) -> DatasetManifest:
+        manifest = await self._control.read_manifest(manifest_hash)
+        if (
+            manifest.manifest_hash != manifest_hash
+            or manifest.source != "tushare"
+            or not manifest.production_complete
+            or manifest.instruments != (instrument,)
+            or to_shanghai(manifest.start_time).date() != self._plan.start_date
+            or to_shanghai(manifest.end_time).date() != self._plan.end_date
+        ):
+            raise ValueError("daily shard does not match the research input plan")
+        report = await self._control.read_quality_report(manifest.quality_report_hash)
+        if not report.passed or not report.production_complete:
+            raise ValueError("exact research requires passing production evidence")
+        return manifest
+
+    async def _read_batch(
+        self,
+        manifests: tuple[DatasetManifest, ...],
+    ) -> ExactDailyRecordBatch:
+        instruments = tuple(value.instruments[0] for value in manifests)
+        for attempt in range(1, self._max_read_attempts + 1):
+            try:
+                return await self._records.query_exact_records(
+                    instruments=instruments,
+                    start=self._plan.start_date,
+                    end=self._plan.end_date,
+                    record_hash_groups=tuple(value.record_hashes for value in manifests),
+                )
+            except PersistenceUnavailableError as error:
+                if attempt == self._max_read_attempts:
+                    raise PersistenceUnavailableError(
+                        f"exact daily batch remained unavailable after {attempt} attempts"
+                    ) from error
+                if self._retry_delay_seconds:
+                    await asyncio.sleep(self._retry_delay_seconds)
+        raise AssertionError("exact daily retry loop did not return")
+
+    @staticmethod
+    def _validated_shard(
+        *,
+        manifest: DatasetManifest,
+        batch: ExactDailyRecordBatch,
+    ) -> ValidatedDailyDataset:
+        instrument = manifest.instruments[0]
+        expected = set(manifest.record_hashes)
+        bars = tuple(
+            value
+            for value in batch.bars
+            if value.instrument == instrument and value.content_hash in expected
+        )
+        bar_keys = {(value.instrument, value.session_date) for value in bars}
+        factors = tuple(
+            value
+            for value in batch.factors
+            if value.instrument == instrument
+            and value.content_hash in expected
+            and (value.instrument, value.session_date) in bar_keys
+        )
+        coverage = DailyCoverageEvidence(
+            sessions=tuple(value for value in batch.sessions if value.content_hash in expected),
+            lifecycles=tuple(
+                value
+                for value in batch.lifecycles
+                if value.instrument == instrument and value.content_hash in expected
+            ),
+            suspensions=tuple(
+                value
+                for value in batch.suspensions
+                if value.instrument == instrument and value.content_hash in expected
+            ),
+            price_limits=tuple(
+                value
+                for value in batch.price_limits
+                if value.instrument == instrument and value.content_hash in expected
+            ),
+        )
+        dataset = ValidatedDailyDataset(
+            bars=bars,
+            factors=factors,
+            coverage=coverage,
+        )
+        if any(
+            value.available_at > manifest.as_of
+            for values in (
+                dataset.bars,
+                dataset.factors,
+                dataset.coverage.sessions,
+                dataset.coverage.lifecycles,
+                dataset.coverage.suspensions,
+                dataset.coverage.price_limits,
+            )
+            for value in values
+        ):
+            raise ManifestIntegrityError("exact daily row exceeds the manifest cutoff")
+        validate_daily_manifest_dataset(
+            manifest=manifest,
+            dataset=dataset,
+        )
+        return dataset
 
 
 def compile_research_input_plan(

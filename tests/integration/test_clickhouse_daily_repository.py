@@ -158,16 +158,22 @@ async def test_daily_repositories_select_corrections_by_as_of(
     assert await repository.append_factors((original_factor, corrected_factor)) == 2
 
     before_bars = await repository.query_bars_as_of(
-        (original_bar.instrument,), original_bar.session_date, original_bar.session_date,
-        first_visible
+        (original_bar.instrument,),
+        original_bar.session_date,
+        original_bar.session_date,
+        first_visible,
     )
     after_bars = await repository.query_bars_as_of(
-        (original_bar.instrument,), original_bar.session_date, original_bar.session_date,
-        corrected_visible
+        (original_bar.instrument,),
+        original_bar.session_date,
+        original_bar.session_date,
+        corrected_visible,
     )
     after_factors = await repository.query_factors_as_of(
-        (original_bar.instrument,), original_bar.session_date, original_bar.session_date,
-        corrected_visible
+        (original_bar.instrument,),
+        original_bar.session_date,
+        original_bar.session_date,
+        corrected_visible,
     )
 
     assert before_bars == (original_bar,)
@@ -180,11 +186,7 @@ def coverage(
 ) -> DailyCoverageEvidence:
     response_hash = ("c" if not suspended else "d") * 64
     return DailyCoverageEvidence(
-        sessions=(
-            TradingSession(
-                source, date(2026, 7, 20), True, available_at, response_hash
-            ),
-        ),
+        sessions=(TradingSession(source, date(2026, 7, 20), True, available_at, response_hash),),
         lifecycles=(
             InstrumentLifecycle(
                 source,
@@ -224,8 +226,8 @@ def coverage(
 async def test_daily_coverage_selects_point_in_time_correction(
     repository: ClickHouseDailyRepository,
 ) -> None:
-    first_visible = datetime(2026, 7, 20, 0, 40, tzinfo=UTC)
-    corrected_visible = datetime(2026, 7, 20, 0, 50, tzinfo=UTC)
+    first_visible = datetime(2026, 7, 21, 0, 40, tzinfo=UTC)
+    corrected_visible = datetime(2026, 7, 22, 0, 50, tzinfo=UTC)
     original = coverage(
         repository.source,
         available_at=first_visible,
@@ -257,3 +259,73 @@ async def test_daily_coverage_selects_point_in_time_correction(
     assert before == original
     assert after == corrected
     assert sessions == corrected.sessions
+
+
+@pytest.mark.asyncio
+async def test_daily_repository_reads_only_frozen_content_hashes(
+    repository: ClickHouseDailyRepository,
+) -> None:
+    first_visible = datetime(2026, 7, 21, 0, 40, tzinfo=UTC)
+    corrected_visible = datetime(2026, 7, 22, 0, 50, tzinfo=UTC)
+    original_bar = bar(
+        repository.source,
+        available_at=first_visible,
+        ingested_at=first_visible,
+        close="10.1",
+    )
+    corrected_bar = bar(
+        repository.source,
+        available_at=corrected_visible,
+        ingested_at=corrected_visible,
+        close="10.2",
+    )
+    original_factor = factor(
+        repository.source,
+        available_at=first_visible,
+        ingested_at=first_visible,
+        value="123.4",
+    )
+    corrected_factor = factor(
+        repository.source,
+        available_at=corrected_visible,
+        ingested_at=corrected_visible,
+        value="123.5",
+    )
+    original_coverage = coverage(
+        repository.source,
+        available_at=first_visible,
+        suspended=False,
+        up_limit="11",
+    )
+    corrected_coverage = coverage(
+        repository.source,
+        available_at=corrected_visible,
+        suspended=True,
+        up_limit="10.5",
+    )
+    await repository.append_bars((original_bar, corrected_bar))
+    await repository.append_factors((original_factor, corrected_factor))
+    await repository.append_coverage(original_coverage)
+    await repository.append_coverage(corrected_coverage)
+    expected_hashes = (
+        original_bar.content_hash,
+        original_factor.content_hash,
+        original_coverage.sessions[0].content_hash,
+        original_coverage.lifecycles[0].content_hash,
+        original_coverage.suspensions[0].content_hash,
+        original_coverage.price_limits[0].content_hash,
+    )
+
+    result = await repository.query_exact_records(
+        instruments=("000001.XSHE",),
+        start=date(2026, 7, 20),
+        end=date(2026, 7, 20),
+        record_hash_groups=(expected_hashes,),
+    )
+
+    assert result.bars == (original_bar,)
+    assert result.factors == (original_factor,)
+    assert result.sessions == original_coverage.sessions
+    assert result.lifecycles == original_coverage.lifecycles
+    assert result.suspensions == original_coverage.suspensions
+    assert result.price_limits == original_coverage.price_limits

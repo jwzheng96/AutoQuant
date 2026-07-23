@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid5
@@ -13,6 +13,9 @@ from clickhouse_connect.driver.asyncclient import (  # type: ignore[import-untyp
 )
 
 from autoquant.clock import to_utc
+from autoquant.data.daily_ingestion import (
+    ExactDailyRecordBatch,
+)
 from autoquant.data.daily_models import (
     AdjustmentFactorRevision,
     DailyBarRevision,
@@ -39,9 +42,13 @@ _HISTORICAL_QUERY_SETTINGS: dict[str, int] = {
     "optimize_aggregation_in_order": 1,
     "use_query_condition_cache": 0,
 }
-_TABLE_IDENTIFIER = re.compile(
-    r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?\Z"
-)
+_TABLE_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?\Z")
+_UNIX_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+
+
+def _unix_microseconds(value: datetime) -> int:
+    delta = to_utc(value, name="timestamp") - _UNIX_EPOCH
+    return delta.days * 86_400_000_000 + delta.seconds * 1_000_000 + delta.microseconds
 
 
 def _year_intervals(
@@ -101,20 +108,45 @@ _FACTOR_INSERT_COLUMNS = (
     "content_hash",
 )
 _SESSION_INSERT_COLUMNS = (
-    "record_id", "source", "session_date", "is_open", "available_at",
-    "response_hash", "content_hash",
+    "record_id",
+    "source",
+    "session_date",
+    "is_open",
+    "available_at",
+    "response_hash",
+    "content_hash",
 )
 _LIFECYCLE_INSERT_COLUMNS = (
-    "record_id", "source", "instrument", "list_date", "delist_date",
-    "available_at", "response_hash", "content_hash",
+    "record_id",
+    "source",
+    "instrument",
+    "list_date",
+    "delist_date",
+    "available_at",
+    "response_hash",
+    "content_hash",
 )
 _SUSPENSION_INSERT_COLUMNS = (
-    "record_id", "source", "instrument", "session_date", "suspended",
-    "available_at", "response_hash", "content_hash",
+    "record_id",
+    "source",
+    "instrument",
+    "session_date",
+    "suspended",
+    "available_at",
+    "response_hash",
+    "content_hash",
 )
 _LIMIT_INSERT_COLUMNS = (
-    "record_id", "source", "instrument", "session_date", "pre_close", "up_limit",
-    "down_limit", "available_at", "response_hash", "content_hash",
+    "record_id",
+    "source",
+    "instrument",
+    "session_date",
+    "pre_close",
+    "up_limit",
+    "down_limit",
+    "available_at",
+    "response_hash",
+    "content_hash",
 )
 
 
@@ -145,8 +177,13 @@ class ClickHouseDailyRepository:
         limit_table: str = _LIMIT_TABLE,
     ) -> None:
         self._validate_identity(
-            source, bar_table, factor_table, session_table, lifecycle_table,
-            suspension_table, limit_table,
+            source,
+            bar_table,
+            factor_table,
+            session_table,
+            lifecycle_table,
+            suspension_table,
+            limit_table,
         )
         self._client = client
         self._source = source
@@ -173,8 +210,13 @@ class ClickHouseDailyRepository:
         if not isinstance(dsn, str) or not dsn.strip():
             raise ValueError("dsn cannot be empty")
         cls._validate_identity(
-            source, bar_table, factor_table, session_table, lifecycle_table,
-            suspension_table, limit_table,
+            source,
+            bar_table,
+            factor_table,
+            session_table,
+            lifecycle_table,
+            suspension_table,
+            limit_table,
         )
         try:
             client = await clickhouse_connect.get_async_client(dsn=dsn, tz_mode="aware")
@@ -203,9 +245,7 @@ class ClickHouseDailyRepository:
         try:
             await self._client.command("SELECT 1")
             bar_exists = await self._client.command(f"EXISTS TABLE {self._bar_table}")
-            factor_exists = await self._client.command(
-                f"EXISTS TABLE {self._factor_table}"
-            )
+            factor_exists = await self._client.command(f"EXISTS TABLE {self._factor_table}")
             coverage_exists = [
                 await self._client.command(f"EXISTS TABLE {table}")
                 for table in (
@@ -256,8 +296,7 @@ WHERE database = currentDatabase()
             )
             rows = tuple(tuple(row) for row in result.result_rows)
             if (
-                tuple(result.column_names)
-                != ("inactive_bytes", "inactive_parts")
+                tuple(result.column_names) != ("inactive_bytes", "inactive_parts")
                 or len(rows) != 1
                 or len(rows[0]) != 2
             ):
@@ -269,9 +308,7 @@ WHERE database = currentDatabase()
                 inactive_parts=inactive_parts,
             )
         except Exception:
-            raise PersistenceUnavailableError(
-                "ClickHouse merge pressure check failed"
-            ) from None
+            raise PersistenceUnavailableError("ClickHouse merge pressure check failed") from None
 
     async def append_bars(self, records: tuple[DailyBarRevision, ...]) -> int:
         rows: list[tuple[Any, ...]] = []
@@ -288,21 +325,15 @@ WHERE database = currentDatabase()
             rows.append((record_id, *self.bar_result_row(record)))
         return await self._append(self._bar_table, _BAR_INSERT_COLUMNS, rows)
 
-    async def append_factors(
-        self, records: tuple[AdjustmentFactorRevision, ...]
-    ) -> int:
+    async def append_factors(self, records: tuple[AdjustmentFactorRevision, ...]) -> int:
         rows: list[tuple[Any, ...]] = []
         identities: set[UUID] = set()
         for record in records:
             if not isinstance(record, AdjustmentFactorRevision):
                 raise TypeError("records must contain AdjustmentFactorRevision values")
             self._validate_source(record.source)
-            self._require_exact_decimal(
-                record.factor, name="factor", precision=24, scale=6
-            )
-            record_id = self._record_id(
-                _FACTOR_NAMESPACE, record.content_hash, record.ingested_at
-            )
+            self._require_exact_decimal(record.factor, name="factor", precision=24, scale=6)
+            record_id = self._record_id(_FACTOR_NAMESPACE, record.content_hash, record.ingested_at)
             if record_id in identities:
                 raise ValueError("duplicate adjustment-factor revision in append batch")
             identities.add(record_id)
@@ -515,8 +546,12 @@ ORDER BY instrument
         limits = await self._instrument_coverage_query(
             self._limit_table,
             (
-                "pre_close", "up_limit", "down_limit", "available_at",
-                "response_hash", "content_hash",
+                "pre_close",
+                "up_limit",
+                "down_limit",
+                "available_at",
+                "response_hash",
+                "content_hash",
             ),
             parameters,
         )
@@ -539,9 +574,7 @@ ORDER BY instrument
         as_of: datetime,
     ) -> tuple[TradingSession, ...]:
         if start > end:
-            raise ValueError(
-                "historical interval is invalid"
-            )
+            raise ValueError("historical interval is invalid")
         cutoff = to_utc(as_of, name="as_of")
         rows = await self._coverage_query(
             f"""
@@ -591,6 +624,352 @@ ORDER BY session_date
                 "ClickHouse returned malformed trading sessions"
             ) from None
 
+    async def query_exact_records(
+        self,
+        *,
+        instruments: tuple[str, ...],
+        start: date,
+        end: date,
+        record_hash_groups: tuple[tuple[str, ...], ...],
+    ) -> ExactDailyRecordBatch:
+        """Read only immutable rows committed by frozen manifest hashes."""
+
+        self._validate_query(instruments, start, end)
+        groups = tuple(tuple(value) for value in record_hash_groups)
+        hashes = tuple(sorted({content_hash for group in groups for content_hash in group}))
+        if (
+            not hashes
+            or len(groups) != len(instruments)
+            or any(not group or len(set(group)) != len(group) for group in groups)
+            or any(
+                len(value) != 64
+                or value.lower() != value
+                or any(character not in "0123456789abcdef" for character in value)
+                for value in hashes
+            )
+        ):
+            raise ValueError("exact daily query requires unique SHA-256 hashes")
+        parameters: dict[str, object] = {
+            "source": self._source,
+            "instruments": list(instruments),
+            "start_date": start,
+            "end_date": end,
+        }
+        expected = set(hashes)
+        bars = await self._raw_instrument_records_query(
+            table=self._bar_table,
+            columns=self.BAR_RESULT_COLUMNS,
+            parameters=parameters,
+            date_column="session_date",
+        )
+        factors = await self._raw_instrument_records_query(
+            table=self._factor_table,
+            columns=self.FACTOR_RESULT_COLUMNS,
+            parameters=parameters,
+            date_column="session_date",
+        )
+        lifecycles = await self._raw_instrument_records_query(
+            table=self._lifecycle_table,
+            columns=(
+                "source",
+                "instrument",
+                "list_date",
+                "delist_date",
+                "available_at",
+                "response_hash",
+                "content_hash",
+            ),
+            parameters=parameters,
+            date_column=None,
+        )
+        suspensions = await self._raw_instrument_records_query(
+            table=self._suspension_table,
+            columns=(
+                "source",
+                "instrument",
+                "session_date",
+                "suspended",
+                "available_at",
+                "response_hash",
+                "content_hash",
+            ),
+            parameters=parameters,
+            date_column="session_date",
+        )
+        limits = await self._raw_instrument_records_query(
+            table=self._limit_table,
+            columns=(
+                "source",
+                "instrument",
+                "session_date",
+                "pre_close",
+                "up_limit",
+                "down_limit",
+                "available_at",
+                "response_hash",
+                "content_hash",
+            ),
+            parameters=parameters,
+            date_column="session_date",
+        )
+        try:
+            mapped_bars = self._deduplicate_exact(
+                tuple(
+                    bar_value
+                    for row in bars
+                    if (bar_value := self._map_bar(row)).content_hash in expected
+                )
+            )
+            mapped_factors = self._deduplicate_exact(
+                tuple(
+                    factor_value
+                    for row in factors
+                    if (factor_value := self._map_factor(row)).content_hash in expected
+                )
+            )
+            mapped_lifecycles = self._deduplicate_exact(
+                tuple(
+                    lifecycle_value
+                    for row in lifecycles
+                    if (lifecycle_value := self._map_lifecycle(row)).content_hash in expected
+                )
+            )
+            mapped_suspensions = self._deduplicate_exact(
+                tuple(
+                    suspension_value
+                    for row in suspensions
+                    if (suspension_value := self._map_suspension(row)).content_hash in expected
+                )
+            )
+            mapped_limits = self._deduplicate_exact(
+                tuple(
+                    limit_value
+                    for row in limits
+                    if (limit_value := self._map_limit(row)).content_hash in expected
+                )
+            )
+        except (IndexError, TypeError, ValueError):
+            raise PersistenceUnavailableError(
+                "ClickHouse returned malformed exact daily rows"
+            ) from None
+        instrument_hashes = {
+            instrument: {
+                value.content_hash
+                for values in (
+                    mapped_bars,
+                    mapped_factors,
+                    mapped_lifecycles,
+                    mapped_suspensions,
+                    mapped_limits,
+                )
+                for value in values
+                if value.instrument == instrument
+            }
+            for instrument in instruments
+        }
+        session_groups = tuple(
+            tuple(sorted(set(group) - instrument_hashes[instrument]))
+            for instrument, group in zip(
+                instruments,
+                groups,
+                strict=True,
+            )
+        )
+        if any(not group for group in session_groups):
+            raise PersistenceUnavailableError("exact daily batch has no session hashes")
+        seed_hashes = tuple(group[0] for group in session_groups)
+        parameters["session_hashes"] = list(seed_hashes)
+        seed_rows = await self._exact_session_records_query(
+            parameters=parameters,
+        )
+        try:
+            seeds = self._deduplicate_exact(tuple(self._map_session(row) for row in seed_rows))
+        except (IndexError, TypeError, ValueError):
+            raise PersistenceUnavailableError(
+                "ClickHouse returned malformed session seeds"
+            ) from None
+        if {value.content_hash for value in seeds} != set(seed_hashes):
+            raise PersistenceUnavailableError("ClickHouse exact session seed is missing")
+        parameters["session_available_microseconds"] = [
+            _unix_microseconds(value.available_at) for value in seeds
+        ]
+        parameters["session_response_hashes"] = [value.response_hash for value in seeds]
+        sessions = await self._session_records_by_evidence_query(
+            parameters=parameters,
+        )
+        try:
+            mapped_sessions = self._deduplicate_exact(
+                tuple(
+                    session
+                    for row in sessions
+                    if (session := self._map_session(row)).content_hash in expected
+                )
+            )
+        except (IndexError, TypeError, ValueError):
+            raise PersistenceUnavailableError(
+                "ClickHouse returned malformed exact session rows"
+            ) from None
+        return ExactDailyRecordBatch(
+            bars=mapped_bars,
+            factors=mapped_factors,
+            sessions=mapped_sessions,
+            lifecycles=mapped_lifecycles,
+            suspensions=mapped_suspensions,
+            price_limits=mapped_limits,
+        )
+
+    async def purge_allocator(
+        self,
+        *,
+        strict: bool = False,
+    ) -> None:
+        try:
+            await self._client.command("SYSTEM JEMALLOC PURGE")
+        except Exception:
+            if strict:
+                raise PersistenceUnavailableError("ClickHouse allocator purge failed") from None
+
+    async def _raw_instrument_records_query(
+        self,
+        *,
+        table: str,
+        columns: tuple[str, ...],
+        parameters: dict[str, object],
+        date_column: str | None,
+    ) -> tuple[tuple[Any, ...], ...]:
+        predicates = [
+            "instrument IN {instruments:Array(String)}",
+        ]
+        if date_column is not None:
+            predicates.append(f"{date_column} BETWEEN {{start_date:Date}} AND {{end_date:Date}}")
+        order = tuple(
+            value
+            for value in (
+                "instrument",
+                date_column,
+                "source",
+                "content_hash",
+            )
+            if value is not None
+        )
+        sql = f"""
+SELECT {", ".join(columns)}
+FROM {table}
+PREWHERE source = {{source:String}}
+WHERE {" AND ".join(predicates)}
+ORDER BY {", ".join(order)}
+""".strip()
+        try:
+            result = await self._client.query(
+                query=sql,
+                parameters=parameters,
+                settings=_HISTORICAL_QUERY_SETTINGS,
+                tz_mode="aware",
+            )
+            rows = tuple(tuple(row) for row in result.result_rows)
+            actual_columns = tuple(result.column_names)
+            if not rows and not actual_columns:
+                return ()
+            if actual_columns != columns:
+                raise ValueError("unexpected columns")
+            return rows
+        except Exception as error:
+            raise PersistenceUnavailableError("ClickHouse raw daily query failed") from error
+
+    async def _exact_session_records_query(
+        self,
+        *,
+        parameters: dict[str, object],
+    ) -> tuple[tuple[Any, ...], ...]:
+        columns = (
+            "source",
+            "session_date",
+            "is_open",
+            "available_at",
+            "response_hash",
+            "content_hash",
+        )
+        sql = f"""
+SELECT {", ".join(columns)}
+FROM {self._session_table}
+PREWHERE source = {{source:String}}
+WHERE session_date BETWEEN
+          {{start_date:Date}} AND {{end_date:Date}}
+  AND content_hash IN {{session_hashes:Array(String)}}
+ORDER BY session_date, source, content_hash
+""".strip()
+        try:
+            result = await self._client.query(
+                query=sql,
+                parameters=parameters,
+                settings=_HISTORICAL_QUERY_SETTINGS,
+                tz_mode="aware",
+            )
+            rows = tuple(tuple(row) for row in result.result_rows)
+            actual_columns = tuple(result.column_names)
+            if not rows and not actual_columns:
+                return ()
+            if actual_columns != columns:
+                raise ValueError("unexpected columns")
+            return rows
+        except Exception as error:
+            raise PersistenceUnavailableError("ClickHouse exact session query failed") from error
+
+    async def _session_records_by_evidence_query(
+        self,
+        *,
+        parameters: dict[str, object],
+    ) -> tuple[tuple[Any, ...], ...]:
+        columns = (
+            "source",
+            "session_date",
+            "is_open",
+            "available_at",
+            "response_hash",
+            "content_hash",
+        )
+        sql = f"""
+SELECT {", ".join(columns)}
+FROM {self._session_table}
+PREWHERE source = {{source:String}}
+WHERE session_date BETWEEN
+          {{start_date:Date}} AND {{end_date:Date}}
+  AND toUnixTimestamp64Micro(available_at) IN
+      {{session_available_microseconds:Array(Int64)}}
+  AND response_hash IN
+      {{session_response_hashes:Array(String)}}
+ORDER BY session_date, source, available_at, content_hash
+""".strip()
+        try:
+            result = await self._client.query(
+                query=sql,
+                parameters=parameters,
+                settings=_HISTORICAL_QUERY_SETTINGS,
+                tz_mode="aware",
+            )
+            rows = tuple(tuple(row) for row in result.result_rows)
+            actual_columns = tuple(result.column_names)
+            if not rows and not actual_columns:
+                return ()
+            if actual_columns != columns:
+                raise ValueError("unexpected columns")
+            return rows
+        except Exception as error:
+            raise PersistenceUnavailableError("ClickHouse session evidence query failed") from error
+
+    @staticmethod
+    def _deduplicate_exact(records: tuple[Any, ...]) -> tuple[Any, ...]:
+        values: list[Any] = []
+        seen: dict[str, Any] = {}
+        for record in records:
+            content_hash = record.content_hash
+            previous = seen.setdefault(content_hash, record)
+            if previous != record:
+                raise ValueError("conflicting rows share one daily content hash")
+            if previous is record:
+                values.append(record)
+        return tuple(values)
+
     async def _instrument_coverage_query(
         self,
         table: str,
@@ -600,9 +979,7 @@ ORDER BY session_date
         result_columns = ("source", "instrument", "session_date", *value_columns)
         instruments = parameters.get("instruments")
         if not isinstance(instruments, list) or not instruments:
-            raise ValueError(
-                "coverage query requires instruments"
-            )
+            raise ValueError("coverage query requires instruments")
         instrument_filter = (
             "instrument = {instrument:String}"
             if len(instruments) == 1
@@ -617,7 +994,7 @@ SELECT source, instrument, session_date, {projected}
 FROM
 (
     SELECT source, instrument, session_date,
-           argMax(tuple({', '.join(value_columns)}),
+           argMax(tuple({", ".join(value_columns)}),
                   tuple(available_at, record_id)) AS latest
     FROM {table}
     PREWHERE source = {{source:String}}
@@ -631,9 +1008,7 @@ ORDER BY instrument, session_date
         start = parameters.get("start_date")
         end = parameters.get("end_date")
         if not isinstance(start, date) or not isinstance(end, date):
-            raise ValueError(
-                "coverage query requires date boundaries"
-            )
+            raise ValueError("coverage query requires date boundaries")
         rows: list[tuple[Any, ...]] = []
         for chunk_start, chunk_end in _year_intervals(start, end):
             chunk_parameters = {
@@ -671,9 +1046,7 @@ ORDER BY instrument, session_date
                 raise ValueError("unexpected columns")
             return rows
         except Exception as error:
-            raise PersistenceUnavailableError(
-                "ClickHouse daily coverage query failed"
-            ) from error
+            raise PersistenceUnavailableError("ClickHouse daily coverage query failed") from error
 
     async def _append(
         self,
@@ -684,9 +1057,7 @@ ORDER BY instrument, session_date
         if not rows:
             return 0
         try:
-            summary = await self._client.insert(
-                table=table, data=rows, column_names=columns
-            )
+            summary = await self._client.insert(table=table, data=rows, column_names=columns)
             written_rows = summary.written_rows
         except Exception:
             raise PersistenceUnavailableError("ClickHouse daily append failed") from None
@@ -740,9 +1111,7 @@ ORDER BY instrument, session_date
                     settings=_HISTORICAL_QUERY_SETTINGS,
                     tz_mode="aware",
                 )
-                chunk_rows = tuple(
-                    tuple(row) for row in result.result_rows
-                )
+                chunk_rows = tuple(tuple(row) for row in result.result_rows)
                 actual_columns = tuple(result.column_names)
                 if not chunk_rows and not actual_columns:
                     continue
@@ -775,7 +1144,7 @@ ORDER BY instrument, session_date
         )
         return f"""
 SELECT
-    {', '.join(outer)}
+    {", ".join(outer)}
 FROM
 (
     SELECT
@@ -783,7 +1152,7 @@ FROM
         instrument,
         session_date,
         argMax(
-            tuple({', '.join(tuple_columns)}),
+            tuple({", ".join(tuple_columns)}),
             tuple(available_at, ingested_at, record_id)
         ) AS latest
     FROM {table}
@@ -959,17 +1328,11 @@ ORDER BY instrument, session_date, source
             "close_price",
             "pre_close",
         ):
-            cls._require_exact_decimal(
-                getattr(record, field), name=field, precision=20, scale=6
-            )
-        cls._require_exact_decimal(
-            record.turnover, name="turnover", precision=24, scale=4
-        )
+            cls._require_exact_decimal(getattr(record, field), name=field, precision=20, scale=6)
+        cls._require_exact_decimal(record.turnover, name="turnover", precision=24, scale=4)
 
     @staticmethod
-    def _require_exact_decimal(
-        value: Decimal, *, name: str, precision: int, scale: int
-    ) -> None:
+    def _require_exact_decimal(value: Decimal, *, name: str, precision: int, scale: int) -> None:
         components = value.as_tuple()
         exponent = components.exponent
         if not isinstance(exponent, int):
