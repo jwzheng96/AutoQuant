@@ -421,6 +421,21 @@ to prevent same-day constituent and liquidity lookahead. The deterministic
 plan hash and rule version are appended to the immutable audit log. This
 command never enables paper or live execution.
 
+Before building portfolio features, verify representative shards end to end:
+
+```bash
+uv run autoquant research-input-shard-check \
+  --manifest-hash <aggregate-research-manifest-hash> \
+  --instrument 000001.XSHE \
+  --requested-by operator
+```
+
+This reads only the requested shard. It verifies the daily manifest identity,
+source, production-complete flag, instrument and interval, then reuses the
+quality-report and exact record-hash reader against ClickHouse. The result is
+appended to the immutable audit chain. Downstream research code should use the
+same lazy reader rather than loading the entire historical union into memory.
+
 ```bash
 uv run autoquant approve-paper-sma \
   --experiment-id <completed-experiment-uuid> \

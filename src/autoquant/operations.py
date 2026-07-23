@@ -28,7 +28,9 @@ from autoquant.data.daily_ingestion import (
 from autoquant.data.daily_quality import DailyQualityGate
 from autoquant.data.research_data_campaign import ResearchDataCampaignSpec
 from autoquant.data.research_input import (
+    ResearchInputPlan,
     ResearchUniverseBinding,
+    ValidatedResearchDatasetReader,
     compile_research_input_plan,
 )
 from autoquant.data.session_reference import SessionReferenceRefreshService
@@ -591,32 +593,10 @@ async def compile_research_input(
     universes = PostgresResearchUniverseRepository.connect(dsn=dsn)
     control = PostgresControlRepository.connect(dsn=dsn)
     try:
-        manifest = await campaigns.read_manifest(manifest_hash)
-        details = tuple(
-            [
-                await universes.detail(snapshot_hash)
-                for snapshot_hash in manifest.snapshot_hashes
-            ]
-        )
-        bindings = tuple(
-            ResearchUniverseBinding(
-                sequence=sequence,
-                snapshot_hash=detail.snapshot.snapshot_hash,
-                policy_hash=detail.snapshot.policy_hash,
-                reference_date=detail.snapshot.reference_date,
-                knowledge_as_of=detail.snapshot.knowledge_as_of,
-                members=tuple(
-                    sorted(
-                        member.instrument
-                        for member in detail.members
-                    )
-                ),
-            )
-            for sequence, detail in enumerate(details, start=1)
-        )
-        plan = compile_research_input_plan(
-            manifest=manifest,
-            universes=bindings,
+        plan = await _load_research_input_plan(
+            campaigns=campaigns,
+            universes=universes,
+            manifest_hash=manifest_hash,
         )
         payload: dict[str, object] = {
             "activation_rule": plan.activation_rule,
@@ -651,6 +631,134 @@ async def compile_research_input(
         await control.close()
         await universes.close()
         await campaigns.close()
+
+
+async def inspect_research_input_shard(
+    settings: AppSettings,
+    *,
+    manifest_hash: str,
+    instrument: str,
+    requested_by: str,
+) -> dict[str, object]:
+    """Verify one aggregate shard through quality and record-hash checks."""
+
+    if settings.live_trading_enabled:
+        raise MissingCapabilityError(
+            "research shard verification requires live trading locked"
+        )
+    if (
+        not requested_by.strip()
+        or requested_by != requested_by.strip()
+        or len(requested_by) > 128
+    ):
+        raise ValueError(
+            "requested_by must contain 1-128 trimmed characters"
+        )
+    postgres_dsn = configured_dsn(
+        settings.postgres_dsn,
+        capability="PostgreSQL",
+    )
+    campaigns = PostgresResearchDataCampaignRepository.connect(
+        dsn=postgres_dsn
+    )
+    universes = PostgresResearchUniverseRepository.connect(
+        dsn=postgres_dsn
+    )
+    control = PostgresControlRepository.connect(dsn=postgres_dsn)
+    market: ClickHouseDailyRepository | None = None
+    try:
+        plan = await _load_research_input_plan(
+            campaigns=campaigns,
+            universes=universes,
+            manifest_hash=manifest_hash,
+        )
+        market = await ClickHouseDailyRepository.connect(
+            dsn=configured_dsn(
+                settings.clickhouse_dsn,
+                capability="ClickHouse",
+            ),
+            source="tushare",
+        )
+        reader = ValidatedResearchDatasetReader(
+            plan=plan,
+            manifest_reader=control,
+            dataset_reader=ValidatedDailyDatasetReader(
+                control_repository=control,
+                market_repository=market,
+            ),
+        )
+        shard = await reader.query_instrument(instrument)
+        payload: dict[str, object] = {
+            "as_of": shard.manifest.as_of.isoformat(),
+            "bar_count": len(shard.dataset.bars),
+            "factor_count": len(shard.dataset.factors),
+            "instrument": shard.instrument,
+            "lifecycle_count": len(
+                shard.dataset.coverage.lifecycles
+            ),
+            "live_trading_locked": True,
+            "manifest_hash": plan.dataset_manifest_hash,
+            "plan_hash": plan.plan_hash,
+            "price_limit_count": len(
+                shard.dataset.coverage.price_limits
+            ),
+            "session_count": len(shard.dataset.coverage.sessions),
+            "shard_manifest_hash": shard.manifest.manifest_hash,
+            "status": "verified",
+            "suspension_count": len(
+                shard.dataset.coverage.suspensions
+            ),
+        }
+        await control.append_audit_event(
+            "research.input.shard.verified",
+            datetime.now(UTC),
+            {
+                **payload,
+                "requested_by": requested_by,
+            },
+        )
+        return payload
+    finally:
+        if market is not None:
+            await market.client.close()
+        await control.close()
+        await universes.close()
+        await campaigns.close()
+
+
+async def _load_research_input_plan(
+    *,
+    campaigns: PostgresResearchDataCampaignRepository,
+    universes: PostgresResearchUniverseRepository,
+    manifest_hash: str,
+) -> ResearchInputPlan:
+    manifest = await campaigns.read_manifest(manifest_hash)
+    details = tuple(
+        [
+            await universes.detail(snapshot_hash)
+            for snapshot_hash in manifest.snapshot_hashes
+        ]
+    )
+    bindings = tuple(
+        ResearchUniverseBinding(
+            sequence=sequence,
+            snapshot_hash=detail.snapshot.snapshot_hash,
+            policy_hash=detail.snapshot.policy_hash,
+            reference_date=detail.snapshot.reference_date,
+            knowledge_as_of=detail.snapshot.knowledge_as_of,
+            members=tuple(
+                sorted(
+                    member.instrument
+                    for member in detail.members
+                )
+            ),
+        )
+        for sequence, detail in enumerate(details, start=1)
+    )
+    return compile_research_input_plan(
+        manifest=manifest,
+        universes=bindings,
+    )
 
 
 async def run_research_data_campaign(

@@ -818,6 +818,43 @@ def test_research_input_plan_compilation_stays_live_locked_and_redacted() -> Non
     compilation.assert_awaited_once()
 
 
+def test_research_input_shard_check_is_redacted() -> None:
+    payload = {
+        "instrument": "000001.XSHE",
+        "live_trading_locked": True,
+        "manifest_hash": "a" * 64,
+        "plan_hash": "b" * 64,
+        "status": "verified",
+    }
+    inspection = AsyncMock(return_value=payload)
+    with patch(
+        "autoquant.cli.inspect_research_input_shard",
+        new=inspection,
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "research-input-shard-check",
+                "--manifest-hash",
+                "a" * 64,
+                "--instrument",
+                "000001.XSHE",
+                "--requested-by",
+                "operator",
+            ],
+            env={
+                "AQ_POSTGRES_DSN": (
+                    "postgresql+asyncpg://sensitive"
+                )
+            },
+        )
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == payload
+    assert "sensitive" not in result.stdout
+    inspection.assert_awaited_once()
+
+
 def test_portfolio_validation_cli_queues_live_locked_request() -> None:
     payload = {
         "assessment": None,

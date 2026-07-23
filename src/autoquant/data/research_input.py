@@ -1,9 +1,17 @@
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
+from typing import Protocol
 
-from autoquant.data.models import _canonical_hash, _require_lowercase_sha256
+from autoquant.clock import to_shanghai
+from autoquant.data.daily_ingestion import ValidatedDailyDataset
+from autoquant.data.models import (
+    DatasetManifest,
+    _canonical_hash,
+    _require_lowercase_sha256,
+)
 from autoquant.data.research_data_campaign import (
     ResearchDatasetManifest,
     ResearchDatasetShard,
@@ -132,6 +140,13 @@ class ResearchInputPlan:
         }
 
     def members_for(self, session_date: date) -> tuple[str, ...]:
+        active = self.universe_for(session_date)
+        return () if active is None else active.members
+
+    def universe_for(
+        self,
+        session_date: date,
+    ) -> ResearchUniverseBinding | None:
         if session_date < self.start_date or session_date > self.end_date:
             raise ValueError("research session date is outside plan bounds")
         active: ResearchUniverseBinding | None = None
@@ -139,13 +154,90 @@ class ResearchInputPlan:
             if universe.reference_date >= session_date:
                 break
             active = universe
-        return () if active is None else active.members
+        return active
 
     def shard_manifest_for(self, instrument: str) -> str:
         for shard in self.shards:
             if shard.instrument == instrument:
                 return shard.manifest_hash
         raise LookupError("instrument is not bound to a research dataset shard")
+
+
+class DailyManifestReader(Protocol):
+    async def read_manifest(
+        self,
+        manifest_hash: str,
+    ) -> DatasetManifest: ...
+
+
+class ValidatedDailyReader(Protocol):
+    async def query(
+        self,
+        manifest_hash: str,
+        as_of: datetime,
+    ) -> ValidatedDailyDataset: ...
+
+
+@dataclass(frozen=True, slots=True)
+class ValidatedResearchShard:
+    instrument: str
+    manifest: DatasetManifest
+    dataset: ValidatedDailyDataset
+
+
+class ValidatedResearchDatasetReader:
+    """Read immutable daily shards lazily without loading the 493-name union."""
+
+    def __init__(
+        self,
+        *,
+        plan: ResearchInputPlan,
+        manifest_reader: DailyManifestReader,
+        dataset_reader: ValidatedDailyReader,
+    ) -> None:
+        self._plan = plan
+        self._manifests = manifest_reader
+        self._datasets = dataset_reader
+
+    async def query_instrument(
+        self,
+        instrument: str,
+    ) -> ValidatedResearchShard:
+        manifest_hash = self._plan.shard_manifest_for(instrument)
+        manifest = await self._manifests.read_manifest(manifest_hash)
+        if (
+            manifest.manifest_hash != manifest_hash
+            or manifest.source != "tushare"
+            or not manifest.production_complete
+            or manifest.instruments != (instrument,)
+            or to_shanghai(manifest.start_time).date()
+            != self._plan.start_date
+            or to_shanghai(manifest.end_time).date()
+            != self._plan.end_date
+        ):
+            raise ValueError(
+                "daily shard does not match the research input plan"
+            )
+        dataset = await self._datasets.query(
+            manifest.manifest_hash,
+            manifest.as_of,
+        )
+        return ValidatedResearchShard(
+            instrument=instrument,
+            manifest=manifest,
+            dataset=dataset,
+        )
+
+    async def iter_all(self) -> AsyncIterator[ValidatedResearchShard]:
+        for shard in self._plan.shards:
+            yield await self.query_instrument(shard.instrument)
+
+    async def iter_members(
+        self,
+        session_date: date,
+    ) -> AsyncIterator[ValidatedResearchShard]:
+        for instrument in self._plan.members_for(session_date):
+            yield await self.query_instrument(instrument)
 
 
 def compile_research_input_plan(

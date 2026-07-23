@@ -41,6 +41,7 @@ from autoquant.operations import (
     inspect_paper_runtime_readiness,
     inspect_portfolio_validation,
     inspect_research_data_campaign,
+    inspect_research_input_shard,
     inspect_validation_campaign,
     retry_research_data_campaign_item,
     revoke_paper_strategy,
@@ -966,6 +967,28 @@ def research_input_plan_compile(
         )
     except (AutoQuantError, LookupError, ValueError):
         _fail("research input plan compilation failed")
+    _emit(payload)
+
+
+@app.command("research-input-shard-check")
+def research_input_shard_check(
+    manifest_hash: Annotated[str, typer.Option("--manifest-hash")],
+    instrument: Annotated[str, typer.Option("--instrument")],
+    requested_by: Annotated[str, typer.Option("--requested-by")],
+) -> None:
+    """Verify one aggregate daily shard without enabling execution."""
+
+    try:
+        payload = asyncio.run(
+            inspect_research_input_shard(
+                _settings(),
+                manifest_hash=manifest_hash,
+                instrument=instrument,
+                requested_by=requested_by,
+            )
+        )
+    except (AutoQuantError, LookupError, ValueError):
+        _fail("research input shard verification failed")
     _emit(payload)
 
 
