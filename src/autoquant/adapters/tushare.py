@@ -29,6 +29,11 @@ from autoquant.data.daily_models import (
     TradingCalendarBatch,
     TradingSession,
 )
+from autoquant.data.fundamental_models import (
+    DailyValuationRevision,
+    FinancialIndicatorRevision,
+    FundamentalDatasetBatch,
+)
 from autoquant.data.models import SourceEvidence
 from autoquant.data.universe import (
     DailyLiquidityMetric,
@@ -352,6 +357,59 @@ class TushareDailySource:
         "volume_ratio",
         "circ_mv",
     )
+    VALUATION_FIELDS = (
+        "ts_code",
+        "trade_date",
+        "close",
+        "turnover_rate_f",
+        "pe_ttm",
+        "pb",
+        "ps_ttm",
+        "dv_ttm",
+        "total_mv",
+        "circ_mv",
+    )
+    FINANCIAL_INDICATOR_FIELDS = (
+        "ts_code",
+        "ann_date",
+        "end_date",
+        "update_flag",
+        "roe_dt",
+        "roa",
+        "grossprofit_margin",
+        "debt_to_assets",
+        "ocf_to_or",
+    )
+    INCOME_PROBE_FIELDS = (
+        "ts_code",
+        "ann_date",
+        "f_ann_date",
+        "end_date",
+        "report_type",
+        "comp_type",
+        "revenue",
+        "n_income_attr_p",
+    )
+    BALANCE_SHEET_PROBE_FIELDS = (
+        "ts_code",
+        "ann_date",
+        "f_ann_date",
+        "end_date",
+        "report_type",
+        "comp_type",
+        "total_assets",
+        "total_liab",
+        "total_hldr_eqy_exc_min_int",
+    )
+    CASHFLOW_PROBE_FIELDS = (
+        "ts_code",
+        "ann_date",
+        "f_ann_date",
+        "end_date",
+        "report_type",
+        "comp_type",
+        "n_cashflow_act",
+    )
 
     def __init__(
         self,
@@ -414,6 +472,95 @@ class TushareDailySource:
                 weight_result.evidence,
                 basic_result.evidence,
             ),
+        )
+
+    async def fetch_fundamental_dataset(
+        self,
+        instruments: tuple[str, ...],
+        start: date,
+        end: date,
+    ) -> FundamentalDatasetBatch:
+        """Fetch valuation and announcement-dated quality inputs.
+
+        Historical financial values are never made visible on their report
+        period. They become usable only at the next exchange open after the
+        vendor-provided announcement date.
+        """
+
+        self._validate_request(instruments, start, end)
+        calendar = await self._daily_calendar(start, end)
+        sessions = self._map_sessions(calendar)
+        evidence = [calendar.evidence]
+        valuations: list[DailyValuationRevision] = []
+        indicators: list[FinancialIndicatorRevision] = []
+        indicator_period_start = start - timedelta(days=550)
+        for instrument in instruments:
+            vendor_code = to_tushare_code(instrument)
+            for window_start, window_end in self.date_windows(start, end):
+                valuation_result = await self._client.post(
+                    "daily_basic",
+                    params={
+                        "ts_code": vendor_code,
+                        "start_date": self._date_text(window_start),
+                        "end_date": self._date_text(window_end),
+                    },
+                    fields=self.VALUATION_FIELDS,
+                )
+                evidence.append(valuation_result.evidence)
+                valuations.extend(
+                    self._map_valuations(
+                        valuation_result,
+                        requested=instrument,
+                        start=window_start,
+                        end=window_end,
+                        sessions=sessions,
+                    )
+                )
+            indicator_result = await self._client.post(
+                "fina_indicator",
+                params={
+                    "ts_code": vendor_code,
+                    "start_date": self._date_text(
+                        indicator_period_start
+                    ),
+                    "end_date": self._date_text(end),
+                },
+                fields=self.FINANCIAL_INDICATOR_FIELDS,
+            )
+            evidence.append(indicator_result.evidence)
+            indicators.extend(
+                self._map_financial_indicators(
+                    indicator_result,
+                    requested=instrument,
+                    start=start,
+                    end=end,
+                    report_period_start=indicator_period_start,
+                    sessions=sessions,
+                )
+            )
+        return FundamentalDatasetBatch(
+            valuations=tuple(
+                sorted(
+                    valuations,
+                    key=lambda value: (
+                        value.instrument,
+                        value.session_date,
+                    ),
+                )
+            ),
+            indicators=tuple(
+                sorted(
+                    indicators,
+                    key=lambda value: (
+                        value.instrument,
+                        value.report_period,
+                        value.announced_date,
+                        value.updated,
+                    ),
+                )
+            ),
+            sessions=sessions,
+            source_evidence=tuple(evidence),
         )
 
     async def fetch_daily_dataset(
@@ -729,6 +876,7 @@ class TushareDailySource:
     ) -> dict[str, str]:
         vendor_code = to_tushare_code(instrument)
         day = self._date_text(session_date)
+        report_period = f"{session_date.year - 1}1231"
         probes: tuple[tuple[str, dict[str, object], tuple[str, ...]], ...] = (
             ("daily", {"ts_code": vendor_code, "trade_date": day}, self.DAILY_FIELDS),
             (
@@ -755,6 +903,43 @@ class TushareDailySource:
                 "stk_limit",
                 {"ts_code": vendor_code, "trade_date": day},
                 self.LIMIT_FIELDS,
+            ),
+            (
+                "daily_basic",
+                {"ts_code": vendor_code, "trade_date": day},
+                self.VALUATION_FIELDS,
+            ),
+            (
+                "fina_indicator",
+                {"ts_code": vendor_code, "period": report_period},
+                self.FINANCIAL_INDICATOR_FIELDS,
+            ),
+            (
+                "income",
+                {
+                    "ts_code": vendor_code,
+                    "period": report_period,
+                    "report_type": "1",
+                },
+                self.INCOME_PROBE_FIELDS,
+            ),
+            (
+                "balancesheet",
+                {
+                    "ts_code": vendor_code,
+                    "period": report_period,
+                    "report_type": "1",
+                },
+                self.BALANCE_SHEET_PROBE_FIELDS,
+            ),
+            (
+                "cashflow",
+                {
+                    "ts_code": vendor_code,
+                    "period": report_period,
+                    "report_type": "1",
+                },
+                self.CASHFLOW_PROBE_FIELDS,
             ),
         )
         statuses: dict[str, str] = {}
@@ -939,6 +1124,152 @@ class TushareDailySource:
         if len({value.instrument for value in values}) != len(values):
             raise VendorResponseError(
                 "Tushare daily_basic returned duplicate instruments"
+            )
+        return tuple(values)
+
+    def _map_valuations(
+        self,
+        result: TushareApiResult,
+        *,
+        requested: str,
+        start: date,
+        end: date,
+        sessions: tuple[TradingSession, ...],
+    ) -> tuple[DailyValuationRevision, ...]:
+        values: list[DailyValuationRevision] = []
+        for row in result.rows:
+            instrument = from_tushare_code(self._text(row, "ts_code"))
+            session_date = self._date(row, "trade_date")
+            if instrument != requested or not start <= session_date <= end:
+                raise VendorResponseError(
+                    "Tushare daily_basic returned a row outside request"
+                )
+            try:
+                available_at = self._availability.assign(
+                    session_date=session_date,
+                    sessions=sessions,
+                )
+            except ValueError:
+                raise VendorResponseError(
+                    "Tushare trade_cal omitted the next open session"
+                ) from None
+            values.append(
+                DailyValuationRevision.from_values(
+                    source=_SOURCE,
+                    instrument=instrument,
+                    session_date=session_date,
+                    event_time=self._session_close(session_date),
+                    available_at=available_at,
+                    ingested_at=to_utc(
+                        self._now(),
+                        name="ingested_at",
+                    ),
+                    source_revision=(
+                        "tushare:daily_basic:"
+                        f"{result.evidence.response_hash}"
+                    ),
+                    availability_policy=self._availability.version,
+                    evidence_hash=result.evidence.response_hash,
+                    close_price=self._decimal(row, "close"),
+                    free_float_turnover_rate_percent=(
+                        self._optional_decimal(
+                            row,
+                            "turnover_rate_f",
+                        )
+                    ),
+                    pe_ttm=self._optional_decimal(row, "pe_ttm"),
+                    pb=self._optional_decimal(row, "pb"),
+                    ps_ttm=self._optional_decimal(row, "ps_ttm"),
+                    dividend_yield_ttm_percent=(
+                        self._optional_decimal(row, "dv_ttm")
+                    ),
+                    # Tushare documents total_mv/circ_mv in CNY 10,000.
+                    total_market_value_cny=(
+                        self._decimal(row, "total_mv")
+                        * Decimal(10_000)
+                    ),
+                    circulating_market_value_cny=(
+                        self._decimal(row, "circ_mv")
+                        * Decimal(10_000)
+                    ),
+                )
+            )
+        return tuple(values)
+
+    def _map_financial_indicators(
+        self,
+        result: TushareApiResult,
+        *,
+        requested: str,
+        start: date,
+        end: date,
+        report_period_start: date,
+        sessions: tuple[TradingSession, ...],
+    ) -> tuple[FinancialIndicatorRevision, ...]:
+        values: list[FinancialIndicatorRevision] = []
+        for row in result.rows:
+            instrument = from_tushare_code(self._text(row, "ts_code"))
+            announced_date = self._date(row, "ann_date")
+            report_period = self._date(row, "end_date")
+            if (
+                instrument != requested
+                or not report_period_start <= report_period <= end
+            ):
+                raise VendorResponseError(
+                    "Tushare fina_indicator returned a row outside request"
+                )
+            if not start <= announced_date <= end:
+                continue
+            update_flag = self._text(row, "update_flag")
+            if update_flag not in {"0", "1"}:
+                raise VendorResponseError(
+                    "Tushare fina_indicator returned invalid update_flag"
+                )
+            try:
+                available_at = self._availability.assign(
+                    session_date=announced_date,
+                    sessions=sessions,
+                )
+            except ValueError:
+                raise VendorResponseError(
+                    "Tushare trade_cal omitted the next open session"
+                ) from None
+            values.append(
+                FinancialIndicatorRevision.from_values(
+                    source=_SOURCE,
+                    instrument=instrument,
+                    report_period=report_period,
+                    announced_date=announced_date,
+                    updated=update_flag == "1",
+                    event_time=self._session_close(announced_date),
+                    available_at=available_at,
+                    ingested_at=to_utc(
+                        self._now(),
+                        name="ingested_at",
+                    ),
+                    source_revision=(
+                        "tushare:fina_indicator:"
+                        f"{result.evidence.response_hash}"
+                    ),
+                    availability_policy=self._availability.version,
+                    evidence_hash=result.evidence.response_hash,
+                    roe_diluted_percent=self._optional_decimal(
+                        row,
+                        "roe_dt",
+                    ),
+                    roa_percent=self._optional_decimal(row, "roa"),
+                    gross_profit_margin_percent=self._optional_decimal(
+                        row,
+                        "grossprofit_margin",
+                    ),
+                    debt_to_assets_percent=self._optional_decimal(
+                        row,
+                        "debt_to_assets",
+                    ),
+                    operating_cashflow_to_revenue_percent=(
+                        self._optional_decimal(row, "ocf_to_or")
+                    ),
+                )
             )
         return tuple(values)
 
@@ -1187,3 +1518,13 @@ class TushareDailySource:
         if not parsed.is_finite():
             raise VendorResponseError(f"Tushare returned invalid {field}")
         return parsed
+
+    @classmethod
+    def _optional_decimal(
+        cls,
+        row: Mapping[str, object],
+        field: str,
+    ) -> Decimal | None:
+        if row.get(field) in (None, ""):
+            return None
+        return cls._decimal(row, field)

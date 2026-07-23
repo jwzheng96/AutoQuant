@@ -262,3 +262,16 @@ def test_dynamic_research_spec_migration_prevents_post_result_tuning() -> None:
     assert "live_trading_locked" in migration
     assert "dynamic_research_specs_immutable" in migration
     assert "VALUES ('postgres', 25)" in migration
+
+
+def test_fundamental_research_migration_is_immutable_and_versioned() -> None:
+    migration = Path(
+        "migrations/postgres/028_fundamental_research.sql"
+    ).read_text(encoding="utf-8")
+
+    assert "CREATE TABLE IF NOT EXISTS fundamental_research_specs" in migration
+    assert "REFERENCES dynamic_validation_runs(result_hash)" in migration
+    assert "fundamental_research_specs_immutable" in migration
+    assert "dynamic-universe-quality-value-v3" in migration
+    assert "live_trading_locked" in migration
+    assert "VALUES ('postgres', 28)" in migration

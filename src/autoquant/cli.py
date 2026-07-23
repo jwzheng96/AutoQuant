@@ -39,6 +39,7 @@ from autoquant.operations import (
     create_validation_campaign,
     freeze_dynamic_regime_research_spec,
     freeze_dynamic_research_spec,
+    freeze_fundamental_research_spec,
     inspect_paper_pre_open,
     inspect_paper_promotion,
     inspect_paper_runtime_readiness,
@@ -50,6 +51,7 @@ from autoquant.operations import (
     revoke_paper_strategy,
     run_daily_ingestion,
     run_dynamic_validation,
+    run_fundamental_ingestion,
     run_qmt_readonly_acceptance,
     run_research_data_campaign,
     run_session_reference_refresh,
@@ -1063,6 +1065,29 @@ def dynamic_validation_run(
     _emit(payload)
 
 
+@app.command("fundamental-spec-freeze")
+def fundamental_spec_freeze(
+    predecessor_result_hash: Annotated[
+        str,
+        typer.Option("--predecessor-result-hash"),
+    ],
+    requested_by: Annotated[str, typer.Option("--requested-by")],
+) -> None:
+    """Freeze v3 quality/value factors from a rejected v2 result."""
+
+    try:
+        payload = asyncio.run(
+            freeze_fundamental_research_spec(
+                _settings(),
+                predecessor_result_hash=predecessor_result_hash,
+                requested_by=requested_by,
+            )
+        )
+    except (AutoQuantError, LookupError, ValueError):
+        _fail("fundamental specification freeze failed")
+    _emit(payload)
+
+
 @app.command("research-input-shard-check")
 def research_input_shard_check(
     manifest_hash: Annotated[str, typer.Option("--manifest-hash")],
@@ -1295,6 +1320,20 @@ async def _ingest_daily(
     return await run_daily_ingestion(settings, instruments, start, end)
 
 
+async def _ingest_fundamental(
+    settings: AppSettings,
+    instruments: tuple[str, ...],
+    start: date,
+    end: date,
+) -> dict[str, object]:
+    return await run_fundamental_ingestion(
+        settings,
+        instruments,
+        start,
+        end,
+    )
+
+
 @app.command("ingest-minute")
 def ingest_minute(
     instrument: Annotated[list[str], typer.Option("--instrument")],
@@ -1336,6 +1375,38 @@ def ingest_daily(
         _fail("daily ingestion failed")
     _emit(payload)
     if payload["status"] != "completed" or payload["manifest_hash"] is None:
+        raise typer.Exit(code=2)
+
+
+@app.command("ingest-fundamental")
+def ingest_fundamental(
+    instrument: Annotated[list[str], typer.Option("--instrument")],
+    start: Annotated[str, typer.Option("--start")],
+    end: Annotated[str, typer.Option("--end")],
+) -> None:
+    """Ingest Tushare valuation and announcement-dated quality inputs."""
+
+    settings = _settings()
+    if settings.live_trading_enabled:
+        _fail("fundamental ingestion does not enable trading")
+    start_date = _parse_date(start, name="start")
+    end_date = _parse_date(end, name="end")
+    try:
+        payload = asyncio.run(
+            _ingest_fundamental(
+                settings,
+                tuple(instrument),
+                start_date,
+                end_date,
+            )
+        )
+    except (AutoQuantError, ValueError):
+        _fail("fundamental ingestion failed")
+    _emit(payload)
+    if (
+        payload["status"] != "completed"
+        or payload["manifest_hash"] is None
+    ):
         raise typer.Exit(code=2)
 
 

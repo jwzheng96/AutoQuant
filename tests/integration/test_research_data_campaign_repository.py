@@ -24,6 +24,9 @@ from autoquant.backtest.dynamic_validation import (
     _selection_score,
     assess_dynamic_validation,
 )
+from autoquant.backtest.fundamental_portfolio import (
+    FundamentalPortfolioResearchSpec,
+)
 from autoquant.backtest.models import AccountSnapshot, BacktestResult
 from autoquant.data.models import DatasetManifest
 from autoquant.data.quality import QualityReport
@@ -33,6 +36,9 @@ from autoquant.web.dynamic_research_store import (
 )
 from autoquant.web.dynamic_validation_store import (
     PostgresDynamicValidationRepository,
+)
+from autoquant.web.fundamental_research_store import (
+    PostgresFundamentalResearchSpecRepository,
 )
 from autoquant.web.research_data_store import (
     PostgresResearchDataCampaignRepository,
@@ -58,6 +64,7 @@ async def repositories() -> AsyncIterator[
         PostgresResearchDataCampaignRepository,
         PostgresDynamicResearchSpecRepository,
         PostgresDynamicValidationRepository,
+        PostgresFundamentalResearchSpecRepository,
     ]
 ]:
     schema = f"autoquant_test_{uuid4().hex}"
@@ -74,6 +81,12 @@ async def repositories() -> AsyncIterator[
         dsn=POSTGRES_DSN,
         schema=schema,
     )
+    fundamental_specs = (
+        PostgresFundamentalResearchSpecRepository.connect(
+            dsn=POSTGRES_DSN,
+            schema=schema,
+        )
+    )
     migration = "\n".join(
         Path(path).read_text(encoding="utf-8")
         for path in (
@@ -83,12 +96,20 @@ async def repositories() -> AsyncIterator[
             "migrations/postgres/025_dynamic_research_specs.sql",
             "migrations/postgres/026_dynamic_validation_evidence.sql",
             "migrations/postgres/027_dynamic_regime_research.sql",
+            "migrations/postgres/028_fundamental_research.sql",
         )
     )
     try:
         await control.initialize(migration)
-        yield control, campaigns, specs, validations
+        yield (
+            control,
+            campaigns,
+            specs,
+            validations,
+            fundamental_specs,
+        )
     finally:
+        await fundamental_specs.close()
         await validations.close()
         await specs.close()
         await campaigns.close()
@@ -135,9 +156,16 @@ async def test_campaign_recovers_retries_and_finalizes_verified_shards(
         PostgresResearchDataCampaignRepository,
         PostgresDynamicResearchSpecRepository,
         PostgresDynamicValidationRepository,
+        PostgresFundamentalResearchSpecRepository,
     ],
 ) -> None:
-    control, campaigns, specs, validations = repositories
+    (
+        control,
+        campaigns,
+        specs,
+        validations,
+        fundamental_specs,
+    ) = repositories
     spec = ResearchDataCampaignSpec(
         campaign_key="integration-csi300-history-v1",
         policy_hash="a" * 64,
@@ -351,6 +379,24 @@ async def test_campaign_recovers_retries_and_finalizes_verified_shards(
     )
 
     assert await specs.read(regime_spec.spec_hash) == regime_record
+    fundamental_spec = FundamentalPortfolioResearchSpec(
+        predecessor_result_hash=validation_result.result_hash,
+        daily_dataset_manifest_hash=manifest.manifest_hash,
+        plan_hash=frozen.plan_hash,
+        universe_policy_hash=frozen.policy_hash,
+        start_date=frozen.start_date,
+        end_date=frozen.end_date,
+    )
+    fundamental_record = await fundamental_specs.freeze(
+        fundamental_spec,
+        requested_by="test",
+        created_at=NOW,
+    )
+
+    assert (
+        await fundamental_specs.read(fundamental_spec.spec_hash)
+        == fundamental_record
+    )
     with pytest.raises(ValueError, match="already frozen"):
         await specs.freeze(
             DynamicPortfolioResearchSpec(

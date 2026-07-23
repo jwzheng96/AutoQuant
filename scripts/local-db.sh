@@ -131,6 +131,9 @@ case "${1:-}" in
     "${compose[@]}" exec -T postgres sh -c \
       'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1' \
       < "$project_root/migrations/postgres/027_dynamic_regime_research.sql"
+    "${compose[@]}" exec -T postgres sh -c \
+      'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1' \
+      < "$project_root/migrations/postgres/028_fundamental_research.sql"
     "${compose[@]}" exec -T clickhouse sh -c \
       'clickhouse-client --user "$CLICKHOUSE_USER" --password "$CLICKHOUSE_PASSWORD" --database "$CLICKHOUSE_DB" --multiquery' \
       < "$project_root/migrations/clickhouse/001_phase1.sql"
@@ -140,6 +143,9 @@ case "${1:-}" in
     "${compose[@]}" exec -T clickhouse sh -c \
       'clickhouse-client --user "$CLICKHOUSE_USER" --password "$CLICKHOUSE_PASSWORD" --database "$CLICKHOUSE_DB" --multiquery' \
       < "$project_root/migrations/clickhouse/003_daily_coverage.sql"
+    "${compose[@]}" exec -T clickhouse sh -c \
+      'clickhouse-client --user "$CLICKHOUSE_USER" --password "$CLICKHOUSE_PASSWORD" --database "$CLICKHOUSE_DB" --multiquery' \
+      < "$project_root/migrations/clickhouse/004_fundamental_revisions.sql"
     echo "Database migrations completed"
     ;;
   status)

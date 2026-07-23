@@ -8,6 +8,14 @@ PostgreSQL manifests/checkpoints/audit events, a JSON operator CLI, and an authe
 local Web operator console, and an audited fixed-strategy backtest queue. It does not place
 orders, promise profitability, or enable live trading.
 
+The research data foundation now also stores Tushare `daily_basic` valuation snapshots and
+announcement-dated `fina_indicator` revisions in ClickHouse schema v4. PostgreSQL schema v28
+freezes the independent quality/value v3 hypothesis before full-market collection. Financial
+signals use the next exchange open after `ann_date`, never the report period, and every frozen
+read is bounded by both vendor availability and local ingestion time. The five-factor recipe,
+rebalance cadence, holding count, costs, risk caps, and evidence gates are immutable; this adds a
+testable research path, not a profitability claim or trading permission.
+
 The repository also contains a deterministic A-share research ledger with versioned board
 rules, T+1 sellability, lot-size validation, conservative daily-open fills, liquidity caps,
 configurable commission/slippage, sell-side stamp duty, bilateral transfer fees, and a
@@ -245,9 +253,10 @@ runtime host. The Tushare Token previously shared in chat must be rotated before
 only the replacement as `AQ_TUSHARE_TOKEN`. Never commit or paste it into logs or chat.
 
 The current Tushare path uses `daily`, `adj_factor`, `trade_cal`, `stock_basic`,
-`suspend_d`, and the 2000-point `stk_limit` endpoint for exact historical daily price
-boundaries. It does not call `stk_mins` and does not assume that a 2000-point account has
-the independently licensed historical-minute permission. See the
+`suspend_d`, `daily_basic`, `fina_indicator`, and the 2000-point `stk_limit` endpoint.
+The capability check also verifies read-only access to `income`, `balancesheet`, and
+`cashflow` for later source-ratio audits. It does not call `stk_mins` and does not assume
+that a 2000-point account has the independently licensed historical-minute permission. See the
 [phase-1 runbook](docs/runbooks/phase1-data-foundation.md) for migrations and ingestion.
 
 QMT must run on a separately controlled Windows machine with MiniQMT. See the

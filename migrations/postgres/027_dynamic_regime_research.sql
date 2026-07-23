@@ -6,6 +6,10 @@ DROP CONSTRAINT IF EXISTS
     dynamic_research_specs_specification_version_check;
 
 ALTER TABLE dynamic_research_specs
+DROP CONSTRAINT IF EXISTS
+    dynamic_research_specs_strategy_version_check;
+
+ALTER TABLE dynamic_research_specs
 ADD CONSTRAINT dynamic_research_specs_strategy_version_check
 CHECK (
     (

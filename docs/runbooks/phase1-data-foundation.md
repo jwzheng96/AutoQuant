@@ -45,9 +45,11 @@ Apply `migrations/postgres/001_phase1.sql`,
 `migrations/postgres/025_dynamic_research_specs.sql`, then
 `migrations/postgres/026_dynamic_validation_evidence.sql`, then
 `migrations/postgres/027_dynamic_regime_research.sql`, then
+`migrations/postgres/028_fundamental_research.sql`, then
 `migrations/clickhouse/001_phase1.sql` and
 `migrations/clickhouse/002_tushare_daily.sql` and
-`migrations/clickhouse/003_daily_coverage.sql` in order, only to explicitly authorized
+`migrations/clickhouse/003_daily_coverage.sql` and
+`migrations/clickhouse/004_fundamental_revisions.sql` in order, only to explicitly authorized
 phase-1 databases. Then run `autoquant db-check`.
 
 For the repository's loopback-only Docker setup, keep database bootstrap secrets in the
@@ -599,3 +601,46 @@ in every training fold, applies the embargo, runs disjoint test folds, compares 
 point-in-time quarterly equal-weight benchmark, and atomically stores every candidate and fold
 artifact. It always reports `live_trading_locked: true`; even `research_candidate` is only
 permission to begin the minimum 60-session paper observation and never enables real orders.
+
+## Point-in-time fundamental research
+
+ClickHouse schema v4 adds append-only `daily_valuation_revisions` and
+`financial_indicator_revisions`. Apply `migrations/clickhouse/004_fundamental_revisions.sql`
+after the prior ClickHouse migrations. PostgreSQL schema v28 adds the immutable v3 research
+specification; apply `migrations/postgres/028_fundamental_research.sql` after v27.
+
+Verify permissions with `tushare-check`. It now probes the daily market endpoints plus
+`daily_basic`, `fina_indicator`, `income`, `balancesheet`, and `cashflow` without writing data.
+Never paste the token into a command or commit it; load `AQ_TUSHARE_TOKEN` from the local
+`.env`.
+
+An explicit bounded ingestion is:
+
+```bash
+uv run autoquant ingest-fundamental \
+  --instrument 600519.XSHG \
+  --start 2024-01-01 \
+  --end 2024-12-31
+```
+
+The adapter normalizes Tushare market values from CNY 10,000 to CNY. A financial row is keyed
+by its report period and vendor update flag but is not visible on the report-period date. It
+becomes signal-eligible only at the next exchange open after `ann_date`. Because Tushare filters
+`fina_indicator` ranges by report period, the adapter prefetches a fixed 550-day report-period
+lookback and then clips by announcement date. Both `available_at` and `ingested_at` are enforced
+when a frozen manifest is read.
+
+Before full-universe ingestion, freeze the factor hypothesis from the rejected v2 result:
+
+```bash
+uv run autoquant fundamental-spec-freeze \
+  --predecessor-result-hash <immutable-rejected-v2-result-hash> \
+  --requested-by operator
+```
+
+The v3 spec fixes five equal-weight percentile factors (earnings yield, book-to-price, diluted
+ROE, ROA, and operating-cash-flow-to-revenue), a 21-session rebalance, 20 holdings, one-session
+signal lag, and the existing conservative risk/evidence gates. There is no candidate parameter
+search. Do not change those values after inspecting outcomes; a different hypothesis requires a
+new version and a new independent test. Fundamental ingestion and even a passing backtest do not
+unlock real trading.

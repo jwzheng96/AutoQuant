@@ -9,6 +9,9 @@ from uuid import UUID, uuid4
 from pydantic import SecretStr
 
 from autoquant.adapters.clickhouse_daily import ClickHouseDailyRepository
+from autoquant.adapters.clickhouse_fundamental import (
+    ClickHouseFundamentalRepository,
+)
 from autoquant.adapters.postgres import PostgresControlRepository
 from autoquant.adapters.tushare import TushareDailySource, TushareHttpClient
 from autoquant.backtest.dynamic_panel import DynamicMarketPanelCompiler
@@ -22,6 +25,9 @@ from autoquant.backtest.dynamic_portfolio import (
 from autoquant.backtest.dynamic_validation import (
     DynamicWalkForwardValidator,
     assess_dynamic_validation,
+)
+from autoquant.backtest.fundamental_portfolio import (
+    FundamentalPortfolioResearchSpec,
 )
 from autoquant.backtest.runner import ManifestMarketCompiler
 from autoquant.backtest.validation import (
@@ -38,6 +44,11 @@ from autoquant.data.daily_ingestion import (
     ValidatedDailyDatasetReader,
 )
 from autoquant.data.daily_quality import DailyQualityGate
+from autoquant.data.fundamental_ingestion import (
+    FundamentalIngestionRequest,
+    FundamentalIngestionService,
+)
+from autoquant.data.fundamental_quality import FundamentalQualityGate
 from autoquant.data.research_data_campaign import ResearchDataCampaignSpec
 from autoquant.data.research_input import (
     ResearchInputPlan,
@@ -126,6 +137,9 @@ from autoquant.web.dynamic_research_store import (
 )
 from autoquant.web.dynamic_validation_store import (
     PostgresDynamicValidationRepository,
+)
+from autoquant.web.fundamental_research_store import (
+    PostgresFundamentalResearchSpecRepository,
 )
 from autoquant.web.models import (
     PortfolioValidationExperiment,
@@ -292,6 +306,68 @@ async def run_daily_ingestion(
         "manifest_hash": result.manifest_hash,
         "persisted_bars": result.persisted_bars,
         "persisted_factors": result.persisted_factors,
+        "quality_hash": result.quality_hash,
+        "status": result.status,
+    }
+
+
+async def run_fundamental_ingestion(
+    settings: AppSettings,
+    instruments: tuple[str, ...],
+    start: date,
+    end: date,
+) -> dict[str, object]:
+    if settings.live_trading_enabled:
+        raise MissingCapabilityError(
+            "fundamental ingestion requires live trading locked"
+        )
+    source: TushareDailySource | None = None
+    clickhouse: ClickHouseFundamentalRepository | None = None
+    postgres: PostgresControlRepository | None = None
+    try:
+        source = tushare_source(settings)
+        clickhouse = await ClickHouseFundamentalRepository.connect(
+            dsn=configured_dsn(
+                settings.clickhouse_dsn,
+                capability="ClickHouse",
+            ),
+            source="tushare",
+        )
+        postgres = PostgresControlRepository.connect(
+            dsn=configured_dsn(
+                settings.postgres_dsn,
+                capability="PostgreSQL",
+            )
+        )
+        service = FundamentalIngestionService(
+            source=source,
+            quality_gate=FundamentalQualityGate(),
+            fundamental_repository=clickhouse,
+            control_repository=postgres,
+            now=lambda: datetime.now(UTC),
+        )
+        result = await service.run(
+            FundamentalIngestionRequest(
+                instruments=instruments,
+                start=start,
+                end=end,
+                as_of=None,
+                production_complete_requested=True,
+            )
+        )
+    finally:
+        if source is not None:
+            await source.close()
+        if postgres is not None:
+            await postgres.close()
+        if clickhouse is not None:
+            await clickhouse.client.close()
+    return {
+        "fetched_indicators": result.fetched_indicators,
+        "fetched_valuations": result.fetched_valuations,
+        "manifest_hash": result.manifest_hash,
+        "persisted_indicators": result.persisted_indicators,
+        "persisted_valuations": result.persisted_valuations,
         "quality_hash": result.quality_hash,
         "status": result.status,
     }
@@ -1176,6 +1252,123 @@ async def freeze_dynamic_regime_research_spec(
         await control.close()
         await validations.close()
         await specifications.close()
+
+
+async def freeze_fundamental_research_spec(
+    settings: AppSettings,
+    *,
+    predecessor_result_hash: str,
+    requested_by: str,
+) -> dict[str, object]:
+    """Pre-register v3 only from the immutable rejected v2 result."""
+
+    if settings.live_trading_enabled:
+        raise MissingCapabilityError(
+            "fundamental specification requires live trading locked"
+        )
+    postgres_dsn = configured_dsn(
+        settings.postgres_dsn,
+        capability="PostgreSQL",
+    )
+    dynamic_specs = PostgresDynamicResearchSpecRepository.connect(
+        dsn=postgres_dsn
+    )
+    validations = PostgresDynamicValidationRepository.connect(
+        dsn=postgres_dsn
+    )
+    fundamentals = (
+        PostgresFundamentalResearchSpecRepository.connect(
+            dsn=postgres_dsn
+        )
+    )
+    control = PostgresControlRepository.connect(dsn=postgres_dsn)
+    try:
+        predecessor = await validations.read(
+            predecessor_result_hash
+        )
+        if predecessor.evidence.evidence_status != "rejected":
+            raise ValueError(
+                "fundamental v3 requires a rejected predecessor"
+            )
+        dynamic_record = await dynamic_specs.read(
+            predecessor.result.spec_hash
+        )
+        base = dynamic_record.spec
+        if (
+            base.regime_filter is None
+            or base.strategy_id
+            != DYNAMIC_REGIME_PORTFOLIO_STRATEGY_ID
+        ):
+            raise ValueError(
+                "fundamental predecessor must be the v2 strategy"
+            )
+        spec = FundamentalPortfolioResearchSpec(
+            predecessor_result_hash=(
+                predecessor.result.result_hash
+            ),
+            daily_dataset_manifest_hash=(
+                base.dataset_manifest_hash
+            ),
+            plan_hash=base.plan_hash,
+            universe_policy_hash=base.policy_hash,
+            start_date=base.start_date,
+            end_date=base.end_date,
+            evidence_policy=base.evidence_policy,
+            initial_cash=base.initial_cash,
+            gross_allocation=base.gross_allocation,
+            maximum_position_weight=(
+                base.maximum_position_weight
+            ),
+            maximum_order_notional=base.maximum_order_notional,
+            slippage_bps=base.slippage_bps,
+            maximum_volume_participation=(
+                base.maximum_volume_participation
+            ),
+            train_sessions=base.train_sessions,
+            test_sessions=base.test_sessions,
+            embargo_sessions=base.embargo_sessions,
+            signal_lag_sessions=base.signal_lag_sessions,
+        )
+        created_at = datetime.now(UTC)
+        record = await fundamentals.freeze(
+            spec,
+            requested_by=requested_by,
+            created_at=created_at,
+        )
+        payload: dict[str, object] = {
+            "created_at": record.created_at.isoformat(),
+            "data_policy_hash": (
+                record.spec.data_policy.policy_hash
+            ),
+            "factor_count": len(record.spec.factors),
+            "live_trading_locked": True,
+            "predecessor_result_hash": (
+                record.spec.predecessor_result_hash
+            ),
+            "rebalance_sessions": (
+                record.spec.rebalance_sessions
+            ),
+            "selection_count": record.spec.selection_count,
+            "spec_hash": record.spec.spec_hash,
+            "status": "frozen",
+            "strategy_id": record.spec.strategy_id,
+            "version": record.spec.version,
+        }
+        await control.append_audit_event(
+            "research.fundamental.spec.frozen",
+            created_at,
+            {
+                **payload,
+                "requested_by": requested_by,
+                "specification": record.spec.payload(),
+            },
+        )
+        return payload
+    finally:
+        await control.close()
+        await fundamentals.close()
+        await validations.close()
+        await dynamic_specs.close()
 
 
 async def inspect_research_input_shard(

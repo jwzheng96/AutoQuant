@@ -602,6 +602,11 @@ async def test_capability_probe_reports_each_endpoint_without_short_circuiting()
             "stock_basic": [VendorResponseError("bad response")],
             "suspend_d": [[]],
             "stk_limit": [[]],
+            "daily_basic": [[]],
+            "fina_indicator": [[]],
+            "income": [[]],
+            "balancesheet": [[]],
+            "cashflow": [[]],
         }
     )
 
@@ -612,11 +617,154 @@ async def test_capability_probe_reports_each_endpoint_without_short_circuiting()
     assert statuses == {
         "adj_factor": "permission_denied",
         "daily": "available",
+        "daily_basic": "available",
+        "balancesheet": "available",
+        "cashflow": "available",
+        "fina_indicator": "available",
+        "income": "available",
         "stock_basic": "error",
         "stk_limit": "available",
         "suspend_d": "available",
         "trade_cal": "available",
     }
+
+
+@pytest.mark.asyncio
+async def test_fetch_fundamentals_maps_units_and_announcement_visibility() -> None:
+    client = FakeClient(
+        {
+            "trade_cal": [
+                [
+                    {
+                        "exchange": "SSE",
+                        "cal_date": "20260720",
+                        "is_open": "1",
+                    },
+                    {
+                        "exchange": "SSE",
+                        "cal_date": "20260721",
+                        "is_open": "1",
+                    },
+                ]
+            ],
+            "daily_basic": [
+                [
+                    {
+                        "ts_code": "000001.SZ",
+                        "trade_date": "20260720",
+                        "close": "10.25",
+                        "turnover_rate_f": "0.45",
+                        "pe_ttm": None,
+                        "pb": "0.55",
+                        "ps_ttm": "1.20",
+                        "dv_ttm": "2.10",
+                        "total_mv": "2500000",
+                        "circ_mv": "2400000",
+                    }
+                ]
+            ],
+            "fina_indicator": [
+                [
+                    {
+                        "ts_code": "000001.SZ",
+                        "ann_date": "20260720",
+                        "end_date": "20260630",
+                        "update_flag": "1",
+                        "roe_dt": "5.2",
+                        "roa": "0.8",
+                        "grossprofit_margin": None,
+                        "debt_to_assets": "91.0",
+                        "ocf_to_or": "18.5",
+                    }
+                ]
+            ],
+        }
+    )
+
+    batch = await source(client).fetch_fundamental_dataset(
+        ("000001.XSHE",),
+        date(2026, 7, 20),
+        date(2026, 7, 20),
+    )
+
+    assert [call[0] for call in client.calls] == [
+        "trade_cal",
+        "daily_basic",
+        "fina_indicator",
+    ]
+    valuation = batch.valuations[0]
+    assert valuation.pe_ttm is None
+    assert valuation.total_market_value_cny == Decimal("25000000000")
+    assert valuation.available_at == datetime(
+        2026,
+        7,
+        21,
+        1,
+        30,
+        tzinfo=UTC,
+    )
+    indicator = batch.indicators[0]
+    assert indicator.report_period == date(2026, 6, 30)
+    assert indicator.updated is True
+    assert indicator.gross_profit_margin_percent is None
+    assert indicator.available_at == datetime(
+        2026,
+        7,
+        21,
+        1,
+        30,
+        tzinfo=UTC,
+    )
+    assert {item.method for item in batch.source_evidence} == {
+        "trade_cal",
+        "daily_basic",
+        "fina_indicator",
+    }
+
+
+@pytest.mark.asyncio
+async def test_fundamentals_reject_invalid_update_flag() -> None:
+    client = FakeClient(
+        {
+            "trade_cal": [
+                [
+                    {
+                        "exchange": "SSE",
+                        "cal_date": "20260720",
+                        "is_open": "1",
+                    },
+                    {
+                        "exchange": "SSE",
+                        "cal_date": "20260721",
+                        "is_open": "1",
+                    },
+                ]
+            ],
+            "daily_basic": [[]],
+            "fina_indicator": [
+                [
+                    {
+                        "ts_code": "000001.SZ",
+                        "ann_date": "20260720",
+                        "end_date": "20260630",
+                        "update_flag": "restated",
+                        "roe_dt": "5",
+                        "roa": "1",
+                        "grossprofit_margin": None,
+                        "debt_to_assets": "90",
+                        "ocf_to_or": "10",
+                    }
+                ]
+            ],
+        }
+    )
+
+    with pytest.raises(VendorResponseError, match="update_flag"):
+        await source(client).fetch_fundamental_dataset(
+            ("000001.XSHE",),
+            date(2026, 7, 20),
+            date(2026, 7, 20),
+        )
 
 
 def test_date_windows_are_contiguous_and_bounded() -> None:
