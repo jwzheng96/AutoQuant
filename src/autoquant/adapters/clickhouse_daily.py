@@ -36,6 +36,7 @@ _HISTORICAL_QUERY_SETTINGS: dict[str, int] = {
     "max_read_buffer_size": 64 * 1024,
     "max_read_buffer_size_local_fs": 32 * 1024,
     "max_threads": 1,
+    "optimize_aggregation_in_order": 1,
 }
 _TABLE_IDENTIFIER = re.compile(
     r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?\Z"
