@@ -1234,6 +1234,21 @@ class TushareDailySource:
                 raise VendorResponseError(
                     "Tushare trade_cal omitted the next open session"
                 ) from None
+            metrics = (
+                self._optional_decimal(row, "roe_dt"),
+                self._optional_decimal(row, "roa"),
+                self._optional_decimal(
+                    row,
+                    "grossprofit_margin",
+                ),
+                self._optional_decimal(row, "debt_to_assets"),
+                self._optional_decimal(row, "ocf_to_or"),
+            )
+            if all(value is None for value in metrics):
+                # The source response remains persisted as evidence. An
+                # all-null vendor row cannot contribute to a factor and is
+                # represented by absence rather than fabricated zeroes.
+                continue
             values.append(
                 FinancialIndicatorRevision.from_values(
                     source=_SOURCE,
@@ -1253,21 +1268,12 @@ class TushareDailySource:
                     ),
                     availability_policy=self._availability.version,
                     evidence_hash=result.evidence.response_hash,
-                    roe_diluted_percent=self._optional_decimal(
-                        row,
-                        "roe_dt",
-                    ),
-                    roa_percent=self._optional_decimal(row, "roa"),
-                    gross_profit_margin_percent=self._optional_decimal(
-                        row,
-                        "grossprofit_margin",
-                    ),
-                    debt_to_assets_percent=self._optional_decimal(
-                        row,
-                        "debt_to_assets",
-                    ),
+                    roe_diluted_percent=metrics[0],
+                    roa_percent=metrics[1],
+                    gross_profit_margin_percent=metrics[2],
+                    debt_to_assets_percent=metrics[3],
                     operating_cashflow_to_revenue_percent=(
-                        self._optional_decimal(row, "ocf_to_or")
+                        metrics[4]
                     ),
                 )
             )

@@ -767,6 +767,70 @@ async def test_fundamentals_reject_invalid_update_flag() -> None:
         )
 
 
+@pytest.mark.asyncio
+async def test_fundamentals_preserve_evidence_but_skip_all_null_metrics() -> None:
+    client = FakeClient(
+        {
+            "trade_cal": [
+                [
+                    {
+                        "exchange": "SSE",
+                        "cal_date": "20260720",
+                        "is_open": "1",
+                    },
+                    {
+                        "exchange": "SSE",
+                        "cal_date": "20260721",
+                        "is_open": "1",
+                    },
+                ]
+            ],
+            "daily_basic": [
+                [
+                    {
+                        "ts_code": "000001.SZ",
+                        "trade_date": "20260720",
+                        "close": "10",
+                        "turnover_rate_f": "0.5",
+                        "pe_ttm": None,
+                        "pb": "1",
+                        "ps_ttm": None,
+                        "dv_ttm": None,
+                        "total_mv": "100",
+                        "circ_mv": "90",
+                    }
+                ]
+            ],
+            "fina_indicator": [
+                [
+                    {
+                        "ts_code": "000001.SZ",
+                        "ann_date": "20260720",
+                        "end_date": "20260630",
+                        "update_flag": "1",
+                        "roe_dt": None,
+                        "roa": None,
+                        "grossprofit_margin": None,
+                        "debt_to_assets": None,
+                        "ocf_to_or": None,
+                    }
+                ]
+            ],
+        }
+    )
+
+    result = await source(client).fetch_fundamental_dataset(
+        ("000001.XSHE",),
+        date(2026, 7, 20),
+        date(2026, 7, 20),
+    )
+
+    assert result.indicators == ()
+    assert "fina_indicator" in {
+        value.method for value in result.source_evidence
+    }
+
+
 def test_date_windows_are_contiguous_and_bounded() -> None:
     windows = TushareDailySource.date_windows(
         date(2010, 1, 1), date(2026, 7, 20), max_days=3650

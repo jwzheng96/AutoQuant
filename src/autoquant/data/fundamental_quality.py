@@ -132,9 +132,6 @@ class FundamentalQualityGate:
                     "daily valuation is later than as_of",
                 )
 
-        indicators_by_instrument = {
-            instrument: 0 for instrument in instruments
-        }
         for indicator in batch.indicators:
             if (
                 indicator.instrument not in requested
@@ -146,8 +143,6 @@ class FundamentalQualityGate:
                     indicator.announced_date,
                     "financial indicator is outside requested scope",
                 )
-            else:
-                indicators_by_instrument[indicator.instrument] += 1
             if (
                 indicator.available_at > cutoff
                 or indicator.ingested_at > cutoff
@@ -167,17 +162,6 @@ class FundamentalQualityGate:
                     start,
                     "instrument has no daily valuation history",
                 )
-            if (
-                (end - start).days >= 365
-                and indicators_by_instrument[instrument] == 0
-            ):
-                add(
-                    "missing_financial_history",
-                    instrument,
-                    start,
-                    "long research interval has no financial indicators",
-                )
-
         return QualityReport(
             requested_instruments=instruments,
             start=self._start_time(start),

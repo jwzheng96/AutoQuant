@@ -631,6 +631,12 @@ becomes signal-eligible only at the next exchange open after `ann_date`. Because
 lookback and then clips by announcement date. Both `available_at` and `ingested_at` are enforced
 when a frozen manifest is read.
 
+An all-null `fina_indicator` row is retained inside its redacted source evidence but is not
+converted into a numerical record; no zero is fabricated. Such an instrument is ineligible on
+dates where the five frozen factor inputs are incomplete. Dataset acceptance therefore proves
+the response and timestamp chain, while panel compilation separately enforces the v3 minimum
+eligible-universe size.
+
 Before full-universe ingestion, freeze the factor hypothesis from the rejected v2 result:
 
 ```bash
