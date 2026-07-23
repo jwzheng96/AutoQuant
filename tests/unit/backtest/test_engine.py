@@ -25,6 +25,7 @@ INSTRUMENT = "000001.XSHE"
 def market(
     session_date: date = DAY,
     *,
+    instrument: str = INSTRUMENT,
     open_price: str = "10",
     high_price: str = "10.5",
     low_price: str = "9.8",
@@ -37,7 +38,7 @@ def market(
     return MarketState(
         bar=DailyBarRevision.from_values(
             source="tushare",
-            instrument=INSTRUMENT,
+            instrument=instrument,
             session_date=session_date,
             event_time=event,
             available_at=event + timedelta(hours=1),
@@ -54,7 +55,7 @@ def market(
             turnover="1000000",
         ),
         rules=AshareRuleBook().resolve(
-            INSTRUMENT,
+            instrument,
             session_date,
             SecurityStatus(risk_warning=False, listing_session_number=1_000),
         ),
@@ -168,6 +169,49 @@ def test_dynamic_orders_observe_actual_prior_fill_state() -> None:
         result.reports[0].rejection_code
         is RejectionCode.CASH_INSUFFICIENT
     )
+
+
+def test_dynamic_valuation_carries_last_observable_close_without_market() -> None:
+    following = DAY + timedelta(days=1)
+
+    def order_factory(
+        index: int,
+        _: tuple[MarketState, ...],
+        __: AccountSnapshot | None,
+    ) -> tuple[OrderIntent, ...]:
+        return (
+            (order("dynamic-buy", OrderSide.BUY),)
+            if index == 0
+            else ()
+        )
+
+    result = BacktestEngine().run_dynamic(
+        strategy_id="dynamic-last-observable-valuation-v1",
+        manifest_hash="a" * 64,
+        as_of=datetime(2026, 7, 24, tzinfo=UTC),
+        initial_cash=Decimal("10000"),
+        market_sessions=(
+            (market(close_price="10.2"),),
+            (
+                market(
+                    following,
+                    instrument="600000.XSHG",
+                    close_price="8.5",
+                    pre_close="8.4",
+                    open_price="8.4",
+                    high_price="8.6",
+                    low_price="8.3",
+                ),
+            ),
+        ),
+        order_factory=order_factory,
+    )
+
+    held = result.snapshots[-1].positions
+    assert len(held) == 1
+    assert held[0].instrument == INSTRUMENT
+    assert held[0].market_price == Decimal("10.2")
+    assert result.snapshots[-1].equity == Decimal("10013.99")
 
 
 def test_backtest_rejects_data_not_visible_at_as_of() -> None:

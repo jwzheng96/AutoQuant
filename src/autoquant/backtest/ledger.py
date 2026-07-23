@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time
 from decimal import ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_UP, Decimal
@@ -205,12 +206,29 @@ class PortfolioLedger:
         self._reports[order.client_order_id] = report
         return report
 
-    def snapshot(self, markets: tuple[MarketState, ...]) -> AccountSnapshot:
+    def snapshot(
+        self,
+        markets: tuple[MarketState, ...],
+        *,
+        valuation_prices: Mapping[str, Decimal] | None = None,
+    ) -> AccountSnapshot:
         if self._session_date is None:
             raise ValueError("a session must be started before snapshot")
-        prices = {
+        prices = dict(valuation_prices or {})
+        if any(
+            not isinstance(instrument, str)
+            or not instrument.strip()
+            or not isinstance(price, Decimal)
+            or not price.is_finite()
+            or price <= 0
+            for instrument, price in prices.items()
+        ):
+            raise ValueError(
+                "valuation prices must map instruments to positive Decimals"
+            )
+        prices.update({
             market.bar.instrument: market.bar.close_price for market in markets
-        }
+        })
         positions: list[PositionSnapshot] = []
         for instrument, position in sorted(self._positions.items()):
             if position.total_quantity == 0:

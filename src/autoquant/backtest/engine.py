@@ -52,6 +52,7 @@ class BacktestEngine:
             order_factory=lambda index, _markets, _previous: (
                 sessions[index].orders
             ),
+            carry_forward_valuation=False,
         )
 
     def run_dynamic(
@@ -80,6 +81,7 @@ class BacktestEngine:
             initial_cash=initial_cash,
             market_sessions=market_sessions,
             order_factory=order_factory,
+            carry_forward_valuation=True,
         )
 
     def _run_with_order_factory(
@@ -98,6 +100,7 @@ class BacktestEngine:
             ],
             tuple[OrderIntent, ...],
         ],
+        carry_forward_valuation: bool,
     ) -> BacktestResult:
         _require_nonblank(strategy_id, name="strategy_id")
         _require_lowercase_sha256(manifest_hash, name="manifest_hash")
@@ -137,6 +140,7 @@ class BacktestEngine:
         reports: list[ExecutionReport] = []
         snapshots: list[AccountSnapshot] = []
         rule_versions: set[str] = set()
+        last_observable_closes: dict[str, Decimal] = {}
         for index, empty_session in enumerate(empty_sessions):
             orders = tuple(
                 order_factory(
@@ -157,6 +161,9 @@ class BacktestEngine:
             for market in session.markets:
                 rule_versions.add(market.rules.rule_version)
                 rule_versions.add(market.rules.price_limit.rule_version)
+                last_observable_closes[
+                    market.bar.instrument
+                ] = market.bar.close_price
             for order in session.orders:
                 execution_market = market_by_instrument.get(order.instrument)
                 if execution_market is None:
@@ -165,7 +172,16 @@ class BacktestEngine:
                     reports.append(ledger.execute(order, session.markets[0]))
                 else:
                     reports.append(ledger.execute(order, execution_market))
-            snapshots.append(ledger.snapshot(session.markets))
+            snapshots.append(
+                ledger.snapshot(
+                    session.markets,
+                    valuation_prices=(
+                        last_observable_closes
+                        if carry_forward_valuation
+                        else None
+                    ),
+                )
+            )
 
         equities = tuple(snapshot.equity for snapshot in snapshots)
         peak = ledger.initial_cash
