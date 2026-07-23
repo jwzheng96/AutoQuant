@@ -232,7 +232,6 @@ class _RecyclingDailyDatasetReader:
         try:
             dataset = await reader.query(manifest_hash, as_of)
         except PersistenceUnavailableError:
-            await self._purge_allocator(strict=False)
             await self.close()
             raise
         self._queries += 1
@@ -246,12 +245,12 @@ class _RecyclingDailyDatasetReader:
         self._queries = 0
 
     async def _reconnect(self) -> None:
-        await self._purge_allocator(strict=True)
         await self.close()
         self._market = await ClickHouseDailyRepository.connect(
             dsn=self._dsn,
             source="tushare",
         )
+        await self._purge_allocator(strict=True)
         self._reader = ValidatedDailyDatasetReader(
             control_repository=self._control,
             market_repository=self._market,
