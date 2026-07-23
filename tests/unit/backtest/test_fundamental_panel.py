@@ -6,22 +6,13 @@ from decimal import Decimal
 
 import pytest
 
-from autoquant.backtest.dynamic_panel import (
-    DynamicMarketPanel,
-    DynamicMarketSession,
-    InstrumentMarketHistory,
-)
 from autoquant.backtest.fundamental_panel import (
+    FundamentalMarketBinding,
+    FundamentalMarketSessionBinding,
     FundamentalPanelCompiler,
 )
 from autoquant.backtest.fundamental_portfolio import (
     FundamentalPortfolioResearchSpec,
-)
-from autoquant.backtest.models import MarketState
-from autoquant.backtest.rules import AshareRuleBook
-from autoquant.data.daily_models import (
-    DailyBarRevision,
-    DailyPriceLimit,
 )
 from autoquant.data.fundamental_dataset import (
     FundamentalDatasetShard,
@@ -48,52 +39,6 @@ def _spec() -> FundamentalPortfolioResearchSpec:
         universe_policy_hash="d" * 64,
         start_date=date(2020, 1, 1),
         end_date=date(2026, 7, 22),
-    )
-
-
-def _market(session_date: date, close: str) -> MarketState:
-    price = Decimal(close)
-    bar = DailyBarRevision.from_values(
-        source="tushare",
-        instrument=INSTRUMENT,
-        session_date=session_date,
-        event_time=datetime.combine(
-            session_date,
-            datetime.min.time(),
-            tzinfo=UTC,
-        ),
-        available_at=AS_OF,
-        ingested_at=AS_OF,
-        source_revision="fundamental-panel-test",
-        availability_policy="test-v1",
-        evidence_hash="e" * 64,
-        open_price=close,
-        high_price=str(price + 1),
-        low_price=str(price - 1),
-        close_price=close,
-        pre_close=close,
-        volume=1_000_000,
-        turnover="10000000",
-    )
-    limit = DailyPriceLimit(
-        source="tushare",
-        instrument=INSTRUMENT,
-        session_date=session_date,
-        pre_close=price,
-        up_limit=price * Decimal("1.1"),
-        down_limit=price * Decimal("0.9"),
-        available_at=AS_OF,
-        response_hash="f" * 64,
-    )
-    return MarketState(
-        bar=bar,
-        rules=AshareRuleBook().resolve_with_price_limit(
-            INSTRUMENT,
-            session_date,
-            limit,
-        ),
-        suspended=False,
-        daily_price_limit=limit,
     )
 
 
@@ -183,33 +128,25 @@ async def test_panel_uses_previous_session_and_visible_financials() -> None:
             ),
         ),
     )
-    first = _market(SIGNAL_DATE, "1500")
-    second = _market(EXECUTION_DATE, "1510")
-    daily_panel = DynamicMarketPanel(
-        dataset_manifest_hash=spec.daily_dataset_manifest_hash,
+    daily_binding = FundamentalMarketBinding(
+        daily_dataset_manifest_hash=(
+            spec.daily_dataset_manifest_hash
+        ),
         plan_hash=spec.plan_hash,
         spec_hash=spec.spec_hash,
         as_of=AS_OF,
+        calendar_as_of=AS_OF,
+        instruments=(INSTRUMENT,),
         sessions=(
-            DynamicMarketSession(
+            FundamentalMarketSessionBinding(
                 session_date=SIGNAL_DATE,
                 snapshot_hash="3" * 64,
                 active_members=(INSTRUMENT,),
-                markets=(first,),
             ),
-            DynamicMarketSession(
+            FundamentalMarketSessionBinding(
                 session_date=EXECUTION_DATE,
                 snapshot_hash="3" * 64,
                 active_members=(INSTRUMENT,),
-                markets=(second,),
-            ),
-        ),
-        histories=(
-            InstrumentMarketHistory(
-                instrument=INSTRUMENT,
-                markets=(first, second),
-                list_date=date(2001, 8, 27),
-                delist_date=None,
             ),
         ),
     )
@@ -224,7 +161,7 @@ async def test_panel_uses_previous_session_and_visible_financials() -> None:
         )
     ).compile(
         spec=spec,
-        daily_panel=daily_panel,
+        daily_binding=daily_binding,
         dataset=dataset,
     )
 
@@ -274,33 +211,25 @@ async def test_panel_excludes_financials_not_visible_by_execution_open() -> None
             ),
         ),
     )
-    first = _market(SIGNAL_DATE, "1500")
-    second = _market(EXECUTION_DATE, "1510")
-    daily_panel = DynamicMarketPanel(
-        dataset_manifest_hash=spec.daily_dataset_manifest_hash,
+    daily_binding = FundamentalMarketBinding(
+        daily_dataset_manifest_hash=(
+            spec.daily_dataset_manifest_hash
+        ),
         plan_hash=spec.plan_hash,
         spec_hash=spec.spec_hash,
         as_of=AS_OF,
+        calendar_as_of=AS_OF,
+        instruments=(INSTRUMENT,),
         sessions=(
-            DynamicMarketSession(
-                SIGNAL_DATE,
-                "3" * 64,
-                (INSTRUMENT,),
-                (first,),
+            FundamentalMarketSessionBinding(
+                session_date=SIGNAL_DATE,
+                snapshot_hash="3" * 64,
+                active_members=(INSTRUMENT,),
             ),
-            DynamicMarketSession(
-                EXECUTION_DATE,
-                "3" * 64,
-                (INSTRUMENT,),
-                (second,),
-            ),
-        ),
-        histories=(
-            InstrumentMarketHistory(
-                INSTRUMENT,
-                (first, second),
-                date(2001, 8, 27),
-                None,
+            FundamentalMarketSessionBinding(
+                session_date=EXECUTION_DATE,
+                snapshot_hash="3" * 64,
+                active_members=(INSTRUMENT,),
             ),
         ),
     )
@@ -315,7 +244,7 @@ async def test_panel_excludes_financials_not_visible_by_execution_open() -> None
         )
     ).compile(
         spec=spec,
-        daily_panel=daily_panel,
+        daily_binding=daily_binding,
         dataset=dataset,
     )
 

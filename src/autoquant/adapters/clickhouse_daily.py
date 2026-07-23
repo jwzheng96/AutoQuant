@@ -532,6 +532,65 @@ ORDER BY instrument
                 "ClickHouse returned malformed daily coverage rows"
             ) from None
 
+    async def query_sessions_as_of(
+        self,
+        start: date,
+        end: date,
+        as_of: datetime,
+    ) -> tuple[TradingSession, ...]:
+        if start > end:
+            raise ValueError(
+                "historical interval is invalid"
+            )
+        cutoff = to_utc(as_of, name="as_of")
+        rows = await self._coverage_query(
+            f"""
+SELECT source, session_date,
+       tupleElement(latest, 1) AS is_open,
+       tupleElement(latest, 2) AS available_at,
+       tupleElement(latest, 3) AS response_hash,
+       tupleElement(latest, 4) AS content_hash
+FROM
+(
+    SELECT source, session_date,
+           argMax(
+               tuple(
+                   is_open, available_at, response_hash,
+                   content_hash
+               ),
+               tuple(available_at, record_id)
+           ) AS latest
+    FROM {self._session_table}
+    PREWHERE source = {{source:String}}
+    WHERE session_date BETWEEN
+              {{start_date:Date}} AND {{end_date:Date}}
+      AND available_at <= {{as_of:DateTime64(6, 'UTC')}}
+    GROUP BY source, session_date
+)
+ORDER BY session_date
+""".strip(),
+            (
+                "source",
+                "session_date",
+                "is_open",
+                "available_at",
+                "response_hash",
+                "content_hash",
+            ),
+            {
+                "source": self._source,
+                "start_date": start,
+                "end_date": end,
+                "as_of_64": cutoff,
+            },
+        )
+        try:
+            return tuple(self._map_session(row) for row in rows)
+        except (IndexError, TypeError, ValueError):
+            raise PersistenceUnavailableError(
+                "ClickHouse returned malformed trading sessions"
+            ) from None
+
     async def _instrument_coverage_query(
         self,
         table: str,

@@ -27,6 +27,8 @@ from autoquant.backtest.dynamic_validation import (
     assess_dynamic_validation,
 )
 from autoquant.backtest.fundamental_panel import (
+    FundamentalMarketBinding,
+    FundamentalMarketSessionBinding,
     FundamentalPanelCompiler,
 )
 from autoquant.backtest.fundamental_portfolio import (
@@ -1677,7 +1679,7 @@ async def compile_fundamental_research_panel(
     datasets = PostgresFundamentalDatasetRepository.connect(dsn=dsn)
     panels = PostgresFundamentalPanelRepository.connect(dsn=dsn)
     control = PostgresControlRepository.connect(dsn=dsn)
-    daily_reader: _RecyclingDailyDatasetReader | None = None
+    daily_market: ClickHouseDailyRepository | None = None
     fundamental_reader: ClickHouseFundamentalRepository | None = None
     try:
         spec_record = await specifications.read(spec_hash)
@@ -1701,29 +1703,63 @@ async def compile_fundamental_research_panel(
             raise LookupError(
                 "fundamental dataset is not complete"
             )
-        daily_reader = _RecyclingDailyDatasetReader(
-            clickhouse_dsn=configured_dsn(
+        daily_cutoffs: list[datetime] = []
+        for shard in plan.shards:
+            manifest = await control.read_manifest(
+                shard.manifest_hash
+            )
+            if (
+                manifest.source != "tushare"
+                or not manifest.production_complete
+                or manifest.instruments != (shard.instrument,)
+                or to_shanghai(manifest.start_time).date()
+                != plan.start_date
+                or to_shanghai(manifest.end_time).date()
+                != plan.end_date
+            ):
+                raise ValueError(
+                    "daily shard does not match the research plan"
+                )
+            daily_cutoffs.append(manifest.as_of)
+        calendar_as_of = min(daily_cutoffs)
+        daily_market = await ClickHouseDailyRepository.connect(
+            dsn=configured_dsn(
                 settings.clickhouse_dsn,
                 capability="ClickHouse",
             ),
-            control_repository=control,
-            recycle_after=1,
+            source="tushare",
         )
-        daily_shards = ValidatedResearchDatasetReader(
-            plan=plan,
-            manifest_reader=control,
-            dataset_reader=daily_reader,
-            retry_delay_seconds=2,
+        trading_sessions = await daily_market.query_sessions_as_of(
+            plan.start_date,
+            plan.end_date,
+            calendar_as_of,
         )
-        daily_panel = await DynamicMarketPanelCompiler(
-            shard_reader=daily_shards,
-        ).compile_bound(
-            plan=plan,
-            dataset_manifest_hash=spec.daily_dataset_manifest_hash,
-            policy_hash=spec.universe_policy_hash,
-            start_date=spec.start_date,
-            end_date=spec.end_date,
+        market_sessions: list[
+            FundamentalMarketSessionBinding
+        ] = []
+        for session in trading_sessions:
+            if not session.is_open:
+                continue
+            universe = plan.universe_for(session.session_date)
+            if universe is None:
+                continue
+            market_sessions.append(
+                FundamentalMarketSessionBinding(
+                    session_date=session.session_date,
+                    snapshot_hash=universe.snapshot_hash,
+                    active_members=universe.members,
+                )
+            )
+        daily_binding = FundamentalMarketBinding(
+            daily_dataset_manifest_hash=(
+                spec.daily_dataset_manifest_hash
+            ),
+            plan_hash=plan.plan_hash,
             spec_hash=spec.spec_hash,
+            as_of=max(daily_cutoffs),
+            calendar_as_of=calendar_as_of,
+            instruments=plan.instruments,
+            sessions=tuple(market_sessions),
         )
         fundamental_reader = (
             await ClickHouseFundamentalRepository.connect(
@@ -1743,7 +1779,7 @@ async def compile_fundamental_research_panel(
             shard_reader=fundamental_shards,
         ).compile(
             spec=spec,
-            daily_panel=daily_panel,
+            daily_binding=daily_binding,
             dataset=dataset,
         )
         created_at = datetime.now(UTC)
@@ -1798,8 +1834,8 @@ async def compile_fundamental_research_panel(
     finally:
         if fundamental_reader is not None:
             await fundamental_reader.client.close()
-        if daily_reader is not None:
-            await daily_reader.close()
+        if daily_market is not None:
+            await daily_market.client.close()
         await control.close()
         await panels.close()
         await datasets.close()

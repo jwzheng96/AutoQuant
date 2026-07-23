@@ -248,6 +248,12 @@ async def test_daily_coverage_selects_point_in_time_correction(
     after = await repository.query_coverage_as_of(
         ("000001.XSHE",), date(2026, 7, 20), date(2026, 7, 20), corrected_visible
     )
+    sessions = await repository.query_sessions_as_of(
+        date(2026, 7, 20),
+        date(2026, 7, 20),
+        corrected_visible,
+    )
 
     assert before == original
     assert after == corrected
+    assert sessions == corrected.sessions

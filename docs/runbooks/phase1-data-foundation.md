@@ -679,8 +679,11 @@ uv run autoquant fundamental-panel-compile \
   --requested-by operator
 ```
 
-The compiler first re-verifies every daily and fundamental shard against its immutable record
-hash sequence. Each execution session uses the previous exchange session's valuation and only
-financial reports visible by that execution session's 09:30 open. The panel records eligible
-and insufficient session counts; sessions below the frozen 60-member threshold cannot emit a
-portfolio signal. The command never changes the live-trading lock.
+The compiler verifies every daily shard's immutable manifest binding and every fundamental
+shard's exact record-hash sequence. It reads the trading calendar once at the oldest daily
+manifest cutoff; price, suspension, and price-limit rows are deliberately deferred to the
+execution backtest where they are actually consumed. Each execution session uses the previous
+exchange session's valuation and only financial reports visible by that execution session's
+09:30 open. The panel records eligible and insufficient session counts; sessions below the
+frozen 60-member threshold cannot emit a portfolio signal. The command never changes the
+live-trading lock.

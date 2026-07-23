@@ -68,9 +68,7 @@ def factor(**updates: object) -> AdjustmentFactorRevision:
 class RecordingClient:
     def __init__(self) -> None:
         self.insert = AsyncMock(return_value=SimpleNamespace(written_rows=1))
-        self.query = AsyncMock(
-            return_value=SimpleNamespace(column_names=(), result_rows=())
-        )
+        self.query = AsyncMock(return_value=SimpleNamespace(column_names=(), result_rows=()))
         self.command = AsyncMock(side_effect=[1, 1, 1, 1, 1, 1, 1, 3])
 
 
@@ -216,6 +214,7 @@ async def test_query_bars_binds_filters_and_verifies_content_hash() -> None:
     assert call.kwargs["parameters"] == {
         "source": "tushare",
         "instruments": ["000001.XSHE"],
+        "instrument": "000001.XSHE",
         "start_date": date(2026, 7, 20),
         "end_date": date(2026, 7, 20),
         "as_of_64": AVAILABLE,
@@ -226,15 +225,15 @@ async def test_query_bars_binds_filters_and_verifies_content_hash() -> None:
         "max_read_buffer_size": 65_536,
         "max_read_buffer_size_local_fs": 32_768,
         "max_threads": 1,
+        "optimize_aggregation_in_order": 1,
+        "use_query_condition_cache": 0,
     }
     rendered_sql, bound_parameters = bind_query(
         call.kwargs["query"],
         call.kwargs["parameters"],
     )
     assert rendered_sql == call.kwargs["query"]
-    assert bound_parameters["param_as_of"] == AVAILABLE.strftime(
-        "%Y-%m-%d %H:%M:%S.%f"
-    )
+    assert bound_parameters["param_as_of"] == AVAILABLE.strftime("%Y-%m-%d %H:%M:%S.%f")
 
     byte_hash_row = list(ClickHouseDailyRepository.bar_result_row(revision))
     byte_hash_row[8] = revision.evidence_hash.encode("ascii")
@@ -280,12 +279,15 @@ async def test_empty_driver_results_are_valid_empty_daily_and_coverage_queries()
     client = RecordingClient()
     repo = repository(client)
 
-    assert await repo.query_bars_as_of(
-        ("000001.XSHE",),
-        date(2026, 7, 20),
-        date(2026, 7, 20),
-        AVAILABLE,
-    ) == ()
+    assert (
+        await repo.query_bars_as_of(
+            ("000001.XSHE",),
+            date(2026, 7, 20),
+            date(2026, 7, 20),
+            AVAILABLE,
+        )
+        == ()
+    )
     coverage = await repo.query_coverage_as_of(
         ("000001.XSHE",),
         date(2026, 7, 20),
@@ -305,6 +307,8 @@ async def test_empty_driver_results_are_valid_empty_daily_and_coverage_queries()
             "max_read_buffer_size": 65_536,
             "max_read_buffer_size_local_fs": 32_768,
             "max_threads": 1,
+            "optimize_aggregation_in_order": 1,
+            "use_query_condition_cache": 0,
         }
         for call in client.query.await_args_list
     )
@@ -315,12 +319,15 @@ async def test_long_history_queries_each_year_separately() -> None:
     client = RecordingClient()
     repo = repository(client)
 
-    assert await repo.query_bars_as_of(
-        ("000001.XSHE",),
-        date(2024, 12, 31),
-        date(2026, 1, 2),
-        AVAILABLE,
-    ) == ()
+    assert (
+        await repo.query_bars_as_of(
+            ("000001.XSHE",),
+            date(2024, 12, 31),
+            date(2026, 1, 2),
+            AVAILABLE,
+        )
+        == ()
+    )
 
     assert client.query.await_count == 3
     assert tuple(

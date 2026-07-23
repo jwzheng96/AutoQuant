@@ -7,7 +7,6 @@ from decimal import Decimal
 from itertools import pairwise
 from typing import Protocol
 
-from autoquant.backtest.dynamic_panel import DynamicMarketPanel
 from autoquant.backtest.fundamental_portfolio import (
     FundamentalPortfolioResearchSpec,
 )
@@ -33,6 +32,120 @@ class FundamentalShardStream(Protocol):
     def iter_all(
         self,
     ) -> AsyncIterator[ValidatedFundamentalShard]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class FundamentalMarketSessionBinding:
+    session_date: date
+    snapshot_hash: str
+    active_members: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        _require_lowercase_sha256(
+            self.snapshot_hash,
+            name="fundamental market snapshot hash",
+        )
+        members = tuple(self.active_members)
+        if (
+            not members
+            or members != tuple(sorted(members))
+            or len(set(members)) != len(members)
+        ):
+            raise ValueError(
+                "fundamental market members are invalid"
+            )
+        object.__setattr__(self, "active_members", members)
+
+    def payload(self) -> dict[str, object]:
+        return {
+            "active_members": list(self.active_members),
+            "session_date": self.session_date.isoformat(),
+            "snapshot_hash": self.snapshot_hash,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class FundamentalMarketBinding:
+    daily_dataset_manifest_hash: str
+    plan_hash: str
+    spec_hash: str
+    as_of: datetime
+    calendar_as_of: datetime
+    instruments: tuple[str, ...]
+    sessions: tuple[FundamentalMarketSessionBinding, ...]
+    version: str = "fundamental-market-binding-v1"
+    binding_hash: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        for value, name in (
+            (
+                self.daily_dataset_manifest_hash,
+                "daily dataset manifest hash",
+            ),
+            (self.plan_hash, "fundamental market plan hash"),
+            (self.spec_hash, "fundamental market spec hash"),
+        ):
+            _require_lowercase_sha256(value, name=name)
+        instruments = tuple(self.instruments)
+        sessions = tuple(self.sessions)
+        if (
+            not instruments
+            or instruments != tuple(sorted(instruments))
+            or len(set(instruments)) != len(instruments)
+            or not sessions
+            or any(
+                current.session_date >= following.session_date
+                for current, following in pairwise(sessions)
+            )
+            or any(
+                not set(value.active_members).issubset(instruments)
+                for value in sessions
+            )
+            or self.version != "fundamental-market-binding-v1"
+        ):
+            raise ValueError(
+                "fundamental market binding is inconsistent"
+            )
+        object.__setattr__(self, "instruments", instruments)
+        object.__setattr__(self, "sessions", sessions)
+        object.__setattr__(
+            self,
+            "as_of",
+            to_utc(self.as_of, name="fundamental market as_of"),
+        )
+        object.__setattr__(
+            self,
+            "calendar_as_of",
+            to_utc(
+                self.calendar_as_of,
+                name="fundamental market calendar as_of",
+            ),
+        )
+        if self.calendar_as_of > self.as_of:
+            raise ValueError(
+                "calendar as_of cannot exceed market binding as_of"
+            )
+        object.__setattr__(
+            self,
+            "binding_hash",
+            _canonical_hash(self.payload()),
+        )
+
+    def payload(self) -> dict[str, object]:
+        return {
+            "as_of": self.as_of.isoformat(),
+            "calendar_as_of": self.calendar_as_of.isoformat(),
+            "daily_dataset_manifest_hash": (
+                self.daily_dataset_manifest_hash
+            ),
+            "instruments": list(self.instruments),
+            "plan_hash": self.plan_hash,
+            "sessions": [
+                value.payload() for value in self.sessions
+            ],
+            "spec_hash": self.spec_hash,
+            "version": self.version,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -283,19 +396,19 @@ class FundamentalPanelCompiler:
         self,
         *,
         spec: FundamentalPortfolioResearchSpec,
-        daily_panel: DynamicMarketPanel,
+        daily_binding: FundamentalMarketBinding,
         dataset: FundamentalResearchDatasetManifest,
     ) -> FundamentalResearchPanel:
         if (
-            daily_panel.dataset_manifest_hash
+            daily_binding.daily_dataset_manifest_hash
             != spec.daily_dataset_manifest_hash
-            or daily_panel.plan_hash != spec.plan_hash
-            or daily_panel.spec_hash != spec.spec_hash
+            or daily_binding.plan_hash != spec.plan_hash
+            or daily_binding.spec_hash != spec.spec_hash
             or dataset.spec_hash != spec.spec_hash
             or dataset.start_date != spec.start_date
             or dataset.end_date != spec.end_date
             or dataset.instruments
-            != tuple(value.instrument for value in daily_panel.histories)
+            != daily_binding.instruments
         ):
             raise ValueError(
                 "fundamental panel inputs do not match the frozen spec"
@@ -307,7 +420,9 @@ class FundamentalPanelCompiler:
                 current.snapshot_hash,
                 frozenset(current.active_members),
             )
-            for previous, current in pairwise(daily_panel.sessions)
+            for previous, current in pairwise(
+                daily_binding.sessions
+            )
         )
         observations: dict[
             date, list[FundamentalFeatureObservation]
@@ -315,7 +430,7 @@ class FundamentalPanelCompiler:
             execution_date: []
             for _, execution_date, _, _ in session_inputs
         }
-        cutoffs = [daily_panel.as_of]
+        cutoffs = [daily_binding.as_of]
         seen: list[str] = []
         async for shard in self._reader.iter_all():
             seen.append(shard.instrument)
@@ -383,7 +498,7 @@ class FundamentalPanelCompiler:
         )
         return FundamentalResearchPanel(
             spec_hash=spec.spec_hash,
-            daily_panel_hash=daily_panel.panel_hash,
+            daily_panel_hash=daily_binding.binding_hash,
             fundamental_dataset_manifest_hash=dataset.manifest_hash,
             as_of=max(cutoffs),
             sessions=sessions,
