@@ -428,6 +428,56 @@ class PaperExecutionStatus(BaseModel):
         return value.astimezone(UTC)
 
 
+class QmtReadOnlyStatus(BaseModel):
+    status: str
+    live_trading_locked: bool = True
+    current_host_read_only_ready: bool
+    checks: dict[str, str]
+    latest_evidence_hash: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    latest_observed_at: datetime | None = None
+    evidence_age_seconds: int | None = Field(default=None, ge=0)
+    evidence_fresh: bool
+    position_count: int | None = Field(default=None, ge=0)
+    order_count: int | None = Field(default=None, ge=0)
+    trade_count: int | None = Field(default=None, ge=0)
+    remaining_gates: tuple[str, ...]
+
+    @field_validator("latest_observed_at")
+    @classmethod
+    def require_aware_qmt_evidence_time(
+        cls,
+        value: datetime | None,
+    ) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("QMT evidence time must be timezone-aware")
+        return value.astimezone(UTC)
+
+    @model_validator(mode="after")
+    def require_consistent_qmt_evidence(self) -> Self:
+        details = (
+            self.latest_evidence_hash,
+            self.latest_observed_at,
+            self.evidence_age_seconds,
+            self.position_count,
+            self.order_count,
+            self.trade_count,
+        )
+        if any(value is None for value in details) != all(
+            value is None for value in details
+        ):
+            raise ValueError("QMT evidence summary is incomplete")
+        if self.evidence_fresh and self.latest_evidence_hash is None:
+            raise ValueError("fresh QMT evidence requires a persisted artifact")
+        if self.status not in {"accepted", "blocked", "stale"}:
+            raise ValueError("QMT read-only status is invalid")
+        return self
+
+
 class PaperStrategyStatus(BaseModel):
     status: str
     active: bool

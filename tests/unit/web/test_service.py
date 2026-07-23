@@ -1,4 +1,4 @@
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
@@ -15,6 +15,7 @@ from autoquant.web.models import (
     OperatorJobState,
     PaperExecutionStatus,
     PaperStrategyStatus,
+    QmtReadOnlyStatus,
     RiskControlStatus,
     ValidationExperiment,
     WalkForwardJobRequest,
@@ -59,6 +60,8 @@ def _service(
     simulated_broker: MagicMock | None = None,
     scheduler: MagicMock | None = None,
     strategy_registry: MagicMock | None = None,
+    qmt_acceptances: MagicMock | None = None,
+    qmt_sessions: MagicMock | None = None,
 ) -> ConsoleService:
     market = MagicMock()
     market.client = MagicMock()
@@ -78,6 +81,8 @@ def _service(
         simulated_broker=simulated_broker,
         scheduler_repository=scheduler,
         strategy_registry=strategy_registry,
+        qmt_acceptance_repository=qmt_acceptances,
+        qmt_session_repository=qmt_sessions,
         now=lambda: NOW,
         poll_interval=0.01,
     )
@@ -295,6 +300,60 @@ async def test_strategy_registry_recovery_failure_aborts_startup() -> None:
         await service.start()
 
     assert controls.activate.await_args.kwargs["reason"] is KillSwitchReason.RECOVERY_FAILED
+
+
+@pytest.mark.asyncio
+async def test_qmt_status_reports_fresh_redacted_evidence_and_host_blockers() -> None:
+    acceptances = MagicMock()
+    evidence = MagicMock(
+        evidence_hash="a" * 64,
+        observed_at=NOW - timedelta(hours=1),
+        position_count=2,
+        order_count=3,
+        trade_count=1,
+    )
+    acceptances.latest = AsyncMock(return_value=evidence)
+    sessions = MagicMock()
+    sessions.active_session_ids = AsyncMock(return_value=())
+    controls = MagicMock()
+    controls.replay = AsyncMock(
+        return_value=MagicMock(active=True)
+    )
+    service = _service(
+        operator=MagicMock(),
+        control=MagicMock(),
+        runner=AsyncMock(),
+        execution_controls=controls,
+        qmt_acceptances=acceptances,
+        qmt_sessions=sessions,
+    )
+
+    status = await service.qmt_readonly_status()
+
+    assert isinstance(status, QmtReadOnlyStatus)
+    assert status.status == "accepted"
+    assert status.evidence_fresh is True
+    assert status.current_host_read_only_ready is False
+    assert status.latest_evidence_hash == "a" * 64
+    assert status.position_count == 2
+    assert status.live_trading_locked is True
+    assert status.checks["windows_runtime"] == "blocked"
+    assert "qmt_disconnect_recovery_drill" in status.remaining_gates
+
+
+@pytest.mark.asyncio
+async def test_qmt_status_without_repository_remains_blocked() -> None:
+    service = _service(
+        operator=MagicMock(),
+        control=MagicMock(),
+        runner=AsyncMock(),
+    )
+
+    status = await service.qmt_readonly_status()
+
+    assert status.status == "blocked"
+    assert status.latest_evidence_hash is None
+    assert "qmt_acceptance_store" in status.remaining_gates
 
 
 @pytest.mark.asyncio

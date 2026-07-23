@@ -19,6 +19,7 @@ from autoquant.web.models import (
     OperatorOverview,
     PaperExecutionStatus,
     PaperStrategyStatus,
+    QmtReadOnlyStatus,
     ResearchManifest,
     RiskControlStatus,
     ValidationExperiment,
@@ -201,6 +202,15 @@ class FakeConsoleService:
             remaining_gates=("sample_out_candidate", "explicit_paper_approval"),
         )
 
+    async def qmt_readonly_status(self) -> QmtReadOnlyStatus:
+        return QmtReadOnlyStatus(
+            status="blocked",
+            current_host_read_only_ready=False,
+            checks={"windows_runtime": "blocked"},
+            evidence_fresh=False,
+            remaining_gates=("windows_qmt_readonly_acceptance",),
+        )
+
     async def activate_kill_switch(
         self, *, command_id: str, reason: str, requested_by: str
     ) -> PaperExecutionStatus:
@@ -329,6 +339,8 @@ def test_trading_endpoint_is_explicitly_unavailable() -> None:
     assert response.json()["risk"]["live_trading_locked"] is True
     assert response.json()["execution"]["recovery_verified"] is True
     assert response.json()["strategy"]["active"] is False
+    assert response.json()["qmt"]["live_trading_locked"] is True
+    assert response.json()["qmt"]["status"] == "blocked"
 
 
 def test_risk_endpoint_is_authenticated_and_read_only() -> None:
@@ -365,6 +377,22 @@ def test_strategy_endpoint_reports_paper_only_approval_state() -> None:
     assert response.status_code == 200
     assert response.json()["active"] is False
     assert response.json()["live_trading_locked"] is True
+
+
+def test_qmt_endpoint_is_authenticated_read_only_and_redacted() -> None:
+    app = create_app(_settings(), service=FakeConsoleService())
+
+    with TestClient(app) as client:
+        denied = client.get("/api/v1/qmt")
+        accepted = client.get("/api/v1/qmt", auth=_auth())
+
+    assert denied.status_code == 401
+    assert accepted.status_code == 200
+    assert accepted.json()["status"] == "blocked"
+    assert accepted.json()["live_trading_locked"] is True
+    assert "account_id" not in accepted.text
+    assert "session_id" not in accepted.text
+    assert "userdata" not in accepted.text
 
 
 def test_kill_switch_activation_is_authenticated_and_csrf_protected() -> None:

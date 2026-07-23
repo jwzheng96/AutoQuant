@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Protocol
 from uuid import UUID, uuid4
 
@@ -15,6 +15,13 @@ from autoquant.errors import AutoQuantError, PersistenceUnavailableError
 from autoquant.execution.control import KillSwitchReason
 from autoquant.execution.control_store import PostgresExecutionControlRepository
 from autoquant.execution.paper_scheduler_store import PostgresPaperSchedulerRepository
+from autoquant.execution.qmt_preflight import inspect_qmt_readiness
+from autoquant.execution.qmt_readonly_store import (
+    PostgresQmtReadOnlyAcceptanceRepository,
+)
+from autoquant.execution.qmt_session_store import (
+    PostgresQmtSessionLeaseRepository,
+)
 from autoquant.execution.simulated_broker import PersistentSimulatedBroker
 from autoquant.execution.store import PostgresPaperExecutionRepository
 from autoquant.execution.strategy_registry_store import PostgresPaperStrategyRegistry
@@ -30,6 +37,7 @@ from autoquant.web.models import (
     OperatorOverview,
     PaperExecutionStatus,
     PaperStrategyStatus,
+    QmtReadOnlyStatus,
     ResearchManifest,
     RiskControlStatus,
     ValidationExperiment,
@@ -44,6 +52,7 @@ from autoquant.web.validation_store import (
 )
 
 IngestionRunner = Callable[[AppSettings, tuple[str, ...], date, date], Awaitable[dict[str, object]]]
+_QMT_ACCEPTANCE_MAX_AGE = timedelta(hours=24)
 
 
 class BacktestRunnerPort(Protocol):
@@ -99,6 +108,8 @@ class ConsoleServicePort(Protocol):
 
     async def paper_strategy_status(self) -> PaperStrategyStatus: ...
 
+    async def qmt_readonly_status(self) -> QmtReadOnlyStatus: ...
+
     async def activate_kill_switch(
         self, *, command_id: str, reason: str, requested_by: str
     ) -> PaperExecutionStatus: ...
@@ -131,6 +142,10 @@ class ConsoleService:
         simulated_broker: PersistentSimulatedBroker | None = None,
         scheduler_repository: PostgresPaperSchedulerRepository | None = None,
         strategy_registry: PostgresPaperStrategyRegistry | None = None,
+        qmt_acceptance_repository: (
+            PostgresQmtReadOnlyAcceptanceRepository | None
+        ) = None,
+        qmt_session_repository: PostgresQmtSessionLeaseRepository | None = None,
         ingestion_runner: IngestionRunner = run_daily_ingestion,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
         poll_interval: float = 1.0,
@@ -153,6 +168,14 @@ class ConsoleService:
         self._simulated_broker = simulated_broker
         self._scheduler = scheduler_repository
         self._strategy_registry = strategy_registry
+        if (qmt_acceptance_repository is None) != (
+            qmt_session_repository is None
+        ):
+            raise ValueError(
+                "QMT acceptance and session repositories must be configured together"
+            )
+        self._qmt_acceptances = qmt_acceptance_repository
+        self._qmt_sessions = qmt_session_repository
         self._ingestion_runner = ingestion_runner
         self._now = now
         self._poll_interval = poll_interval
@@ -226,6 +249,29 @@ class ConsoleService:
                         now=self._now(),
                     )
                 raise
+        if self._qmt_acceptances is not None:
+            try:
+                await self._qmt_acceptances.check_connection()
+                await self._qmt_acceptances.latest(
+                    logical_account_id=self._settings.paper_account_id
+                )
+                if self._qmt_sessions is None:
+                    raise PersistenceUnavailableError(
+                        "QMT session repository is unavailable"
+                    )
+                await self._qmt_sessions.active_session_ids(
+                    now=self._now()
+                )
+            except Exception:
+                if self._execution_controls is not None:
+                    await self._execution_controls.activate(
+                        account_id=self._settings.paper_account_id,
+                        command_id=f"qmt-acceptance-recovery-{uuid4()}",
+                        reason=KillSwitchReason.RECOVERY_FAILED,
+                        actor="console-startup",
+                        now=self._now(),
+                    )
+                raise
         if self._execution_controls is not None:
             await self._execution_controls.replay(account_id=self._settings.paper_account_id)
         await self._operators.interrupt_running_jobs(now=self._now())
@@ -285,6 +331,10 @@ class ConsoleService:
             await self._scheduler.close()
         if self._strategy_registry is not None:
             await self._strategy_registry.close()
+        if self._qmt_acceptances is not None:
+            await self._qmt_acceptances.close()
+        if self._qmt_sessions is not None:
+            await self._qmt_sessions.close()
         await self._operators.close()
         await self._control.close()
         await self._market.client.close()
@@ -613,6 +663,77 @@ class ConsoleService:
                 "windows_qmt_readonly_reconciliation",
                 "continuous_paper_evidence",
             ),
+        )
+
+    async def qmt_readonly_status(self) -> QmtReadOnlyStatus:
+        if self._qmt_acceptances is None or self._qmt_sessions is None:
+            return QmtReadOnlyStatus(
+                status="blocked",
+                current_host_read_only_ready=False,
+                checks={"qmt_acceptance_store": "blocked"},
+                evidence_fresh=False,
+                remaining_gates=(
+                    "qmt_acceptance_store",
+                    "windows_qmt_readonly_acceptance",
+                    "qmt_disconnect_recovery_drill",
+                    "miniqmt_restart_recovery_drill",
+                    "continuous_paper_evidence",
+                ),
+            )
+        control = (
+            None
+            if self._execution_controls is None
+            else await self._execution_controls.replay(
+                account_id=self._settings.paper_account_id
+            )
+        )
+        active_session_ids = await self._qmt_sessions.active_session_ids(
+            now=self._now()
+        )
+        readiness = inspect_qmt_readiness(
+            self._settings,
+            kill_switch_active=(
+                None if control is None else control.active
+            ),
+            active_session_ids=active_session_ids,
+        )
+        checks = {
+            check.code.value: "pass" if check.passed else "blocked"
+            for check in readiness.checks
+        }
+        evidence = await self._qmt_acceptances.latest(
+            logical_account_id=self._settings.paper_account_id
+        )
+        gates = [
+            "qmt_disconnect_recovery_drill",
+            "miniqmt_restart_recovery_drill",
+            "continuous_paper_evidence",
+        ]
+        if evidence is None:
+            gates.insert(0, "windows_qmt_readonly_acceptance")
+            return QmtReadOnlyStatus(
+                status="blocked",
+                current_host_read_only_ready=readiness.read_only_ready,
+                checks=checks,
+                evidence_fresh=False,
+                remaining_gates=tuple(gates),
+            )
+        age = self._now().astimezone(UTC) - evidence.observed_at
+        evidence_fresh = timedelta(0) <= age <= _QMT_ACCEPTANCE_MAX_AGE
+        if not evidence_fresh:
+            gates.insert(0, "fresh_windows_qmt_readonly_acceptance")
+        return QmtReadOnlyStatus(
+            status="accepted" if evidence_fresh else "stale",
+            current_host_read_only_ready=readiness.read_only_ready,
+            checks=checks,
+            latest_evidence_hash=evidence.evidence_hash,
+            latest_observed_at=evidence.observed_at,
+            evidence_age_seconds=max(0, int(age.total_seconds())),
+            evidence_fresh=evidence_fresh,
+            position_count=evidence.position_count,
+            order_count=evidence.order_count,
+            trade_count=evidence.trade_count,
+            remaining_gates=tuple(gates),
         )
 
     async def activate_kill_switch(

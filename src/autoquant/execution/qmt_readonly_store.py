@@ -343,6 +343,43 @@ class PostgresQmtReadOnlyAcceptanceRepository:
             )
         return stored
 
+    async def latest(
+        self,
+        *,
+        logical_account_id: str,
+    ) -> QmtReadOnlyAcceptanceEvidence | None:
+        _require_nonblank(
+            logical_account_id,
+            name="logical_account_id",
+        )
+        try:
+            async with self._engine.connect() as connection:
+                row = (
+                    (
+                        await connection.execute(
+                            text(
+                                f"""
+                                SELECT *
+                                FROM {self._schema}.qmt_readonly_acceptance_evidence
+                                WHERE logical_account_id = :logical_account_id
+                                ORDER BY observed_at DESC, evidence_hash DESC
+                                LIMIT 1
+                                """
+                            ),
+                            {
+                                "logical_account_id": logical_account_id
+                            },
+                        )
+                    )
+                    .mappings()
+                    .one_or_none()
+                )
+        except Exception:
+            raise PersistenceUnavailableError(
+                "QMT acceptance evidence read failed"
+            ) from None
+        return None if row is None else _from_row(row)
+
 
 def _from_row(row: RowMapping) -> QmtReadOnlyAcceptanceEvidence:
     try:

@@ -222,6 +222,33 @@ async function loadTrading() {
         : "当前没有可进入调度器的策略工件",
     );
     setText("paper-strategy-gates", data.strategy?.remaining_gates?.join(", ") ?? "—");
+    setText(
+      "qmt-acceptance-state",
+      data.qmt?.evidence_fresh
+        ? "已记录新鲜脱敏证据（仅只读）"
+        : data.qmt?.status === "stale"
+          ? "证据已过期"
+          : "尚未记录",
+    );
+    setText(
+      "qmt-acceptance-time",
+      data.qmt?.latest_observed_at
+        ? new Date(data.qmt.latest_observed_at).toLocaleString()
+        : "—",
+    );
+    setText("qmt-position-count", data.qmt?.position_count ?? "—");
+    setText("qmt-order-count", data.qmt?.order_count ?? "—");
+    setText("qmt-trade-count", data.qmt?.trade_count ?? "—");
+    const blockedQmtChecks = Object.entries(data.qmt?.checks ?? {})
+      .filter(([, state]) => state !== "pass")
+      .map(([name]) => name);
+    setText(
+      "qmt-host-checks",
+      data.qmt?.current_host_read_only_ready
+        ? "只读预检通过"
+        : blockedQmtChecks.join(", ") || "不可用",
+    );
+    setText("qmt-remaining-gates", data.qmt?.remaining_gates?.join(", ") ?? "—");
   }
   catch (error) { showToast(`能力读取失败：${error.message}`); }
 }

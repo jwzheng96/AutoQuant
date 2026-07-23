@@ -501,6 +501,9 @@ async def test_qmt_readonly_acceptance_persists_only_redacted_fenced_evidence(
     )
 
     assert stored == evidence
+    assert (
+        await acceptances.latest(logical_account_id="paper-main")
+    ) == evidence
     async with engine.connect() as connection:
         payload = await connection.scalar(
             text(

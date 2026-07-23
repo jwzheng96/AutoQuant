@@ -225,7 +225,8 @@ On an authorized Windows node, `autoquant qmt-readonly-accept` acquires a bounde
 session lease and persists only redacted schema v17 acceptance evidence after coherent
 asset, position, order, and trade queries. It does not persist the broker account identifier
 or expose any broker mutation method; live order submission and cancellation remain hard
-locked.
+locked. The authenticated trading console displays only the latest evidence time and
+redacted record counts, current-host pass/blocked checks, and the remaining recovery gates.
 
 Copy `.env.example` to an untracked `.env` and supply credentials/DSNs only on the trusted
 runtime host. The Tushare Token previously shared in chat must be rotated before use; set
