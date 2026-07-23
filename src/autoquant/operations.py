@@ -26,6 +26,9 @@ from autoquant.backtest.dynamic_validation import (
     DynamicWalkForwardValidator,
     assess_dynamic_validation,
 )
+from autoquant.backtest.fundamental_panel import (
+    FundamentalPanelCompiler,
+)
 from autoquant.backtest.fundamental_portfolio import (
     FundamentalPortfolioResearchSpec,
 )
@@ -44,6 +47,9 @@ from autoquant.data.daily_ingestion import (
     ValidatedDailyDatasetReader,
 )
 from autoquant.data.daily_quality import DailyQualityGate
+from autoquant.data.fundamental_dataset import (
+    ValidatedFundamentalDatasetReader,
+)
 from autoquant.data.fundamental_ingestion import (
     FundamentalIngestionRequest,
     FundamentalIngestionService,
@@ -140,6 +146,9 @@ from autoquant.web.dynamic_validation_store import (
 )
 from autoquant.web.fundamental_data_store import (
     PostgresFundamentalDatasetRepository,
+)
+from autoquant.web.fundamental_panel_store import (
+    PostgresFundamentalPanelRepository,
 )
 from autoquant.web.fundamental_research_store import (
     PostgresFundamentalResearchSpecRepository,
@@ -1632,6 +1641,169 @@ async def run_fundamental_data_backfill(
         await control.close()
         await fundamentals.close()
         await daily_datasets.close()
+        await specifications.close()
+
+
+async def compile_fundamental_research_panel(
+    settings: AppSettings,
+    *,
+    spec_hash: str,
+    requested_by: str,
+) -> dict[str, object]:
+    """Compile and freeze the v3 point-in-time feature panel."""
+
+    if settings.live_trading_enabled:
+        raise MissingCapabilityError(
+            "fundamental panel compilation requires live trading locked"
+        )
+    if (
+        not requested_by.strip()
+        or requested_by != requested_by.strip()
+        or len(requested_by) > 128
+    ):
+        raise ValueError(
+            "requested_by must contain 1-128 trimmed characters"
+        )
+    dsn = configured_dsn(
+        settings.postgres_dsn,
+        capability="PostgreSQL",
+    )
+    specifications = (
+        PostgresFundamentalResearchSpecRepository.connect(dsn=dsn)
+    )
+    campaigns = PostgresResearchDataCampaignRepository.connect(
+        dsn=dsn
+    )
+    universes = PostgresResearchUniverseRepository.connect(dsn=dsn)
+    datasets = PostgresFundamentalDatasetRepository.connect(dsn=dsn)
+    panels = PostgresFundamentalPanelRepository.connect(dsn=dsn)
+    control = PostgresControlRepository.connect(dsn=dsn)
+    daily_reader: _RecyclingDailyDatasetReader | None = None
+    fundamental_reader: ClickHouseFundamentalRepository | None = None
+    try:
+        spec_record = await specifications.read(spec_hash)
+        spec = spec_record.spec
+        plan = await _load_research_input_plan(
+            campaigns=campaigns,
+            universes=universes,
+            manifest_hash=spec.daily_dataset_manifest_hash,
+        )
+        if (
+            plan.plan_hash != spec.plan_hash
+            or plan.policy_hash != spec.universe_policy_hash
+            or plan.start_date != spec.start_date
+            or plan.end_date != spec.end_date
+        ):
+            raise ValueError(
+                "fundamental spec research plan binding differs"
+            )
+        dataset = await datasets.read_for_spec(spec.spec_hash)
+        if dataset is None:
+            raise LookupError(
+                "fundamental dataset is not complete"
+            )
+        daily_reader = _RecyclingDailyDatasetReader(
+            clickhouse_dsn=configured_dsn(
+                settings.clickhouse_dsn,
+                capability="ClickHouse",
+            ),
+            control_repository=control,
+        )
+        daily_shards = ValidatedResearchDatasetReader(
+            plan=plan,
+            manifest_reader=control,
+            dataset_reader=daily_reader,
+        )
+        daily_panel = await DynamicMarketPanelCompiler(
+            shard_reader=daily_shards,
+        ).compile_bound(
+            plan=plan,
+            dataset_manifest_hash=spec.daily_dataset_manifest_hash,
+            policy_hash=spec.universe_policy_hash,
+            start_date=spec.start_date,
+            end_date=spec.end_date,
+            spec_hash=spec.spec_hash,
+        )
+        fundamental_reader = (
+            await ClickHouseFundamentalRepository.connect(
+                dsn=configured_dsn(
+                    settings.clickhouse_dsn,
+                    capability="ClickHouse",
+                ),
+                source="tushare",
+            )
+        )
+        fundamental_shards = ValidatedFundamentalDatasetReader(
+            aggregate=dataset,
+            manifest_reader=control,
+            data_reader=fundamental_reader,
+        )
+        panel = await FundamentalPanelCompiler(
+            shard_reader=fundamental_shards,
+        ).compile(
+            spec=spec,
+            daily_panel=daily_panel,
+            dataset=dataset,
+        )
+        created_at = datetime.now(UTC)
+        record = await panels.freeze(
+            panel,
+            requested_by=requested_by,
+            created_at=created_at,
+        )
+        counts = [
+            len(value.observations) for value in panel.sessions
+        ]
+        eligible_session_count = sum(
+            value >= spec.minimum_eligible_members
+            for value in counts
+        )
+        payload: dict[str, object] = {
+            "as_of": panel.as_of.isoformat(),
+            "daily_panel_hash": panel.daily_panel_hash,
+            "eligible_session_count": eligible_session_count,
+            "first_execution_date": (
+                panel.sessions[0].execution_date.isoformat()
+            ),
+            "fundamental_dataset_manifest_hash": (
+                panel.fundamental_dataset_manifest_hash
+            ),
+            "insufficient_session_count": (
+                len(panel.sessions) - eligible_session_count
+            ),
+            "last_execution_date": (
+                panel.sessions[-1].execution_date.isoformat()
+            ),
+            "live_trading_locked": record.live_trading_locked,
+            "maximum_eligible_members": max(counts),
+            "minimum_eligible_members": min(counts),
+            "minimum_required_members": (
+                panel.minimum_required_members
+            ),
+            "observation_count": sum(counts),
+            "panel_hash": record.panel_hash,
+            "requested_by": record.requested_by,
+            "session_count": len(panel.sessions),
+            "spec_hash": panel.spec_hash,
+            "status": "frozen",
+            "version": panel.version,
+        }
+        await control.append_audit_event(
+            "research.fundamental.panel.frozen",
+            created_at,
+            payload,
+        )
+        return payload
+    finally:
+        if fundamental_reader is not None:
+            await fundamental_reader.client.close()
+        if daily_reader is not None:
+            await daily_reader.close()
+        await control.close()
+        await panels.close()
+        await datasets.close()
+        await universes.close()
+        await campaigns.close()
         await specifications.close()
 
 

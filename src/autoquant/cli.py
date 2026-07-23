@@ -31,6 +31,7 @@ from autoquant.operations import (
     approve_paper_sma_strategy,
     backfill_research_universe_snapshots,
     compile_dynamic_market_panel,
+    compile_fundamental_research_panel,
     compile_research_input,
     complete_qmt_recovery_drill,
     create_portfolio_validation,
@@ -1139,6 +1140,26 @@ def fundamental_data_run(
     _emit(payload)
     if payload["failed"] != 0:
         raise typer.Exit(code=2)
+
+
+@app.command("fundamental-panel-compile")
+def fundamental_panel_compile(
+    spec_hash: Annotated[str, typer.Option("--spec-hash")],
+    requested_by: Annotated[str, typer.Option("--requested-by")],
+) -> None:
+    """Compile and freeze the v3 point-in-time feature panel."""
+
+    try:
+        payload = asyncio.run(
+            compile_fundamental_research_panel(
+                _settings(),
+                spec_hash=spec_hash,
+                requested_by=requested_by,
+            )
+        )
+    except (AutoQuantError, LookupError, ValueError):
+        _fail("fundamental panel compilation failed")
+    _emit(payload)
 
 
 @app.command("research-input-shard-check")

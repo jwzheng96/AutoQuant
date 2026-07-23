@@ -223,13 +223,30 @@ class DynamicMarketPanelCompiler:
         plan: ResearchInputPlan,
         spec: DynamicPortfolioResearchSpec,
     ) -> DynamicMarketPanel:
+        return await self.compile_bound(
+            plan=plan,
+            dataset_manifest_hash=spec.dataset_manifest_hash,
+            policy_hash=spec.policy_hash,
+            start_date=spec.start_date,
+            end_date=spec.end_date,
+            spec_hash=spec.spec_hash,
+        )
+
+    async def compile_bound(
+        self,
+        *,
+        plan: ResearchInputPlan,
+        dataset_manifest_hash: str,
+        policy_hash: str,
+        start_date: date,
+        end_date: date,
+        spec_hash: str,
+    ) -> DynamicMarketPanel:
         if (
-            spec.dataset_manifest_hash
-            != plan.dataset_manifest_hash
-            or spec.plan_hash != plan.plan_hash
-            or spec.policy_hash != plan.policy_hash
-            or spec.start_date != plan.start_date
-            or spec.end_date != plan.end_date
+            dataset_manifest_hash != plan.dataset_manifest_hash
+            or policy_hash != plan.policy_hash
+            or start_date != plan.start_date
+            or end_date != plan.end_date
         ):
             raise ValueError(
                 "dynamic strategy spec does not match the research plan"
@@ -308,7 +325,7 @@ class DynamicMarketPanelCompiler:
         return DynamicMarketPanel(
             dataset_manifest_hash=plan.dataset_manifest_hash,
             plan_hash=plan.plan_hash,
-            spec_hash=spec.spec_hash,
+            spec_hash=spec_hash,
             as_of=max(cutoffs),
             sessions=tuple(sessions),
             histories=tuple(histories),

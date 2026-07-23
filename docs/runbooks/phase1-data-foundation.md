@@ -47,6 +47,7 @@ Apply `migrations/postgres/001_phase1.sql`,
 `migrations/postgres/027_dynamic_regime_research.sql`, then
 `migrations/postgres/028_fundamental_research.sql`, then
 `migrations/postgres/029_fundamental_dataset.sql`, then
+`migrations/postgres/030_fundamental_panels.sql`, then
 `migrations/clickhouse/001_phase1.sql` and
 `migrations/clickhouse/002_tushare_daily.sql` and
 `migrations/clickhouse/003_daily_coverage.sql` and
@@ -669,3 +670,17 @@ uv run autoquant fundamental-data-run \
 `--max-items` is limited to 25. Repeating the command skips completed instruments; a worker or
 terminal failure therefore cannot silently bless a partial union. `dataset_manifest_hash`
 remains `null` until all shards pass and the normalized shard references are atomically frozen.
+
+After the aggregate manifest is non-null, compile and freeze the v3 feature panel:
+
+```bash
+uv run autoquant fundamental-panel-compile \
+  --spec-hash <frozen-v3-spec-hash> \
+  --requested-by operator
+```
+
+The compiler first re-verifies every daily and fundamental shard against its immutable record
+hash sequence. Each execution session uses the previous exchange session's valuation and only
+financial reports visible by that execution session's 09:30 open. The panel records eligible
+and insufficient session counts; sessions below the frozen 60-member threshold cannot emit a
+portfolio signal. The command never changes the live-trading lock.

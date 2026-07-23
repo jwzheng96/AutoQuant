@@ -1,11 +1,24 @@
 from __future__ import annotations
 
+import asyncio
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
+from typing import Protocol
 
+from autoquant.clock import to_shanghai
+from autoquant.data.fundamental_models import (
+    DailyValuationRevision,
+    FinancialIndicatorRevision,
+)
 from autoquant.data.models import (
+    DatasetManifest,
     _canonical_hash,
     _require_lowercase_sha256,
+)
+from autoquant.errors import (
+    ManifestIntegrityError,
+    PersistenceUnavailableError,
 )
 
 FUNDAMENTAL_DATASET_MANIFEST_VERSION = (
@@ -149,3 +162,143 @@ class FundamentalResearchDatasetManifest:
                 "fundamental dataset payload is not canonical"
             )
         return value
+
+
+class FundamentalManifestReader(Protocol):
+    async def read_manifest(
+        self,
+        manifest_hash: str,
+    ) -> DatasetManifest: ...
+
+
+class FundamentalAsOfReader(Protocol):
+    async def query_valuations_as_of(
+        self,
+        instruments: tuple[str, ...],
+        start: date,
+        end: date,
+        as_of: datetime,
+    ) -> tuple[DailyValuationRevision, ...]: ...
+
+    async def query_indicator_revisions_as_of(
+        self,
+        instruments: tuple[str, ...],
+        announced_start: date,
+        announced_end: date,
+        as_of: datetime,
+    ) -> tuple[FinancialIndicatorRevision, ...]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class ValidatedFundamentalShard:
+    instrument: str
+    manifest: DatasetManifest
+    valuations: tuple[DailyValuationRevision, ...]
+    indicators: tuple[FinancialIndicatorRevision, ...]
+
+
+class ValidatedFundamentalDatasetReader:
+    """Stream immutable fundamental shards with exact row-hash checks."""
+
+    def __init__(
+        self,
+        *,
+        aggregate: FundamentalResearchDatasetManifest,
+        manifest_reader: FundamentalManifestReader,
+        data_reader: FundamentalAsOfReader,
+        max_read_attempts: int = 3,
+        retry_delay_seconds: float = 0.25,
+    ) -> None:
+        if (
+            not 1 <= max_read_attempts <= 5
+            or retry_delay_seconds < 0
+            or retry_delay_seconds > 5
+        ):
+            raise ValueError(
+                "fundamental shard retry policy is invalid"
+            )
+        self._aggregate = aggregate
+        self._manifests = manifest_reader
+        self._data = data_reader
+        self._max_read_attempts = max_read_attempts
+        self._retry_delay_seconds = retry_delay_seconds
+
+    async def query_instrument(
+        self,
+        instrument: str,
+    ) -> ValidatedFundamentalShard:
+        shard = next(
+            (
+                value
+                for value in self._aggregate.shards
+                if value.instrument == instrument
+            ),
+            None,
+        )
+        if shard is None:
+            raise LookupError(
+                "instrument is not in the fundamental dataset"
+            )
+        manifest = await self._manifests.read_manifest(
+            shard.manifest_hash
+        )
+        if (
+            manifest.manifest_hash != shard.manifest_hash
+            or manifest.source != "tushare-fundamental"
+            or not manifest.production_complete
+            or manifest.instruments != (instrument,)
+            or to_shanghai(manifest.start_time).date()
+            != self._aggregate.start_date
+            or to_shanghai(manifest.end_time).date()
+            != self._aggregate.end_date
+        ):
+            raise ManifestIntegrityError(
+                "fundamental shard does not match its aggregate manifest"
+            )
+        for attempt in range(1, self._max_read_attempts + 1):
+            try:
+                valuations = (
+                    await self._data.query_valuations_as_of(
+                        (instrument,),
+                        self._aggregate.start_date,
+                        self._aggregate.end_date,
+                        manifest.as_of,
+                    )
+                )
+                indicators = (
+                    await self._data.query_indicator_revisions_as_of(
+                        (instrument,),
+                        self._aggregate.start_date,
+                        self._aggregate.end_date,
+                        manifest.as_of,
+                    )
+                )
+                break
+            except PersistenceUnavailableError as error:
+                if attempt == self._max_read_attempts:
+                    raise PersistenceUnavailableError(
+                        f"fundamental shard {instrument} remained "
+                        f"unavailable after {attempt} attempts"
+                    ) from error
+                if self._retry_delay_seconds:
+                    await asyncio.sleep(self._retry_delay_seconds)
+        actual = tuple(
+            value.content_hash for value in valuations
+        ) + tuple(value.content_hash for value in indicators)
+        if actual != manifest.record_hashes:
+            raise ManifestIntegrityError(
+                f"fundamental shard {instrument} failed row-hash "
+                "verification"
+            )
+        return ValidatedFundamentalShard(
+            instrument=instrument,
+            manifest=manifest,
+            valuations=valuations,
+            indicators=indicators,
+        )
+
+    async def iter_all(
+        self,
+    ) -> AsyncIterator[ValidatedFundamentalShard]:
+        for shard in self._aggregate.shards:
+            yield await self.query_instrument(shard.instrument)

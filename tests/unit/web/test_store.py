@@ -288,3 +288,25 @@ def test_fundamental_dataset_migration_binds_verified_shards() -> None:
     assert "REFERENCES dataset_manifests(manifest_hash)" in migration
     assert "fundamental_dataset_manifest_shards_immutable" in migration
     assert "VALUES ('postgres', 29)" in migration
+
+
+def test_fundamental_panel_migration_is_immutable_and_bound() -> None:
+    migration = Path(
+        "migrations/postgres/030_fundamental_panels.sql"
+    ).read_text(encoding="utf-8")
+
+    assert (
+        "CREATE TABLE IF NOT EXISTS fundamental_research_panels"
+        in migration
+    )
+    assert (
+        "REFERENCES fundamental_research_specs(spec_hash)"
+        in migration
+    )
+    assert (
+        "REFERENCES fundamental_dataset_manifests(manifest_hash)"
+        in migration
+    )
+    assert "fundamental_research_panels_immutable" in migration
+    assert "live_trading_locked" in migration
+    assert "VALUES ('postgres', 30)" in migration

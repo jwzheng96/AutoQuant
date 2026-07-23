@@ -10,8 +10,9 @@ orders, promise profitability, or enable live trading.
 
 The research data foundation now also stores Tushare `daily_basic` valuation snapshots and
 announcement-dated `fina_indicator` revisions in ClickHouse schema v4. PostgreSQL schemas
-v28-v29 freeze the independent quality/value v3 hypothesis before full-market collection and
-atomically bind its restart-safe per-instrument shard union. Financial
+v28-v30 freeze the independent quality/value v3 hypothesis before full-market collection,
+atomically bind its restart-safe per-instrument shard union, and retain the resulting
+point-in-time feature-panel hash. Financial
 signals use the next exchange open after `ann_date`, never the report period, and every frozen
 read is bounded by both vendor availability and local ingestion time. The five-factor recipe,
 rebalance cadence, holding count, costs, risk caps, and evidence gates are immutable; this adds a
