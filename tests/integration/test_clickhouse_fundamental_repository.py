@@ -213,3 +213,42 @@ async def test_indicator_query_preserves_announcement_revision_stream(
     assert pressure.inactive_bytes >= 0
     assert pressure.inactive_parts >= 0
     await repository.purge_allocator(strict=True)
+
+
+@pytest.mark.asyncio
+async def test_as_of_preserves_subsecond_ingestion_precision(
+    repository: ClickHouseFundamentalRepository,
+) -> None:
+    record = indicator(
+        repository.source,
+        announced_date=date(2026, 4, 25),
+        available_at=datetime(
+            2026, 4, 27, 1, 30, 0, 100_000, tzinfo=UTC
+        ),
+        ingested_at=datetime(
+            2026, 7, 23, 19, 37, 48, 750_000, tzinfo=UTC
+        ),
+        roe="10",
+        updated=False,
+    )
+    await repository.append_indicators((record,))
+
+    before = await repository.query_indicator_revisions_as_of(
+        (record.instrument,),
+        date(2026, 1, 1),
+        date(2026, 12, 31),
+        datetime(
+            2026, 7, 23, 19, 37, 48, 749_999, tzinfo=UTC
+        ),
+    )
+    visible = await repository.query_indicator_revisions_as_of(
+        (record.instrument,),
+        date(2026, 1, 1),
+        date(2026, 12, 31),
+        datetime(
+            2026, 7, 23, 19, 37, 48, 750_000, tzinfo=UTC
+        ),
+    )
+
+    assert before == ()
+    assert visible == (record,)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid5
@@ -31,6 +31,7 @@ _QUERY_SETTINGS: dict[str, int] = {
 }
 _VALUATION_NAMESPACE = UUID("86d71ad9-ee26-433a-ac34-f2e20cf566f7")
 _INDICATOR_NAMESPACE = UUID("aeb42b50-2df1-453c-8ec2-b48d7b5a1180")
+_UNIX_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
 _VALUATION_COLUMNS = (
     "record_id",
@@ -100,6 +101,15 @@ def _year_intervals(
         values.append((current, interval_end))
         current = date(current.year + 1, 1, 1)
     return tuple(values)
+
+
+def _unix_microseconds(value: datetime) -> int:
+    delta = to_utc(value, name="timestamp") - _UNIX_EPOCH
+    return (
+        delta.days * 86_400_000_000
+        + delta.seconds * 1_000_000
+        + delta.microseconds
+    )
 
 
 class ClickHouseFundamentalRepository:
@@ -370,8 +380,10 @@ FROM
     WHERE source = {{source:String}}
       AND instrument IN {{instruments:Array(String)}}
       AND session_date BETWEEN {{start_date:Date}} AND {{end_date:Date}}
-      AND available_at <= {{as_of:DateTime64(6, 'UTC')}}
-      AND ingested_at <= {{as_of:DateTime64(6, 'UTC')}}
+      AND toUnixTimestamp64Micro(available_at)
+          <= {{as_of_microseconds:Int64}}
+      AND toUnixTimestamp64Micro(ingested_at)
+          <= {{as_of_microseconds:Int64}}
     GROUP BY source, instrument, session_date
 )
 ORDER BY instrument, session_date, source
@@ -430,8 +442,10 @@ FROM
     WHERE source = {{source:String}}
       AND instrument IN {{instruments:Array(String)}}
       AND announced_date BETWEEN {{start_date:Date}} AND {{end_date:Date}}
-      AND available_at <= {{as_of:DateTime64(6, 'UTC')}}
-      AND ingested_at <= {{as_of:DateTime64(6, 'UTC')}}
+      AND toUnixTimestamp64Micro(available_at)
+          <= {{as_of_microseconds:Int64}}
+      AND toUnixTimestamp64Micro(ingested_at)
+          <= {{as_of_microseconds:Int64}}
     GROUP BY
         source, instrument, report_period, announced_date, updated
 )
@@ -503,7 +517,9 @@ ORDER BY
                         "instruments": list(instruments),
                         "start_date": interval_start,
                         "end_date": interval_end,
-                        "as_of": cutoff,
+                        "as_of_microseconds": _unix_microseconds(
+                            cutoff
+                        ),
                     },
                     settings=_QUERY_SETTINGS,
                     tz_mode="aware",
