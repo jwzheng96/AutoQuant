@@ -5,6 +5,7 @@ from pydantic import SecretStr
 
 from autoquant.config import (
     AppSettings,
+    PaperRuntimeCredentials,
     RuntimeEnvironment,
     TushareCredentials,
     WebCredentials,
@@ -21,6 +22,8 @@ def test_defaults_are_non_live_and_fail_closed(monkeypatch: pytest.MonkeyPatch) 
         "AQ_QMT_USERDATA_PATH",
         "AQ_QMT_ACCOUNT_ID",
         "AQ_QMT_SESSION_ID",
+        "AQ_PAPER_SCHEDULER_HOLDER_ID",
+        "AQ_PAPER_SCHEDULER_LEASE_TOKEN",
     ):
         monkeypatch.delenv(name, raising=False)
     settings = AppSettings(_env_file=None)
@@ -36,6 +39,8 @@ def test_defaults_are_non_live_and_fail_closed(monkeypatch: pytest.MonkeyPatch) 
         settings.require_tushare()
     with pytest.raises(MissingCapabilityError, match="Web credentials"):
         settings.require_web()
+    with pytest.raises(MissingCapabilityError, match="Paper runtime"):
+        settings.require_paper_runtime()
 
 
 def test_rqdata_credentials_are_secret_values() -> None:
@@ -186,6 +191,62 @@ def test_qmt_account_is_secret_and_empty_path_is_unconfigured() -> None:
     assert isinstance(settings.qmt_account_id, SecretStr)
     assert "sensitive-account-id" not in repr(settings)
     assert settings.qmt_session_id == 123456
+
+
+def test_paper_runtime_lease_credentials_are_secret() -> None:
+    settings = AppSettings(
+        _env_file=None,
+        paper_scheduler_holder_id="paper-node-01",
+        paper_scheduler_lease_token="x" * 32,
+    )
+
+    credentials = settings.require_paper_runtime()
+
+    assert isinstance(credentials, PaperRuntimeCredentials)
+    assert credentials.holder_id == "paper-node-01"
+    assert isinstance(credentials.lease_token, SecretStr)
+    assert "x" * 32 not in repr(settings)
+    assert "x" * 32 not in repr(credentials)
+
+
+@pytest.mark.parametrize(
+    ("holder_id", "token"),
+    [
+        (None, "x" * 32),
+        ("paper-node", None),
+        ("paper-node", "short"),
+    ],
+)
+def test_incomplete_paper_runtime_lease_credentials_fail_closed(
+    holder_id: str | None,
+    token: str | None,
+) -> None:
+    settings = AppSettings(
+        _env_file=None,
+        paper_scheduler_holder_id=holder_id,
+        paper_scheduler_lease_token=token,
+    )
+
+    with pytest.raises(MissingCapabilityError, match="Paper runtime"):
+        settings.require_paper_runtime()
+
+
+@pytest.mark.parametrize("holder_id", ["bad node", "../node", "x" * 65])
+def test_paper_runtime_holder_id_must_be_safe(holder_id: str) -> None:
+    with pytest.raises(ValueError, match="holder_id"):
+        AppSettings(
+            _env_file=None,
+            paper_scheduler_holder_id=holder_id,
+        )
+
+
+def test_paper_runtime_lease_renewal_must_precede_expiry() -> None:
+    with pytest.raises(ValueError, match="smaller"):
+        AppSettings(
+            _env_file=None,
+            paper_scheduler_lease_ttl_seconds=10,
+            paper_scheduler_renewal_seconds=10,
+        )
 
 
 @pytest.mark.parametrize("session_id", [0, -1, 2_147_483_648])

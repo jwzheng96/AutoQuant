@@ -305,6 +305,11 @@ class QmtWholeQuoteBridge:
         finally:
             self._drain_lock.release()
 
+    def disconnect(self, *, reason: str) -> None:
+        if not reason.strip():
+            raise ValueError("QMT quote disconnect reason cannot be empty")
+        self._invalidate(reason=reason)
+
     def _validated_batch(
         self,
         payload: Mapping[str, object],

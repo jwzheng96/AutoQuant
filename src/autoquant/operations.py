@@ -21,8 +21,17 @@ from autoquant.data.session_reference import SessionReferenceRefreshService
 from autoquant.errors import MissingCapabilityError
 from autoquant.execution.control_store import PostgresExecutionControlRepository
 from autoquant.execution.paper_policy import default_paper_policy
+from autoquant.execution.paper_runtime import (
+    ExactTradingCalendarReader,
+    PaperRuntimeReadinessGate,
+)
+from autoquant.execution.paper_scheduler_store import (
+    PostgresPaperSchedulerRepository,
+)
 from autoquant.execution.pre_open_marks import DailyClosePreOpenMarkReader
 from autoquant.execution.session_rules import ExactSessionRuleReader
+from autoquant.execution.simulated_broker import PersistentSimulatedBroker
+from autoquant.execution.store import PostgresPaperExecutionRepository
 from autoquant.execution.strategy_registry_store import PostgresPaperStrategyRegistry
 from autoquant.web.strategy_promotion import PaperStrategyPromotionService
 from autoquant.web.validation_store import PostgresValidationRepository
@@ -146,6 +155,102 @@ async def inspect_paper_pre_open(
             "valuation_session_date": marks.valuation_session_date.isoformat(),
         }
     finally:
+        if controls is not None:
+            await controls.close()
+        if evidence is not None:
+            await evidence.close()
+        if clickhouse is not None:
+            await clickhouse.client.close()
+
+
+async def inspect_paper_runtime_readiness(
+    settings: AppSettings,
+) -> dict[str, object]:
+    """Replay cold-start evidence without opening QMT or resetting the kill switch."""
+
+    if settings.environment is not RuntimeEnvironment.PAPER:
+        raise MissingCapabilityError("paper environment is not configured")
+    postgres_dsn = configured_dsn(
+        settings.postgres_dsn,
+        capability="PostgreSQL",
+    )
+    clickhouse: ClickHouseDailyRepository | None = None
+    evidence: PostgresControlRepository | None = None
+    controls: PostgresExecutionControlRepository | None = None
+    executions: PostgresPaperExecutionRepository | None = None
+    broker: PersistentSimulatedBroker | None = None
+    scheduler_events: PostgresPaperSchedulerRepository | None = None
+    registry: PostgresPaperStrategyRegistry | None = None
+    try:
+        clickhouse = await ClickHouseDailyRepository.connect(
+            dsn=configured_dsn(
+                settings.clickhouse_dsn,
+                capability="ClickHouse",
+            ),
+            source="tushare",
+        )
+        evidence = PostgresControlRepository.connect(dsn=postgres_dsn)
+        controls = PostgresExecutionControlRepository.connect(dsn=postgres_dsn)
+        executions = PostgresPaperExecutionRepository.connect(dsn=postgres_dsn)
+        broker = PersistentSimulatedBroker.connect(dsn=postgres_dsn)
+        scheduler_events = PostgresPaperSchedulerRepository.connect(
+            dsn=postgres_dsn
+        )
+        registry = PostgresPaperStrategyRegistry.connect(dsn=postgres_dsn)
+        cold_start_control = await controls.ensure_fail_closed(
+            account_id=settings.paper_account_id,
+            now=datetime.now(UTC),
+        )
+        if not cold_start_control.active:
+            raise MissingCapabilityError(
+                "paper runtime cold start requires an active kill switch"
+            )
+        registration = await registry.active(
+            account_id=settings.paper_account_id,
+            strategy_id=settings.paper_strategy_id,
+        )
+        if registration is None:
+            raise MissingCapabilityError(
+                "paper runtime requires an active approved strategy"
+            )
+        now = datetime.now(UTC)
+        report = await PaperRuntimeReadinessGate(
+            account_id=settings.paper_account_id,
+            strategy_id=settings.paper_strategy_id,
+            controls=controls,
+            strategies=registry,
+            executions=executions,
+            broker=broker,
+            scheduler_events=scheduler_events,
+            calendar=ExactTradingCalendarReader(
+                instruments=(registration.instrument,),
+                market_repository=clickhouse,
+                control_repository=evidence,
+            ),
+        ).verify(now=now)
+        return {
+            "account_id": report.account_id,
+            "broker_order_count": report.broker_order_count,
+            "calendar_hash": report.calendar_hash,
+            "checked_at": report.checked_at.isoformat(),
+            "execution_order_count": report.execution_order_count,
+            "instrument": report.instrument,
+            "kill_switch_active": True,
+            "live_trading_locked": True,
+            "registration_hash": report.registration_hash,
+            "scheduler_event_count": report.scheduler_event_count,
+            "status": "ready_for_quote_connection",
+            "strategy_id": report.strategy_id,
+        }
+    finally:
+        if registry is not None:
+            await registry.close()
+        if scheduler_events is not None:
+            await scheduler_events.close()
+        if broker is not None:
+            await broker.close()
+        if executions is not None:
+            await executions.close()
         if controls is not None:
             await controls.close()
         if evidence is not None:

@@ -101,6 +101,16 @@ continuous trading. Missing fields, invalid/zero/crossed prices, unexpected symb
 overflow, callback gaps, or a split batch disconnect the whole stream until a new baseline.
 It does not import XtQuant or connect to MiniQMT on this host.
 
+The resident paper runtime now assembles the approved SMA artifact, exact calendar and session
+rules, production manifest reader, account projection, pre-trade risk, simulated broker,
+append-only scheduler sink and renewable process lease as one owned lifecycle. Its cold-start
+gate requires an active kill switch, an active paper-only registration, convergent execution and
+simulator replays, an intact scheduler chain and current source-backed calendar evidence before
+opening quotes. The Windows-only XtData runtime uses `get_full_tick` before
+`subscribe_whole_quote`, drains callbacks outside vendor threads and invalidates the complete
+stream on any callback, calendar or subscription failure. It imports no XtTrader API and cannot
+submit or cancel a real order.
+
 The QMT trading-side read-only core now normalizes the documented `XtAsset`, `XtPosition`,
 `XtOrder` and `XtTrade` fields through a Windows shim contract. A trusted baseline requires all
 four queries to complete without an intervening callback; `None` never means an empty account.
@@ -214,5 +224,6 @@ the independently licensed historical-minute permission. See the
 [phase-1 runbook](docs/runbooks/phase1-data-foundation.md) for migrations and ingestion.
 
 QMT must run on a separately controlled Windows machine with MiniQMT. See the
-[QMT preparation runbook](docs/runbooks/qmt-read-only-preparation.md); no XtQuant package,
+[QMT preparation runbook](docs/runbooks/qmt-read-only-preparation.md) and
+[resident paper runtime runbook](docs/runbooks/resident-paper-runtime.md); no XtQuant package,
 broker account, or MiniQMT process is expected on the current macOS development host.

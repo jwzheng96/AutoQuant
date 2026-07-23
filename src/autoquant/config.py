@@ -30,6 +30,11 @@ class WebCredentials(BaseModel):
     password: SecretStr = Field(repr=False)
 
 
+class PaperRuntimeCredentials(BaseModel):
+    holder_id: str
+    lease_token: SecretStr = Field(repr=False)
+
+
 class AppSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="AQ_", env_file=".env", extra="forbid")
 
@@ -52,6 +57,18 @@ class AppSettings(BaseSettings):
     paper_initial_cash: Decimal = Field(
         default=Decimal("1000000"), ge=Decimal("10000"), le=Decimal("1000000000")
     )
+    paper_scheduler_holder_id: str | None = None
+    paper_scheduler_lease_token: SecretStr | None = Field(
+        default=None,
+        repr=False,
+    )
+    paper_poll_interval_seconds: Decimal = Field(
+        default=Decimal("1"),
+        ge=Decimal("0.1"),
+        le=Decimal("60"),
+    )
+    paper_scheduler_lease_ttl_seconds: int = Field(default=30, ge=5, le=300)
+    paper_scheduler_renewal_seconds: int = Field(default=10, ge=1, le=299)
     qmt_userdata_path: Path | None = None
     qmt_account_id: SecretStr | None = Field(default=None, repr=False)
     qmt_session_id: int | None = Field(default=None, ge=1, le=2_147_483_647)
@@ -95,6 +112,40 @@ class AppSettings(BaseSettings):
             )
         return normalized
 
+    @field_validator("paper_scheduler_holder_id")
+    @classmethod
+    def require_safe_scheduler_holder_id(
+        cls,
+        value: str | None,
+    ) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if (
+            not 1 <= len(normalized) <= 64
+            or not normalized[0].isalnum()
+            or any(
+                character
+                not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
+                for character in normalized
+            )
+        ):
+            raise ValueError(
+                "paper_scheduler_holder_id must be a 1-64 character safe identifier"
+            )
+        return normalized
+
+    @model_validator(mode="after")
+    def require_scheduler_renewal_before_expiry(self) -> "AppSettings":
+        if (
+            self.paper_scheduler_renewal_seconds
+            >= self.paper_scheduler_lease_ttl_seconds
+        ):
+            raise ValueError(
+                "paper scheduler renewal interval must be smaller than its lease TTL"
+            )
+        return self
+
     def require_rqdata(self) -> RqdataCredentials:
         password = self.rqdata_password
         if (
@@ -130,3 +181,19 @@ class AppSettings(BaseSettings):
         ):
             raise MissingCapabilityError("Web credentials are not configured")
         return WebCredentials(username=username, password=password)
+
+    def require_paper_runtime(self) -> PaperRuntimeCredentials:
+        holder_id = self.paper_scheduler_holder_id
+        token = self.paper_scheduler_lease_token
+        if (
+            holder_id is None
+            or token is None
+            or len(token.get_secret_value()) < 32
+        ):
+            raise MissingCapabilityError(
+                "Paper runtime scheduler lease credentials are not configured"
+            )
+        return PaperRuntimeCredentials(
+            holder_id=holder_id,
+            lease_token=token,
+        )

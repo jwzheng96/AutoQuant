@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, patch
 from typer.testing import CliRunner
 
 from autoquant.cli import app
+from autoquant.errors import MissingCapabilityError
 
 runner = CliRunner()
 MISSING_ENV = {
@@ -106,6 +107,60 @@ def test_ingestion_requires_timezone_aware_bounds() -> None:
 
     assert result.exit_code == 2
     assert "timezone-aware" in result.stdout
+
+
+def test_paper_runtime_check_emits_only_readiness_evidence() -> None:
+    payload = {
+        "account_id": "paper-main",
+        "kill_switch_active": True,
+        "live_trading_locked": True,
+        "status": "ready_for_quote_connection",
+    }
+    with patch(
+        "autoquant.cli.inspect_paper_runtime_readiness",
+        new=AsyncMock(return_value=payload),
+    ):
+        result = runner.invoke(app, ["paper-runtime-check"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == payload
+
+
+def test_paper_runtime_check_reports_stable_capability_blocker() -> None:
+    with patch(
+        "autoquant.cli.inspect_paper_runtime_readiness",
+        new=AsyncMock(
+            side_effect=MissingCapabilityError(
+                "paper runtime requires an active approved strategy"
+            )
+        ),
+    ):
+        result = runner.invoke(app, ["paper-runtime-check"])
+
+    assert result.exit_code == 2
+    assert json.loads(result.stdout) == {
+        "error": "paper runtime requires an active approved strategy",
+        "status": "failed",
+    }
+
+
+def test_run_paper_refuses_non_windows_before_database_or_quote_connection() -> None:
+    secret = "paper-runtime-lease-secret-value-0001"
+    result = runner.invoke(
+        app,
+        ["run-paper"],
+        env={
+            "AQ_ENVIRONMENT": "paper",
+            "AQ_POSTGRES_DSN": "postgresql+asyncpg://unused",
+            "AQ_CLICKHOUSE_DSN": "https://unused",
+            "AQ_PAPER_SCHEDULER_HOLDER_ID": "paper-node-01",
+            "AQ_PAPER_SCHEDULER_LEASE_TOKEN": secret,
+        },
+    )
+
+    assert result.exit_code == 2
+    assert "resident paper runtime failed closed" in result.stdout
+    assert secret not in result.stdout
 
 
 def test_tushare_check_requires_token_without_leaking_configuration() -> None:

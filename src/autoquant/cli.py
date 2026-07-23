@@ -26,6 +26,7 @@ from autoquant.execution.qmt_session_store import PostgresQmtSessionLeaseReposit
 from autoquant.operations import (
     approve_paper_sma_strategy,
     inspect_paper_pre_open,
+    inspect_paper_runtime_readiness,
     revoke_paper_strategy,
     run_daily_ingestion,
     run_session_reference_refresh,
@@ -310,6 +311,57 @@ def paper_preopen_check(
     except (AutoQuantError, LookupError, ValueError):
         _fail("paper pre-open check failed")
     _emit(payload)
+
+
+@app.command("paper-runtime-check")
+def paper_runtime_check() -> None:
+    """Replay cold-start evidence without opening QMT or resetting controls."""
+
+    try:
+        payload = asyncio.run(
+            inspect_paper_runtime_readiness(_settings())
+        )
+    except MissingCapabilityError as error:
+        _fail(str(error))
+    except (AutoQuantError, LookupError, ValueError):
+        _fail("paper runtime readiness check failed")
+    _emit(payload)
+
+
+async def _run_resident_paper(settings: AppSettings) -> None:
+    from autoquant.execution.paper_runtime_assembly import (
+        assemble_paper_runtime,
+    )
+    from autoquant.execution.qmt_quote_runtime import (
+        ImportedXtDataClient,
+        QmtWholeQuoteRuntime,
+    )
+
+    client = ImportedXtDataClient.load()
+    assembled = await assemble_paper_runtime(
+        settings,
+        quote_runtime_factory=lambda bridge, instruments, calendar, clock: (
+            QmtWholeQuoteRuntime(
+                client=client,
+                bridge=bridge,
+                instruments=instruments,
+                calendar=calendar,
+                market_clock=clock,
+            )
+        ),
+    )
+    async with assembled:
+        await assembled.runtime.run(stop=asyncio.Event())
+
+
+@app.command("run-paper")
+def run_paper() -> None:
+    """Run the leased QMT-quote paper simulator; real broker mutations stay locked."""
+
+    try:
+        asyncio.run(_run_resident_paper(_settings()))
+    except (AutoQuantError, LookupError, ValueError):
+        _fail("resident paper runtime failed closed")
 
 
 @app.command("refresh-trading-calendar")
