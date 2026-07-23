@@ -517,17 +517,34 @@ class PostgresExecutionControlRepository:
         if str(session_state_hash) != evidence.session_state_hash:
             raise ValueError("paper runtime session state changed before reset")
 
-        activation = (
+        activations = (
             (
                 await connection.execute(
                     text(
                         f"""
-                        SELECT action, registration_hash
-                        FROM {self._schema}.paper_strategy_activation_events
-                        WHERE account_id = :account_id
-                          AND strategy_id = :strategy_id
-                        ORDER BY sequence DESC
-                        LIMIT 1
+                        WITH single_latest AS (
+                            SELECT action, registration_hash
+                            FROM {self._schema}.paper_strategy_activation_events
+                            WHERE account_id = :account_id
+                              AND strategy_id = :strategy_id
+                            ORDER BY sequence DESC
+                            LIMIT 1
+                        ),
+                        portfolio_latest AS (
+                            SELECT action, registration_hash
+                            FROM {self._schema}.paper_portfolio_activation_events
+                            WHERE account_id = :account_id
+                              AND strategy_id = :strategy_id
+                            ORDER BY sequence DESC
+                            LIMIT 1
+                        )
+                        SELECT 'single' AS deployment_kind,
+                               action, registration_hash
+                        FROM single_latest
+                        UNION ALL
+                        SELECT 'portfolio' AS deployment_kind,
+                               action, registration_hash
+                        FROM portfolio_latest
                         """
                     ),
                     {
@@ -537,15 +554,21 @@ class PostgresExecutionControlRepository:
                 )
             )
             .mappings()
-            .one_or_none()
+            .all()
+        )
+        active_approvals = tuple(
+            row
+            for row in activations
+            if str(row["action"]) == "approve"
         )
         if (
-            activation is None
-            or str(activation["action"]) != "approve"
-            or str(activation["registration_hash"])
+            len(active_approvals) != 1
+            or str(active_approvals[0]["registration_hash"])
             != evidence.registration_hash
         ):
-            raise ValueError("paper runtime strategy approval changed before reset")
+            raise ValueError(
+                "paper runtime deployment approval changed before reset"
+            )
 
         lease = (
             (

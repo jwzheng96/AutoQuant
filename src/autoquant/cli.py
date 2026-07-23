@@ -25,6 +25,7 @@ from autoquant.execution.qmt_preflight import inspect_qmt_readiness
 from autoquant.execution.qmt_recovery_drill import QmtRecoveryDrillKind
 from autoquant.execution.qmt_session_store import PostgresQmtSessionLeaseRepository
 from autoquant.operations import (
+    approve_paper_sma_portfolio_strategy,
     approve_paper_sma_strategy,
     complete_qmt_recovery_drill,
     inspect_paper_pre_open,
@@ -594,6 +595,60 @@ def revoke_paper_strategy_command(
         )
     except (AutoQuantError, LookupError, ValueError):
         _fail("paper strategy revocation failed")
+    _emit(payload)
+
+
+@app.command("approve-paper-portfolio")
+def approve_paper_portfolio(
+    experiment_id: Annotated[
+        list[str],
+        typer.Option("--experiment-id"),
+    ],
+    signal_manifest_hash: Annotated[
+        list[str],
+        typer.Option("--signal-manifest-hash"),
+    ],
+    valuation_manifest_hash: Annotated[
+        str,
+        typer.Option("--valuation-manifest-hash"),
+    ],
+    reference_date: Annotated[str, typer.Option("--reference-date")],
+    approved_by: Annotated[str, typer.Option("--approved-by")],
+    confirm_paper_only: Annotated[
+        bool,
+        typer.Option("--confirm-paper-only"),
+    ] = False,
+) -> None:
+    """Approve matched OOS SMA components as one paper-only portfolio."""
+
+    if not confirm_paper_only:
+        _fail("paper-only approval confirmation is required")
+    if (
+        len(experiment_id) < 3
+        or len(experiment_id) > 20
+        or len(experiment_id) != len(signal_manifest_hash)
+    ):
+        _fail(
+            "provide 3-20 matched experiment and signal manifest options"
+        )
+    try:
+        payload = asyncio.run(
+            approve_paper_sma_portfolio_strategy(
+                _settings(),
+                experiment_ids=tuple(
+                    UUID(value) for value in experiment_id
+                ),
+                signal_manifest_hashes=tuple(signal_manifest_hash),
+                valuation_manifest_hash=valuation_manifest_hash,
+                reference_session_date=_parse_date(
+                    reference_date,
+                    name="reference-date",
+                ),
+                approved_by=approved_by,
+            )
+        )
+    except (AutoQuantError, LookupError, ValueError):
+        _fail("paper portfolio approval failed")
     _emit(payload)
 
 

@@ -983,25 +983,44 @@ class PostgresPaperPromotionFactRepository:
                     .mappings()
                     .one_or_none()
                 )
-                registration = (
+                registrations = (
                     (
                         await connection.execute(
                             text(
                                 f"""
+                                WITH single_latest AS (
+                                    SELECT action, registration_hash
+                                    FROM {self._schema}.paper_strategy_activation_events
+                                    WHERE account_id = :account_id
+                                      AND strategy_id = :strategy_id
+                                    ORDER BY sequence DESC
+                                    LIMIT 1
+                                ),
+                                portfolio_latest AS (
+                                    SELECT action, registration_hash
+                                    FROM {self._schema}.paper_portfolio_activation_events
+                                    WHERE account_id = :account_id
+                                      AND strategy_id = :strategy_id
+                                    ORDER BY sequence DESC
+                                    LIMIT 1
+                                )
                                 SELECT e.registration_hash,
-                                       r.slippage_bps
-                                FROM {self._schema}.paper_strategy_activation_events e
+                                       r.slippage_bps,
+                                       'single' AS deployment_kind
+                                FROM single_latest e
                                 JOIN {self._schema}.paper_strategy_registrations r
                                   ON r.registration_hash = e.registration_hash
-                                WHERE e.account_id = :account_id
-                                  AND e.strategy_id = :strategy_id
-                                  AND e.action = 'approve'
-                                  AND e.sequence = (
-                                      SELECT max(sequence)
-                                      FROM {self._schema}.paper_strategy_activation_events
-                                      WHERE account_id = :account_id
-                                        AND strategy_id = :strategy_id
-                                  )
+                                WHERE e.action = 'approve'
+                                UNION ALL
+                                SELECT e.registration_hash,
+                                       max(c.slippage_bps) AS slippage_bps,
+                                       'portfolio' AS deployment_kind
+                                FROM portfolio_latest e
+                                JOIN {self._schema}.paper_portfolio_components c
+                                  ON c.portfolio_registration_hash =
+                                     e.registration_hash
+                                WHERE e.action = 'approve'
+                                GROUP BY e.registration_hash
                                 """
                             ),
                             {
@@ -1011,7 +1030,16 @@ class PostgresPaperPromotionFactRepository:
                         )
                     )
                     .mappings()
-                    .one_or_none()
+                    .all()
+                )
+                if len(registrations) > 1:
+                    raise PersistenceUnavailableError(
+                        "multiple paper deployment kinds are active"
+                    )
+                registration = (
+                    None
+                    if not registrations
+                    else registrations[0]
                 )
                 qmt = (
                     (

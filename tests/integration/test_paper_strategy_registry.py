@@ -24,6 +24,9 @@ from autoquant.execution.control import KillSwitchReason
 from autoquant.execution.control_store import (
     PostgresExecutionControlRepository,
 )
+from autoquant.execution.paper_deployment import (
+    PostgresPaperDeploymentRegistry,
+)
 from autoquant.execution.paper_scheduler_lease_store import (
     PostgresPaperSchedulerLeaseRepository,
 )
@@ -64,10 +67,16 @@ from autoquant.execution.session_risk_store import (
     PostgresPaperSessionRiskRepository,
 )
 from autoquant.execution.store import PostgresPaperExecutionRepository
+from autoquant.execution.strategy_portfolio_store import (
+    PostgresPaperPortfolioRegistry,
+)
 from autoquant.execution.strategy_registry_store import (
     PostgresPaperStrategyRegistry,
 )
 from autoquant.execution.validated_sma import ValidatedSmaRegistration
+from autoquant.execution.validated_sma_portfolio import (
+    ValidatedSmaPortfolioRegistration,
+)
 from autoquant.risk.models import RiskPolicy
 from autoquant.web.models import WalkForwardJobRequest
 from autoquant.web.validation_store import PostgresValidationRepository
@@ -117,6 +126,7 @@ async def registry_fixture() -> AsyncIterator[
             "migrations/postgres/016_paper_runtime_unlock.sql",
             "migrations/postgres/017_qmt_readonly_acceptance.sql",
             "migrations/postgres/018_qmt_recovery_drills.sql",
+            "migrations/postgres/019_paper_portfolio_registry.sql",
         )
     )
     report = QualityReport(
@@ -320,6 +330,212 @@ async def test_registry_tables_reject_mutation(
                 ),
                 {"registration_hash": registration.registration_hash},
             )
+
+
+@pytest.mark.asyncio
+async def test_portfolio_registry_activates_only_independent_components(
+    registry_fixture: tuple[
+        PostgresPaperStrategyRegistry,
+        ValidatedSmaRegistration,
+        AsyncEngine,
+        str,
+    ],
+) -> None:
+    single_registry, base, engine, schema = registry_fixture
+    control = PostgresControlRepository(engine=engine, schema=schema)
+    validations = PostgresValidationRepository(
+        engine=engine,
+        schema=schema,
+    )
+    portfolio_registry = PostgresPaperPortfolioRegistry(
+        engine=engine,
+        schema=schema,
+    )
+    instruments = (
+        "000001.XSHE",
+        "600000.XSHG",
+        "600519.XSHG",
+    )
+    policy = RiskPolicy(
+        allowed_instruments=instruments,
+        max_position_weight=Decimal("0.20"),
+        max_gross_exposure=Decimal("0.60"),
+    )
+    components = [
+        replace(
+            base,
+            strategy_version="sma-paper-v1:600000:5-20",
+            risk_policy_hash=policy.policy_hash,
+        )
+    ]
+    for index, instrument in enumerate(
+        ("000001.XSHE", "600519.XSHG"),
+        start=2,
+    ):
+        report = QualityReport(
+            requested_instruments=(instrument,),
+            start=datetime(2025, 1, 1, tzinfo=UTC),
+            end=datetime(2026, 7, 22, 7, tzinfo=UTC),
+            as_of=AS_OF,
+            issues=(),
+            production_complete=True,
+        )
+        manifest = DatasetManifest(
+            source="tushare",
+            instruments=(instrument,),
+            start_time=datetime(2025, 1, 1, tzinfo=UTC),
+            end_time=datetime(2026, 7, 22, 7, tzinfo=UTC),
+            as_of=AS_OF,
+            record_hashes=(f"{index:x}" * 64,),
+            quality_report_hash=report.report_hash,
+            production_complete=True,
+            row_count=1,
+        )
+        await control.save_quality_report(report)
+        await control.save_manifest(manifest)
+        experiment = await validations.create_experiment(
+            WalkForwardJobRequest(
+                manifest_hash=manifest.manifest_hash,
+                instrument=instrument,
+                allocation=Decimal("0.20"),
+                slippage_bps=Decimal("5"),
+                train_sessions=60,
+                test_sessions=20,
+                candidates=(
+                    {"fast_sessions": 5, "slow_sessions": 20},
+                ),
+                idempotency_key=(
+                    f"paper-portfolio-integration-000{index}"
+                ),
+            ),
+            requested_by="researcher",
+            now=AS_OF,
+        )
+        async with engine.begin() as connection:
+            await connection.exec_driver_sql(
+                f'SET LOCAL search_path TO "{schema}"'
+            )
+            await connection.execute(
+                text(
+                    """
+                    UPDATE validation_experiments
+                    SET state = 'completed', started_at = :as_of,
+                        completed_at = :as_of, as_of = :as_of,
+                        result_hash = :result_hash,
+                        summary_payload = CAST(:summary AS jsonb)
+                    WHERE experiment_id = :experiment_id
+                    """
+                ),
+                {
+                    "as_of": AS_OF,
+                    "experiment_id": experiment.experiment_id,
+                    "result_hash": f"{index + 3:x}" * 64,
+                    "summary": json.dumps(
+                        {
+                            "evidence_status": "research_candidate",
+                            "gate_failures": [],
+                        }
+                    ),
+                },
+            )
+            for sequence in range(1, 7):
+                await connection.execute(
+                    text(
+                        """
+                        INSERT INTO validation_folds
+                            (experiment_id, sequence, train_start, train_end,
+                             test_start, test_end, selected_fast, selected_slow,
+                             selection_score, fold_hash, training_payload,
+                             test_payload, benchmark_payload)
+                        VALUES
+                            (:experiment_id, :sequence, '2025-01-01',
+                             '2025-03-01', '2025-03-03', '2025-03-22',
+                             5, 20, 1, :fold_hash, '{}'::jsonb, '{}'::jsonb,
+                             '{}'::jsonb)
+                        """
+                    ),
+                    {
+                        "experiment_id": experiment.experiment_id,
+                        "sequence": sequence,
+                        "fold_hash": (
+                            f"{index * 10 + sequence:064x}"
+                        ),
+                    },
+                )
+        rules = AshareRuleBook().resolve(
+            instrument,
+            date(2026, 7, 23),
+            SecurityStatus(
+                risk_warning=False,
+                listing_session_number=1000,
+            ),
+        )
+        components.append(
+            ValidatedSmaRegistration(
+                account_id="paper-main",
+                strategy_id="validated-sma-paper",
+                strategy_version=f"sma-paper-v1:{instrument}:5-20",
+                experiment_id=experiment.experiment_id,
+                validation_result_hash=f"{index + 3:x}" * 64,
+                validation_manifest_hash=manifest.manifest_hash,
+                signal_manifest_hash=manifest.manifest_hash,
+                signal_manifest_as_of=manifest.as_of,
+                instrument=instrument,
+                fast_sessions=5,
+                slow_sessions=20,
+                allocation=Decimal("0.20"),
+                slippage_bps=Decimal("5"),
+                risk_policy_hash=policy.policy_hash,
+                rule_version=rules.rule_version,
+                approved_by="operator",
+                approved_at=APPROVED_AT,
+            )
+        )
+    valuation_report = QualityReport(
+        requested_instruments=instruments,
+        start=datetime(2025, 1, 1, tzinfo=UTC),
+        end=datetime(2026, 7, 22, 7, tzinfo=UTC),
+        as_of=AS_OF,
+        issues=(),
+        production_complete=True,
+    )
+    valuation_manifest = DatasetManifest(
+        source="tushare",
+        instruments=instruments,
+        start_time=datetime(2025, 1, 1, tzinfo=UTC),
+        end_time=datetime(2026, 7, 22, 7, tzinfo=UTC),
+        as_of=AS_OF,
+        record_hashes=("7" * 64, "8" * 64, "9" * 64),
+        quality_report_hash=valuation_report.report_hash,
+        production_complete=True,
+        row_count=3,
+    )
+    await control.save_quality_report(valuation_report)
+    await control.save_manifest(valuation_manifest)
+    portfolio = ValidatedSmaPortfolioRegistration(
+        account_id="paper-main",
+        strategy_id="validated-sma-paper",
+        strategy_version="sma-portfolio-paper-v1:integration",
+        components=tuple(components),
+        valuation_manifest_hash=valuation_manifest.manifest_hash,
+        valuation_manifest_as_of=valuation_manifest.as_of,
+        risk_policy_hash=policy.policy_hash,
+        approved_by="operator",
+        approved_at=APPROVED_AT,
+    )
+
+    stored = await portfolio_registry.approve(portfolio)
+    deployment = await PostgresPaperDeploymentRegistry(
+        singles=single_registry,
+        portfolios=portfolio_registry,
+    ).active(
+        account_id="paper-main",
+        strategy_id="validated-sma-paper",
+    )
+
+    assert stored == deployment == portfolio
+    with pytest.raises(ValueError, match="portfolio must be revoked"):
+        await single_registry.approve(components[0])
 
 
 @pytest.mark.asyncio

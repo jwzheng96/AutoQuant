@@ -25,6 +25,9 @@ from autoquant.errors import (
 )
 from autoquant.execution.control import KillSwitchReason
 from autoquant.execution.control_store import PostgresExecutionControlRepository
+from autoquant.execution.paper_deployment import (
+    PostgresPaperDeploymentRegistry,
+)
 from autoquant.execution.paper_policy import default_paper_policy
 from autoquant.execution.paper_runtime import (
     ExactTradingCalendarReader,
@@ -75,8 +78,18 @@ from autoquant.execution.session_risk_store import (
 from autoquant.execution.session_rules import ExactSessionRuleReader
 from autoquant.execution.simulated_broker import PersistentSimulatedBroker
 from autoquant.execution.store import PostgresPaperExecutionRepository
+from autoquant.execution.strategy_portfolio_store import (
+    PostgresPaperPortfolioRegistry,
+)
 from autoquant.execution.strategy_registry_store import PostgresPaperStrategyRegistry
-from autoquant.web.strategy_promotion import PaperStrategyPromotionService
+from autoquant.execution.validated_sma_portfolio import (
+    ValidatedSmaPortfolioRegistration,
+)
+from autoquant.web.strategy_promotion import (
+    PaperPortfolioComponentApproval,
+    PaperPortfolioPromotionService,
+    PaperStrategyPromotionService,
+)
 from autoquant.web.validation_store import PostgresValidationRepository
 
 
@@ -223,7 +236,7 @@ async def inspect_paper_runtime_readiness(
     executions: PostgresPaperExecutionRepository | None = None
     broker: PersistentSimulatedBroker | None = None
     scheduler_events: PostgresPaperSchedulerRepository | None = None
-    registry: PostgresPaperStrategyRegistry | None = None
+    registry: PostgresPaperDeploymentRegistry | None = None
     try:
         clickhouse = await ClickHouseDailyRepository.connect(
             dsn=configured_dsn(
@@ -239,7 +252,7 @@ async def inspect_paper_runtime_readiness(
         scheduler_events = PostgresPaperSchedulerRepository.connect(
             dsn=postgres_dsn
         )
-        registry = PostgresPaperStrategyRegistry.connect(dsn=postgres_dsn)
+        registry = PostgresPaperDeploymentRegistry.connect(dsn=postgres_dsn)
         cold_start_control = await controls.ensure_fail_closed(
             account_id=settings.paper_account_id,
             now=datetime.now(UTC),
@@ -273,7 +286,7 @@ async def inspect_paper_runtime_readiness(
             broker=broker,
             scheduler_events=scheduler_events,
             calendar=ExactTradingCalendarReader(
-                instruments=(registration.instrument,),
+                instruments=registration.instruments,
                 market_repository=clickhouse,
                 control_repository=evidence,
             ),
@@ -284,7 +297,12 @@ async def inspect_paper_runtime_readiness(
             "calendar_hash": report.calendar_hash,
             "checked_at": report.checked_at.isoformat(),
             "execution_order_count": report.execution_order_count,
-            "instrument": report.instrument,
+            "instrument": (
+                report.instruments[0]
+                if len(report.instruments) == 1
+                else None
+            ),
+            "instruments": list(report.instruments),
             "kill_switch_active": True,
             "live_trading_locked": True,
             "registration_hash": report.registration_hash,
@@ -450,7 +468,7 @@ async def unlock_paper_runtime(
     executions: PostgresPaperExecutionRepository | None = None
     broker: PersistentSimulatedBroker | None = None
     sessions: PostgresPaperSessionRiskRepository | None = None
-    strategies: PostgresPaperStrategyRegistry | None = None
+    strategies: PostgresPaperDeploymentRegistry | None = None
     leases: PostgresPaperSchedulerLeaseRepository | None = None
     unlocks: PostgresPaperRuntimeUnlockRepository | None = None
     try:
@@ -466,7 +484,9 @@ async def unlock_paper_runtime(
         executions = PostgresPaperExecutionRepository.connect(dsn=postgres_dsn)
         broker = PersistentSimulatedBroker.connect(dsn=postgres_dsn)
         sessions = PostgresPaperSessionRiskRepository.connect(dsn=postgres_dsn)
-        strategies = PostgresPaperStrategyRegistry.connect(dsn=postgres_dsn)
+        strategies = PostgresPaperDeploymentRegistry.connect(
+            dsn=postgres_dsn
+        )
         leases = PostgresPaperSchedulerLeaseRepository.connect(dsn=postgres_dsn)
         unlocks = PostgresPaperRuntimeUnlockRepository.connect(dsn=postgres_dsn)
         await unlocks.check_connection()
@@ -492,7 +512,7 @@ async def unlock_paper_runtime(
             leases=leases,
             unlocks=unlocks,
             calendar=ExactTradingCalendarReader(
-                instruments=(registration.instrument,),
+                instruments=registration.instruments,
                 market_repository=clickhouse,
                 control_repository=evidence,
             ),
@@ -866,6 +886,172 @@ async def approve_paper_sma_strategy(
             await clickhouse.client.close()
 
 
+async def approve_paper_sma_portfolio_strategy(
+    settings: AppSettings,
+    *,
+    experiment_ids: tuple[UUID, ...],
+    signal_manifest_hashes: tuple[str, ...],
+    valuation_manifest_hash: str,
+    reference_session_date: date,
+    approved_by: str,
+) -> dict[str, object]:
+    """Approve 3-20 independently validated SMA components for paper only."""
+
+    if settings.environment is not RuntimeEnvironment.PAPER:
+        raise MissingCapabilityError("paper environment is not configured")
+    if (
+        len(experiment_ids) < 3
+        or len(experiment_ids) > 20
+        or len(experiment_ids) != len(signal_manifest_hashes)
+    ):
+        raise ValueError(
+            "paper portfolio requires 3-20 matched experiments and manifests"
+        )
+    now = datetime.now(UTC)
+    lag_days = (
+        to_shanghai(now).date() - reference_session_date
+    ).days
+    if lag_days < 0 or lag_days > 4:
+        raise ValueError(
+            "paper approval requires a current or recent exact session reference"
+        )
+    postgres_dsn = configured_dsn(
+        settings.postgres_dsn,
+        capability="PostgreSQL",
+    )
+    clickhouse: ClickHouseDailyRepository | None = None
+    control: PostgresControlRepository | None = None
+    execution_controls: PostgresExecutionControlRepository | None = None
+    validations: PostgresValidationRepository | None = None
+    registry: PostgresPaperPortfolioRegistry | None = None
+    try:
+        clickhouse = await ClickHouseDailyRepository.connect(
+            dsn=configured_dsn(
+                settings.clickhouse_dsn,
+                capability="ClickHouse",
+            ),
+            source="tushare",
+        )
+        control = PostgresControlRepository.connect(dsn=postgres_dsn)
+        execution_controls = PostgresExecutionControlRepository.connect(
+            dsn=postgres_dsn
+        )
+        validations = PostgresValidationRepository.connect(
+            dsn=postgres_dsn
+        )
+        registry = PostgresPaperPortfolioRegistry.connect(
+            dsn=postgres_dsn
+        )
+        fence = await execution_controls.replay(
+            account_id=settings.paper_account_id
+        )
+        if not fence.active:
+            raise MissingCapabilityError(
+                "portfolio approval requires the kill switch to remain active"
+            )
+        details = tuple(
+            [
+                await validations.detail(experiment_id)
+                for experiment_id in experiment_ids
+            ]
+        )
+        instruments = tuple(
+            sorted(
+                value.experiment.request.instrument
+                for value in details
+            )
+        )
+        if len(set(instruments)) != len(instruments):
+            raise ValueError(
+                "paper portfolio experiments must use unique instruments"
+            )
+        rule_set = await ExactSessionRuleReader(
+            market_repository=clickhouse,
+            control_repository=control,
+        ).read(
+            instruments=instruments,
+            session_date=reference_session_date,
+            as_of=now,
+        )
+        if rule_set.suspended_instruments:
+            raise ValueError(
+                "paper portfolio cannot be approved while a component is suspended"
+            )
+        rules_by_instrument = {
+            value.instrument: value for value in rule_set.rules
+        }
+        if set(rules_by_instrument) != set(instruments):
+            raise ValueError(
+                "paper portfolio session rules are incomplete"
+            )
+        policy = default_paper_policy(instruments)
+        registration = await PaperPortfolioPromotionService(
+            validations=validations,
+            controls=control,
+            datasets=ValidatedDailyDatasetReader(
+                control_repository=control,
+                market_repository=clickhouse,
+            ),
+            registrations=registry,
+        ).approve_sma_portfolio(
+            account_id=settings.paper_account_id,
+            strategy_id=settings.paper_strategy_id,
+            components=tuple(
+                PaperPortfolioComponentApproval(
+                    experiment_id=experiment_id,
+                    signal_manifest_hash=signal_manifest_hash,
+                    rules=rules_by_instrument[
+                        detail.experiment.request.instrument
+                    ],
+                )
+                for experiment_id, signal_manifest_hash, detail in zip(
+                    experiment_ids,
+                    signal_manifest_hashes,
+                    details,
+                    strict=True,
+                )
+            ),
+            valuation_manifest_hash=valuation_manifest_hash,
+            policy=policy,
+            approved_by=approved_by,
+            approved_at=now,
+        )
+        return {
+            "account_id": registration.account_id,
+            "components": [
+                {
+                    "experiment_id": str(value.experiment_id),
+                    "fast_sessions": value.fast_sessions,
+                    "instrument": value.instrument,
+                    "signal_manifest_hash": value.signal_manifest_hash,
+                    "slow_sessions": value.slow_sessions,
+                }
+                for value in registration.components
+            ],
+            "execution_mode": registration.execution_mode,
+            "instruments": list(registration.instruments),
+            "live_trading_locked": True,
+            "registration_hash": registration.registration_hash,
+            "status": "approved",
+            "strategy_id": registration.strategy_id,
+            "strategy_version": registration.strategy_version,
+            "valuation_manifest_hash": (
+                registration.valuation_manifest_hash
+            ),
+        }
+    finally:
+        if registry is not None:
+            await registry.close()
+        if validations is not None:
+            await validations.close()
+        if execution_controls is not None:
+            await execution_controls.close()
+        if control is not None:
+            await control.close()
+        if clickhouse is not None:
+            await clickhouse.client.close()
+
+
 async def revoke_paper_strategy(
     settings: AppSettings,
     *,
@@ -881,7 +1067,7 @@ async def revoke_paper_strategy(
         capability="PostgreSQL",
     )
     controls = PostgresExecutionControlRepository.connect(dsn=postgres_dsn)
-    registry = PostgresPaperStrategyRegistry.connect(dsn=postgres_dsn)
+    registry = PostgresPaperDeploymentRegistry.connect(dsn=postgres_dsn)
     now = datetime.now(UTC)
     try:
         fence = await controls.replay(account_id=settings.paper_account_id)
@@ -889,7 +1075,21 @@ async def revoke_paper_strategy(
             raise MissingCapabilityError(
                 "paper strategy revocation requires the kill switch to remain active"
             )
-        await registry.revoke(
+        deployment = await registry.active(
+            account_id=settings.paper_account_id,
+            strategy_id=settings.paper_strategy_id,
+        )
+        if deployment is None:
+            raise LookupError("paper deployment is not active")
+        target = (
+            registry.portfolios
+            if isinstance(
+                deployment,
+                ValidatedSmaPortfolioRegistration,
+            )
+            else registry.singles
+        )
+        await target.revoke(
             account_id=settings.paper_account_id,
             strategy_id=settings.paper_strategy_id,
             revoked_by=revoked_by,

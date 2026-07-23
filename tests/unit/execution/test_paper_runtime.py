@@ -83,6 +83,7 @@ def _readiness_gate(
         execution_mode="paper",
         registration_hash="a" * 64,
         instrument="600000.XSHG",
+        instruments=("600000.XSHG",),
     ),
     execution: ExecutionStoreSummary | None = None,
     broker: SimulatedBrokerSummary | None = None,

@@ -527,12 +527,29 @@ class PaperPromotionStatus(BaseModel):
         return self
 
 
+class PaperStrategyComponentStatus(BaseModel):
+    experiment_id: UUID
+    instrument: str
+    fast_sessions: int = Field(ge=2)
+    slow_sessions: int = Field(ge=3)
+    allocation: Decimal = Field(gt=0, le=1)
+    validation_result_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    signal_manifest_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def validate_windows(self) -> Self:
+        if self.fast_sessions >= self.slow_sessions:
+            raise ValueError("paper component windows are invalid")
+        return self
+
+
 class PaperStrategyStatus(BaseModel):
     status: str
     active: bool
     live_trading_locked: bool = True
     account_id: str
     strategy_id: str
+    deployment_kind: str | None = None
     registration_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     strategy_version: str | None = None
     experiment_id: UUID | None = None
@@ -550,6 +567,13 @@ class PaperStrategyStatus(BaseModel):
     )
     approved_by: str | None = None
     approved_at: datetime | None = None
+    instruments: tuple[str, ...] = ()
+    components: tuple[PaperStrategyComponentStatus, ...] = ()
+    total_allocation: Decimal | None = Field(default=None, gt=0, le=1)
+    valuation_manifest_hash: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
     remaining_gates: tuple[str, ...]
 
     @field_validator("approved_at")
@@ -566,25 +590,68 @@ class PaperStrategyStatus(BaseModel):
 
     @model_validator(mode="after")
     def require_consistent_strategy_state(self) -> Self:
-        details = (
+        common_details = (
             self.registration_hash,
             self.strategy_version,
-            self.experiment_id,
-            self.instrument,
-            self.fast_sessions,
-            self.slow_sessions,
-            self.allocation,
-            self.validation_result_hash,
-            self.signal_manifest_hash,
             self.approved_by,
             self.approved_at,
         )
-        if self.active != all(value is not None for value in details):
+        if self.active != all(
+            value is not None for value in common_details
+        ):
             raise ValueError("paper strategy status details do not match active state")
         if self.active and self.status != "approved":
             raise ValueError("active paper strategy status must be approved")
         if not self.active and self.status != "inactive":
             raise ValueError("inactive paper strategy status must be inactive")
+        if not self.active and (
+            self.deployment_kind is not None
+            or self.instruments
+            or self.components
+            or self.total_allocation is not None
+            or self.valuation_manifest_hash is not None
+        ):
+            raise ValueError("inactive paper strategy cannot contain deployment data")
+        if self.active and self.deployment_kind == "portfolio":
+            if (
+                len(self.instruments) < 3
+                or len(self.components) < 3
+                or tuple(
+                    sorted(value.instrument for value in self.components)
+                )
+                != tuple(sorted(self.instruments))
+                or self.total_allocation is None
+                or self.valuation_manifest_hash is None
+                or any(
+                    value is not None
+                    for value in (
+                        self.experiment_id,
+                        self.instrument,
+                        self.fast_sessions,
+                        self.slow_sessions,
+                        self.allocation,
+                        self.validation_result_hash,
+                        self.signal_manifest_hash,
+                    )
+                )
+            ):
+                raise ValueError(
+                    "paper portfolio status details are inconsistent"
+                )
+        if self.active and self.deployment_kind != "portfolio":
+            single_details = (
+                self.experiment_id,
+                self.instrument,
+                self.fast_sessions,
+                self.slow_sessions,
+                self.allocation,
+                self.validation_result_hash,
+                self.signal_manifest_hash,
+            )
+            if not all(value is not None for value in single_details):
+                raise ValueError(
+                    "single paper strategy status details are incomplete"
+                )
         if (
             self.fast_sessions is not None
             and self.slow_sessions is not None

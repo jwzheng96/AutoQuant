@@ -17,6 +17,9 @@ from autoquant.execution.control import KillSwitchReason
 from autoquant.execution.control_store import PostgresExecutionControlRepository
 from autoquant.execution.coordinator import PaperOrderCoordinator
 from autoquant.execution.market_clock import AShareMarketClock
+from autoquant.execution.paper_deployment import (
+    PostgresPaperDeploymentRegistry,
+)
 from autoquant.execution.paper_policy import default_paper_policy
 from autoquant.execution.paper_runtime import (
     ExactTradingCalendarReader,
@@ -47,11 +50,15 @@ from autoquant.execution.session_rules import ExactSessionRuleReader
 from autoquant.execution.simulated_broker import PersistentSimulatedBroker
 from autoquant.execution.store import PostgresPaperExecutionRepository
 from autoquant.execution.strategy_account import PaperStrategyAccountReader
-from autoquant.execution.strategy_registry_store import (
-    PostgresPaperStrategyRegistry,
+from autoquant.execution.target_strategy import (
+    TargetPortfolioProvider,
+    TargetPositionPaperIntentSource,
 )
-from autoquant.execution.target_strategy import TargetPositionPaperIntentSource
 from autoquant.execution.validated_sma import ValidatedSmaTargetProvider
+from autoquant.execution.validated_sma_portfolio import (
+    ValidatedSmaPortfolioRegistration,
+    ValidatedSmaPortfolioTargetProvider,
+)
 from autoquant.web.risk_store import PostgresRiskDecisionRepository
 
 PaperQuoteRuntimeFactory = Callable[
@@ -159,8 +166,10 @@ async def assemble_paper_runtime(
             dsn=postgres_dsn
         )
         closers.append(scheduler_leases.close)
-        strategies = PostgresPaperStrategyRegistry.connect(dsn=postgres_dsn)
-        closers.append(strategies.close)
+        deployments = PostgresPaperDeploymentRegistry.connect(
+            dsn=postgres_dsn
+        )
+        closers.append(deployments.close)
 
         cold_start_control = await controls.ensure_fail_closed(
             account_id=settings.paper_account_id,
@@ -177,7 +186,7 @@ async def assemble_paper_runtime(
             raise MissingCapabilityError(
                 "paper runtime cold start re-armed the inactive kill switch"
             )
-        registration = await strategies.active(
+        registration = await deployments.active(
             account_id=settings.paper_account_id,
             strategy_id=settings.paper_strategy_id,
         )
@@ -185,7 +194,7 @@ async def assemble_paper_runtime(
             raise MissingCapabilityError(
                 "paper runtime requires an active approved strategy"
             )
-        instruments = (registration.instrument,)
+        instruments = registration.instruments
         policy = default_paper_policy(instruments)
         calendar = ExactTradingCalendarReader(
             instruments=instruments,
@@ -196,17 +205,32 @@ async def assemble_paper_runtime(
             market_repository=clickhouse,
             control_repository=evidence,
         )
-        target_provider = ValidatedSmaTargetProvider(
-            strategy_id=settings.paper_strategy_id,
-            registry=strategies,
+        dataset_reader = ValidatedDailyDatasetReader(
             control_repository=evidence,
-            dataset_reader=ValidatedDailyDatasetReader(
-                control_repository=evidence,
-                market_repository=clickhouse,
-            ),
-            session_rule_reader=session_rules,
-            policy=policy,
+            market_repository=clickhouse,
         )
+        target_provider: TargetPortfolioProvider
+        if isinstance(
+            registration,
+            ValidatedSmaPortfolioRegistration,
+        ):
+            target_provider = ValidatedSmaPortfolioTargetProvider(
+                strategy_id=settings.paper_strategy_id,
+                registry=deployments.portfolios,
+                control_repository=evidence,
+                dataset_reader=dataset_reader,
+                session_rule_reader=session_rules,
+                policy=policy,
+            )
+        else:
+            target_provider = ValidatedSmaTargetProvider(
+                strategy_id=settings.paper_strategy_id,
+                registry=deployments.singles,
+                control_repository=evidence,
+                dataset_reader=dataset_reader,
+                session_rule_reader=session_rules,
+                policy=policy,
+            )
         intent_source = TargetPositionPaperIntentSource(
             strategy_id=settings.paper_strategy_id,
             provider=target_provider,
@@ -250,7 +274,7 @@ async def assemble_paper_runtime(
             pre_open_mark_reader=DailyClosePreOpenMarkReader(
                 repository=clickhouse,
                 evidence_repository=evidence,
-                manifest_hash=registration.signal_manifest_hash,
+                manifest_hash=registration.valuation_manifest_hash,
                 source="tushare",
             ),
             quotes=quote_book,
@@ -266,7 +290,7 @@ async def assemble_paper_runtime(
             account_id=settings.paper_account_id,
             strategy_id=settings.paper_strategy_id,
             controls=controls,
-            strategies=strategies,
+            strategies=deployments,
             executions=executions,
             broker=broker,
             scheduler_events=scheduler_events,

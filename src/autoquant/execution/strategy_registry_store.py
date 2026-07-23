@@ -105,6 +105,11 @@ class PostgresPaperStrategyRegistry:
                     account_id=registration.account_id,
                     strategy_id=registration.strategy_id,
                 )
+                await self._require_portfolio_inactive(
+                    connection,
+                    account_id=registration.account_id,
+                    strategy_id=registration.strategy_id,
+                )
                 await self._verify_research_candidate(
                     connection,
                     registration=registration,
@@ -501,8 +506,36 @@ class PostgresPaperStrategyRegistry:
     ) -> None:
         await connection.execute(
             text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
-            {"key": f"paper-strategy:{account_id}:{strategy_id}"},
+            {"key": f"paper-deployment:{account_id}:{strategy_id}"},
         )
+
+    async def _require_portfolio_inactive(
+        self,
+        connection: AsyncConnection,
+        *,
+        account_id: str,
+        strategy_id: str,
+    ) -> None:
+        action = await connection.scalar(
+            text(
+                f"""
+                SELECT action
+                FROM {self._schema}.paper_portfolio_activation_events
+                WHERE account_id = :account_id
+                  AND strategy_id = :strategy_id
+                ORDER BY sequence DESC
+                LIMIT 1
+                """
+            ),
+            {
+                "account_id": account_id,
+                "strategy_id": strategy_id,
+            },
+        )
+        if action == "approve":
+            raise ValueError(
+                "portfolio must be revoked before single strategy approval"
+            )
 
     @staticmethod
     def _registration_parameters(

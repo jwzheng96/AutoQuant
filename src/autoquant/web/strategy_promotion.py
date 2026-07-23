@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal
 from typing import Protocol
 from uuid import UUID
 
@@ -9,10 +11,14 @@ from autoquant.backtest.validation import SmaParameters
 from autoquant.clock import to_utc
 from autoquant.data.daily_ingestion import ValidatedDailyDataset
 from autoquant.data.ingestion import ControlRepository
+from autoquant.data.models import _canonical_hash
 from autoquant.execution.validated_sma import (
     DailyDatasetReader,
     ValidatedSmaRegistration,
     select_deployment_parameters,
+)
+from autoquant.execution.validated_sma_portfolio import (
+    ValidatedSmaPortfolioRegistration,
 )
 from autoquant.risk.models import RiskPolicy
 from autoquant.web.models import (
@@ -33,6 +39,20 @@ class RegistrationWriter(Protocol):
         self,
         registration: ValidatedSmaRegistration,
     ) -> ValidatedSmaRegistration: ...
+
+
+class PortfolioRegistrationWriter(Protocol):
+    async def approve(
+        self,
+        registration: ValidatedSmaPortfolioRegistration,
+    ) -> ValidatedSmaPortfolioRegistration: ...
+
+
+@dataclass(frozen=True, slots=True)
+class PaperPortfolioComponentApproval:
+    experiment_id: UUID
+    signal_manifest_hash: str
+    rules: InstrumentRules
 
 
 class PaperStrategyPromotionService:
@@ -63,6 +83,32 @@ class PaperStrategyPromotionService:
         approved_by: str,
         approved_at: datetime,
     ) -> ValidatedSmaRegistration:
+        registration = await self._prepare_sma(
+            account_id=account_id,
+            strategy_id=strategy_id,
+            experiment_id=experiment_id,
+            signal_manifest_hash=signal_manifest_hash,
+            rules=rules,
+            policy=policy,
+            approved_by=approved_by,
+            approved_at=approved_at,
+            allow_portfolio_policy=False,
+        )
+        return await self._registrations.approve(registration)
+
+    async def _prepare_sma(
+        self,
+        *,
+        account_id: str,
+        strategy_id: str,
+        experiment_id: UUID,
+        signal_manifest_hash: str,
+        rules: InstrumentRules,
+        policy: RiskPolicy,
+        approved_by: str,
+        approved_at: datetime,
+        allow_portfolio_policy: bool,
+    ) -> ValidatedSmaRegistration:
         instant = to_utc(approved_at, name="strategy approval time")
         detail = await self._validations.detail(experiment_id)
         experiment = detail.experiment
@@ -83,9 +129,15 @@ class PaperStrategyPromotionService:
         if (
             request.instrument != rules.instrument
             or rules.instrument not in policy.allowed_instruments
-            or len(policy.allowed_instruments) != 1
-            or request.allocation
-            > min(policy.max_position_weight, policy.max_gross_exposure)
+            or (
+                not allow_portfolio_policy
+                and len(policy.allowed_instruments) != 1
+            )
+            or request.allocation > policy.max_position_weight
+            or (
+                not allow_portfolio_policy
+                and request.allocation > policy.max_gross_exposure
+            )
         ):
             raise ValueError(
                 "validation allocation or instrument exceeds paper risk controls"
@@ -131,7 +183,7 @@ class PaperStrategyPromotionService:
             f"sma-paper-v1:{experiment.result_hash[:12]}:"
             f"{selected.fast_sessions}-{selected.slow_sessions}"
         )
-        registration = ValidatedSmaRegistration(
+        return ValidatedSmaRegistration(
             account_id=account_id,
             strategy_id=strategy_id,
             strategy_version=strategy_version,
@@ -150,7 +202,6 @@ class PaperStrategyPromotionService:
             approved_by=approved_by,
             approved_at=instant,
         )
-        return await self._registrations.approve(registration)
 
     @staticmethod
     def _validate_signal_dataset(
@@ -176,3 +227,164 @@ class PaperStrategyPromotionService:
             raise ValueError(
                 "signal manifest lacks an exact corporate-action-safe SMA history"
             )
+
+
+class PaperPortfolioPromotionService:
+    """Approve only a diversified set of independently passing OOS candidates."""
+
+    def __init__(
+        self,
+        *,
+        validations: ValidationDetailReader,
+        controls: ControlRepository,
+        datasets: DailyDatasetReader,
+        registrations: PortfolioRegistrationWriter,
+    ) -> None:
+        self._controls = controls
+        self._datasets = datasets
+        self._registrations = registrations
+        self._component_builder = PaperStrategyPromotionService(
+            validations=validations,
+            controls=controls,
+            datasets=datasets,
+            registrations=_NoSingleRegistrationWriter(),
+        )
+
+    async def approve_sma_portfolio(
+        self,
+        *,
+        account_id: str,
+        strategy_id: str,
+        components: tuple[PaperPortfolioComponentApproval, ...],
+        valuation_manifest_hash: str,
+        policy: RiskPolicy,
+        approved_by: str,
+        approved_at: datetime,
+    ) -> ValidatedSmaPortfolioRegistration:
+        if (
+            len(components) < 3
+            or len(components) > 20
+            or any(
+                not isinstance(value, PaperPortfolioComponentApproval)
+                for value in components
+            )
+        ):
+            raise ValueError(
+                "paper portfolio approval requires 3-20 components"
+            )
+        instruments = tuple(
+            sorted(value.rules.instrument for value in components)
+        )
+        if (
+            len(set(instruments)) != len(instruments)
+            or instruments != tuple(sorted(policy.allowed_instruments))
+        ):
+            raise ValueError(
+                "portfolio components must exactly match unique policy instruments"
+            )
+        instant = to_utc(approved_at, name="portfolio approval time")
+        registrations = tuple(
+            [
+                await self._component_builder._prepare_sma(
+                    account_id=account_id,
+                    strategy_id=strategy_id,
+                    experiment_id=value.experiment_id,
+                    signal_manifest_hash=value.signal_manifest_hash,
+                    rules=value.rules,
+                    policy=policy,
+                    approved_by=approved_by,
+                    approved_at=instant,
+                    allow_portfolio_policy=True,
+                )
+                for value in components
+            ]
+        )
+        if (
+            sum(
+                (value.allocation for value in registrations),
+                Decimal("0"),
+            )
+            > policy.max_gross_exposure
+        ):
+            raise ValueError(
+                "portfolio allocation exceeds maximum gross exposure"
+            )
+        valuation_manifest = await self._controls.read_manifest(
+            valuation_manifest_hash
+        )
+        if (
+            not valuation_manifest.production_complete
+            or tuple(sorted(valuation_manifest.instruments)) != instruments
+        ):
+            raise ValueError(
+                "portfolio valuation manifest is not exact and production-complete"
+            )
+        valuation_dataset = await self._datasets.query(
+            valuation_manifest.manifest_hash,
+            valuation_manifest.as_of,
+        )
+        self._validate_valuation_dataset(
+            valuation_dataset,
+            instruments=instruments,
+        )
+        component_hashes = tuple(
+            sorted(value.registration_hash for value in registrations)
+        )
+        version_hash = _canonical_hash(
+            {
+                "component_hashes": component_hashes,
+                "valuation_manifest_hash": (
+                    valuation_manifest.manifest_hash
+                ),
+                "version": "sma-portfolio-paper-v1",
+            }
+        )
+        registration = ValidatedSmaPortfolioRegistration(
+            account_id=account_id,
+            strategy_id=strategy_id,
+            strategy_version=(
+                f"sma-portfolio-paper-v1:{version_hash[:12]}"
+            ),
+            components=registrations,
+            valuation_manifest_hash=valuation_manifest.manifest_hash,
+            valuation_manifest_as_of=valuation_manifest.as_of,
+            risk_policy_hash=policy.policy_hash,
+            approved_by=approved_by,
+            approved_at=instant,
+        )
+        return await self._registrations.approve(registration)
+
+    @staticmethod
+    def _validate_valuation_dataset(
+        dataset: ValidatedDailyDataset,
+        *,
+        instruments: tuple[str, ...],
+    ) -> None:
+        bars_by_key = {
+            (value.instrument, value.session_date)
+            for value in dataset.bars
+        }
+        factors_by_key = {
+            (value.instrument, value.session_date)
+            for value in dataset.factors
+        }
+        if (
+            not bars_by_key
+            or len(bars_by_key) != len(dataset.bars)
+            or len(factors_by_key) != len(dataset.factors)
+            or bars_by_key != factors_by_key
+            or {value[0] for value in bars_by_key} != set(instruments)
+        ):
+            raise ValueError(
+                "valuation manifest lacks exact adjusted marks for every component"
+            )
+
+
+class _NoSingleRegistrationWriter:
+    async def approve(
+        self,
+        registration: ValidatedSmaRegistration,
+    ) -> ValidatedSmaRegistration:
+        raise AssertionError(
+            "portfolio component preparation cannot activate a single strategy"
+        )

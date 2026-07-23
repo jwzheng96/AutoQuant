@@ -25,6 +25,9 @@ from autoquant.config import AppSettings, WebCredentials
 from autoquant.data.daily_ingestion import ValidatedDailyDatasetReader
 from autoquant.errors import AutoQuantError
 from autoquant.execution.control_store import PostgresExecutionControlRepository
+from autoquant.execution.paper_deployment import (
+    PostgresPaperDeploymentRegistry,
+)
 from autoquant.execution.paper_scheduler_store import PostgresPaperSchedulerRepository
 from autoquant.execution.promotion_audit import (
     PostgresPaperPromotionFactRepository,
@@ -37,7 +40,6 @@ from autoquant.execution.qmt_session_store import (
 )
 from autoquant.execution.simulated_broker import PersistentSimulatedBroker
 from autoquant.execution.store import PostgresPaperExecutionRepository
-from autoquant.execution.strategy_registry_store import PostgresPaperStrategyRegistry
 from autoquant.operations import configured_dsn
 from autoquant.web.backtest_store import PostgresBacktestRepository
 from autoquant.web.models import (
@@ -387,7 +389,9 @@ async def _production_service(settings: AppSettings) -> ConsoleService:
     execution_controls = PostgresExecutionControlRepository.connect(dsn=postgres_dsn)
     simulated_broker = PersistentSimulatedBroker.connect(dsn=postgres_dsn)
     scheduler = PostgresPaperSchedulerRepository.connect(dsn=postgres_dsn)
-    strategy_registry = PostgresPaperStrategyRegistry.connect(dsn=postgres_dsn)
+    strategy_registry = PostgresPaperDeploymentRegistry.connect(
+        dsn=postgres_dsn
+    )
     qmt_acceptances = PostgresQmtReadOnlyAcceptanceRepository.connect(
         dsn=postgres_dsn
     )

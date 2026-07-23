@@ -16,6 +16,7 @@ from autoquant.execution.account_projection import PaperAccountProjector
 from autoquant.execution.control import KillSwitchControl
 from autoquant.execution.control_store import PostgresExecutionControlRepository
 from autoquant.execution.market_clock import AShareMarketClock
+from autoquant.execution.paper_deployment import PaperDeploymentReader
 from autoquant.execution.paper_runtime import RuntimeCalendarReader
 from autoquant.execution.paper_scheduler_lease_store import (
     PostgresPaperSchedulerLeaseRepository,
@@ -36,9 +37,6 @@ from autoquant.execution.session_risk_store import (
 )
 from autoquant.execution.simulated_broker import PersistentSimulatedBroker
 from autoquant.execution.store import PostgresPaperExecutionRepository
-from autoquant.execution.strategy_registry_store import (
-    PostgresPaperStrategyRegistry,
-)
 
 
 class PaperUnlockQuoteReader(Protocol):
@@ -78,7 +76,7 @@ class PaperRuntimeUnlockService:
         executions: PostgresPaperExecutionRepository,
         broker: PersistentSimulatedBroker,
         sessions: PostgresPaperSessionRiskRepository,
-        strategies: PostgresPaperStrategyRegistry,
+        strategies: PaperDeploymentReader,
         leases: PostgresPaperSchedulerLeaseRepository,
         unlocks: PostgresPaperRuntimeUnlockRepository,
         calendar: RuntimeCalendarReader,
@@ -178,7 +176,7 @@ class PaperRuntimeUnlockService:
             session_date=session_date,
         )
         quote_snapshot = await self._quotes(
-            instruments=(registration.instrument,),
+            instruments=registration.instruments,
             session=calendar,
             now=started_at,
         )
@@ -190,7 +188,7 @@ class PaperRuntimeUnlockService:
             quote_snapshot.source != "qmt"
             or quote_snapshot.as_of > evaluated_at
             or evaluated_at - quote_snapshot.as_of > self._max_quote_age
-            or set(quote_snapshot.quotes) != {registration.instrument}
+            or set(quote_snapshot.quotes) != set(registration.instruments)
             or any(not quote.market_open for quote in quote_snapshot.quotes.values())
         ):
             raise PersistenceUnavailableError(

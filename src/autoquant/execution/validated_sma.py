@@ -168,6 +168,26 @@ class ValidatedSmaRegistration:
             "validation_result_hash": self.validation_result_hash,
         }
 
+    @property
+    def instruments(self) -> tuple[str, ...]:
+        return (self.instrument,)
+
+    @property
+    def valuation_manifest_hash(self) -> str:
+        return self.signal_manifest_hash
+
+    @property
+    def valuation_manifest_as_of(self) -> datetime:
+        return self.signal_manifest_as_of
+
+    @property
+    def total_allocation(self) -> Decimal:
+        return self.allocation
+
+    @property
+    def maximum_slippage_bps(self) -> Decimal:
+        return self.slippage_bps
+
 
 def select_deployment_parameters(
     selections: tuple[SmaParameters, ...],

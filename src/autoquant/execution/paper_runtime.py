@@ -18,6 +18,7 @@ from autoquant.errors import (
 )
 from autoquant.execution.control import KillSwitchControl, KillSwitchReason
 from autoquant.execution.models import PaperOrderHistory
+from autoquant.execution.paper_deployment import PaperDeployment
 from autoquant.execution.paper_scheduler import (
     CycleSink,
     LeasedPaperSchedulerRunner,
@@ -26,7 +27,6 @@ from autoquant.execution.paper_scheduler import (
 from autoquant.execution.paper_scheduler_store import PaperSchedulerRecovery
 from autoquant.execution.simulated_broker import SimulatedBrokerSummary
 from autoquant.execution.store import ExecutionStoreSummary
-from autoquant.execution.validated_sma import ValidatedSmaRegistration
 
 
 class ExecutionControlReader(Protocol):
@@ -55,7 +55,7 @@ class ActiveStrategyReader(Protocol):
         *,
         account_id: str,
         strategy_id: str,
-    ) -> ValidatedSmaRegistration | None: ...
+    ) -> PaperDeployment | None: ...
 
 
 class ExecutionRecoveryReader(Protocol):
@@ -115,7 +115,7 @@ class PaperRuntimeReadiness:
     account_id: str
     strategy_id: str
     registration_hash: str
-    instrument: str
+    instruments: tuple[str, ...]
     kill_switch_state_hash: str
     calendar_hash: str
     execution_order_count: int
@@ -124,11 +124,27 @@ class PaperRuntimeReadiness:
     checked_at: datetime
 
     def __post_init__(self) -> None:
+        if (
+            not self.instruments
+            or tuple(sorted(self.instruments)) != self.instruments
+            or len(set(self.instruments)) != len(self.instruments)
+        ):
+            raise ValueError(
+                "paper runtime readiness instruments must be sorted and unique"
+            )
         object.__setattr__(
             self,
             "checked_at",
             to_utc(self.checked_at, name="paper runtime readiness time"),
         )
+
+    @property
+    def instrument(self) -> str:
+        if len(self.instruments) != 1:
+            raise ValueError(
+                "portfolio readiness does not have one instrument"
+            )
+        return self.instruments[0]
 
 
 class ExactTradingCalendarReader:
@@ -306,7 +322,7 @@ class PaperRuntimeReadinessGate:
             account_id=self._account_id,
             strategy_id=self._strategy_id,
             registration_hash=registration.registration_hash,
-            instrument=registration.instrument,
+            instruments=registration.instruments,
             kill_switch_state_hash=control.state_hash,
             calendar_hash=session.content_hash,
             execution_order_count=len(execution_histories),

@@ -1,0 +1,152 @@
+CREATE TABLE IF NOT EXISTS paper_portfolio_registrations
+(
+    registration_hash text PRIMARY KEY CHECK (registration_hash ~ '^[0-9a-f]{64}$'),
+    account_id text NOT NULL CHECK (char_length(account_id) BETWEEN 1 AND 128),
+    strategy_id text NOT NULL CHECK (char_length(strategy_id) BETWEEN 1 AND 128),
+    strategy_version text NOT NULL CHECK (char_length(strategy_version) BETWEEN 1 AND 128),
+    valuation_manifest_hash text NOT NULL
+        REFERENCES dataset_manifests(manifest_hash),
+    valuation_manifest_as_of timestamptz NOT NULL,
+    component_count integer NOT NULL CHECK (component_count BETWEEN 3 AND 20),
+    total_allocation numeric NOT NULL CHECK (
+        total_allocation > 0 AND total_allocation <= 1
+    ),
+    risk_policy_hash text NOT NULL CHECK (risk_policy_hash ~ '^[0-9a-f]{64}$'),
+    approved_by text NOT NULL CHECK (char_length(approved_by) BETWEEN 1 AND 128),
+    approved_at timestamptz NOT NULL CHECK (
+        approved_at >= valuation_manifest_as_of
+    ),
+    execution_mode text NOT NULL CHECK (execution_mode = 'paper'),
+    portfolio_version text NOT NULL CHECK (
+        portfolio_version = 'validated-sma-portfolio-v1'
+    ),
+    artifact_payload jsonb NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    UNIQUE (account_id, strategy_id, strategy_version)
+);
+
+CREATE TABLE IF NOT EXISTS paper_portfolio_components
+(
+    component_hash text PRIMARY KEY CHECK (component_hash ~ '^[0-9a-f]{64}$'),
+    portfolio_registration_hash text NOT NULL
+        REFERENCES paper_portfolio_registrations(registration_hash),
+    instrument text NOT NULL CHECK (instrument ~ '^[0-9]{6}\.(XSHG|XSHE)$'),
+    experiment_id uuid NOT NULL REFERENCES validation_experiments(experiment_id),
+    validation_result_hash text NOT NULL CHECK (
+        validation_result_hash ~ '^[0-9a-f]{64}$'
+    ),
+    validation_manifest_hash text NOT NULL
+        REFERENCES dataset_manifests(manifest_hash),
+    signal_manifest_hash text NOT NULL REFERENCES dataset_manifests(manifest_hash),
+    signal_manifest_as_of timestamptz NOT NULL,
+    selected_fast integer NOT NULL CHECK (selected_fast >= 2),
+    selected_slow integer NOT NULL CHECK (selected_slow > selected_fast),
+    allocation numeric NOT NULL CHECK (allocation > 0 AND allocation <= 1),
+    slippage_bps numeric NOT NULL CHECK (
+        slippage_bps >= 0 AND slippage_bps <= 100
+    ),
+    rule_version text NOT NULL CHECK (char_length(rule_version) BETWEEN 1 AND 128),
+    component_payload jsonb NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    UNIQUE (portfolio_registration_hash, instrument)
+);
+
+CREATE TABLE IF NOT EXISTS paper_portfolio_activation_events
+(
+    event_hash text PRIMARY KEY CHECK (event_hash ~ '^[0-9a-f]{64}$'),
+    account_id text NOT NULL CHECK (char_length(account_id) BETWEEN 1 AND 128),
+    strategy_id text NOT NULL CHECK (char_length(strategy_id) BETWEEN 1 AND 128),
+    sequence bigint NOT NULL CHECK (sequence > 0),
+    action text NOT NULL CHECK (action IN ('approve', 'revoke')),
+    registration_hash text REFERENCES paper_portfolio_registrations(registration_hash),
+    actor text NOT NULL CHECK (char_length(actor) BETWEEN 1 AND 128),
+    reason text NOT NULL CHECK (char_length(reason) BETWEEN 1 AND 128),
+    occurred_at timestamptz NOT NULL,
+    previous_hash text NOT NULL CHECK (previous_hash ~ '^[0-9a-f]{64}$'),
+    event_payload jsonb NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    UNIQUE (account_id, strategy_id, sequence),
+    CHECK (
+        (action = 'approve' AND registration_hash IS NOT NULL)
+        OR (action = 'revoke' AND registration_hash IS NULL)
+    )
+);
+
+DO $create_paper_portfolio_immutable$
+DECLARE
+    table_name text;
+BEGIN
+    FOREACH table_name IN ARRAY ARRAY[
+        'paper_portfolio_registrations',
+        'paper_portfolio_components',
+        'paper_portfolio_activation_events'
+    ]
+    LOOP
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_trigger
+            WHERE tgname = table_name || '_immutable'
+              AND tgrelid = table_name::regclass
+        ) THEN
+            EXECUTE format(
+                'CREATE TRIGGER %I BEFORE UPDATE OR DELETE ON %I '
+                'FOR EACH ROW EXECUTE FUNCTION autoquant_reject_immutable_change()',
+                table_name || '_immutable',
+                table_name
+            );
+        END IF;
+    END LOOP;
+END;
+$create_paper_portfolio_immutable$;
+
+ALTER TABLE paper_runtime_unlock_evidence
+DROP CONSTRAINT IF EXISTS paper_runtime_unlock_evidence_registration_hash_fkey;
+
+CREATE OR REPLACE FUNCTION autoquant_validate_paper_deployment_hash()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    deployment_exists boolean;
+BEGIN
+    EXECUTE format(
+        'SELECT EXISTS ('
+        'SELECT 1 FROM %I.paper_strategy_registrations '
+        'WHERE registration_hash = $1 '
+        'UNION ALL '
+        'SELECT 1 FROM %I.paper_portfolio_registrations '
+        'WHERE registration_hash = $1'
+        ')',
+        TG_TABLE_SCHEMA,
+        TG_TABLE_SCHEMA
+    )
+    INTO deployment_exists
+    USING NEW.registration_hash;
+    IF NOT deployment_exists THEN
+        RAISE EXCEPTION 'paper deployment registration does not exist';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+DO $create_paper_deployment_hash_guard$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_trigger
+        WHERE tgname = 'paper_runtime_unlock_deployment_guard'
+          AND tgrelid = 'paper_runtime_unlock_evidence'::regclass
+    ) THEN
+        CREATE TRIGGER paper_runtime_unlock_deployment_guard
+        BEFORE INSERT OR UPDATE ON paper_runtime_unlock_evidence
+        FOR EACH ROW EXECUTE FUNCTION autoquant_validate_paper_deployment_hash();
+    END IF;
+END;
+$create_paper_deployment_hash_guard$;
+
+INSERT INTO schema_versions (component, version)
+VALUES ('postgres', 19)
+ON CONFLICT (component) DO UPDATE
+SET version = GREATEST(schema_versions.version, EXCLUDED.version),
+    applied_at = CASE
+        WHEN schema_versions.version < EXCLUDED.version THEN clock_timestamp()
+        ELSE schema_versions.applied_at
+    END;

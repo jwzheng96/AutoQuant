@@ -36,6 +36,7 @@ Apply `migrations/postgres/001_phase1.sql`,
 `migrations/postgres/016_paper_runtime_unlock.sql`, then
 `migrations/postgres/017_qmt_readonly_acceptance.sql`, then
 `migrations/postgres/018_qmt_recovery_drills.sql`, then
+`migrations/postgres/019_paper_portfolio_registry.sql`, then
 `migrations/clickhouse/001_phase1.sql` and
 `migrations/clickhouse/002_tushare_daily.sql` and
 `migrations/clickhouse/003_daily_coverage.sql` in order, only to explicitly authorized
@@ -239,6 +240,30 @@ experiment, selects the modal training-fold parameters without using OOS returns
 reads exact session rules, checks the deployed allocation against the shared paper risk
 policy, and appends an immutable approval event. It cannot approve a live strategy and cannot
 reset the kill switch. Revoke before replacing an active artifact:
+
+For the diversified runtime, approve 3-20 unique instruments together. Each
+`--experiment-id` is positionally paired with the following repeated
+`--signal-manifest-hash`; every pair must independently pass the same OOS checks.
+The valuation manifest is a separate production-complete manifest whose universe
+must exactly equal all component instruments:
+
+```bash
+uv run autoquant approve-paper-portfolio \
+  --experiment-id <experiment-a> \
+  --signal-manifest-hash <signal-manifest-a> \
+  --experiment-id <experiment-b> \
+  --signal-manifest-hash <signal-manifest-b> \
+  --experiment-id <experiment-c> \
+  --signal-manifest-hash <signal-manifest-c> \
+  --valuation-manifest-hash <exact-three-instrument-manifest> \
+  --reference-date 2026-07-23 \
+  --approved-by operator \
+  --confirm-paper-only
+```
+
+Component allocations must each stay within the position cap and their sum must
+stay within the gross-exposure cap. Single and portfolio deployments are mutually
+exclusive, and the same revocation command handles either kind:
 
 ```bash
 uv run autoquant revoke-paper-strategy \

@@ -14,6 +14,9 @@ from autoquant.config import AppSettings
 from autoquant.errors import AutoQuantError, PersistenceUnavailableError
 from autoquant.execution.control import KillSwitchReason
 from autoquant.execution.control_store import PostgresExecutionControlRepository
+from autoquant.execution.paper_deployment import (
+    PostgresPaperDeploymentRegistry,
+)
 from autoquant.execution.paper_scheduler_store import PostgresPaperSchedulerRepository
 from autoquant.execution.promotion_audit import (
     PaperPromotionAuditor,
@@ -29,7 +32,9 @@ from autoquant.execution.qmt_session_store import (
 )
 from autoquant.execution.simulated_broker import PersistentSimulatedBroker
 from autoquant.execution.store import PostgresPaperExecutionRepository
-from autoquant.execution.strategy_registry_store import PostgresPaperStrategyRegistry
+from autoquant.execution.validated_sma_portfolio import (
+    ValidatedSmaPortfolioRegistration,
+)
 from autoquant.operations import run_daily_ingestion
 from autoquant.web.backtest_store import PostgresBacktestRepository
 from autoquant.web.models import (
@@ -42,6 +47,7 @@ from autoquant.web.models import (
     OperatorOverview,
     PaperExecutionStatus,
     PaperPromotionStatus,
+    PaperStrategyComponentStatus,
     PaperStrategyStatus,
     PromotionGateView,
     QmtReadOnlyStatus,
@@ -150,7 +156,7 @@ class ConsoleService:
         execution_control_repository: PostgresExecutionControlRepository | None = None,
         simulated_broker: PersistentSimulatedBroker | None = None,
         scheduler_repository: PostgresPaperSchedulerRepository | None = None,
-        strategy_registry: PostgresPaperStrategyRegistry | None = None,
+        strategy_registry: PostgresPaperDeploymentRegistry | None = None,
         qmt_acceptance_repository: (
             PostgresQmtReadOnlyAcceptanceRepository | None
         ) = None,
@@ -657,11 +663,53 @@ class ConsoleService:
                     "explicit_paper_approval",
                 ),
             )
+        if isinstance(
+            registration,
+            ValidatedSmaPortfolioRegistration,
+        ):
+            return PaperStrategyStatus(
+                status="approved",
+                active=True,
+                account_id=account_id,
+                strategy_id=strategy_id,
+                deployment_kind="portfolio",
+                registration_hash=registration.registration_hash,
+                strategy_version=registration.strategy_version,
+                instruments=registration.instruments,
+                components=tuple(
+                    PaperStrategyComponentStatus(
+                        experiment_id=value.experiment_id,
+                        instrument=value.instrument,
+                        fast_sessions=value.fast_sessions,
+                        slow_sessions=value.slow_sessions,
+                        allocation=value.allocation,
+                        validation_result_hash=(
+                            value.validation_result_hash
+                        ),
+                        signal_manifest_hash=(
+                            value.signal_manifest_hash
+                        ),
+                    )
+                    for value in registration.components
+                ),
+                total_allocation=registration.total_allocation,
+                valuation_manifest_hash=(
+                    registration.valuation_manifest_hash
+                ),
+                approved_by=registration.approved_by,
+                approved_at=registration.approved_at,
+                remaining_gates=(
+                    "resident_scheduler_runtime",
+                    "windows_qmt_readonly_reconciliation",
+                    "continuous_paper_evidence",
+                ),
+            )
         return PaperStrategyStatus(
             status="approved",
             active=True,
             account_id=account_id,
             strategy_id=strategy_id,
+            deployment_kind="single",
             registration_hash=registration.registration_hash,
             strategy_version=registration.strategy_version,
             experiment_id=registration.experiment_id,
@@ -673,6 +721,11 @@ class ConsoleService:
             signal_manifest_hash=registration.signal_manifest_hash,
             approved_by=registration.approved_by,
             approved_at=registration.approved_at,
+            instruments=registration.instruments,
+            total_allocation=registration.total_allocation,
+            valuation_manifest_hash=(
+                registration.valuation_manifest_hash
+            ),
             remaining_gates=(
                 "resident_scheduler_runtime",
                 "windows_qmt_readonly_reconciliation",

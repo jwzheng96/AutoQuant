@@ -114,6 +114,7 @@ def _service(
         execution_mode="paper",
         registration_hash="c" * 64,
         instrument=INSTRUMENT,
+        instruments=(INSTRUMENT,),
     )
     leases = AsyncMock()
     leases.verify_owner.return_value = SimpleNamespace(

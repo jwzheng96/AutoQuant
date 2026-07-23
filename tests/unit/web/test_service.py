@@ -1,4 +1,5 @@
 from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
@@ -7,6 +8,10 @@ import pytest
 from autoquant.config import AppSettings
 from autoquant.errors import PersistenceUnavailableError
 from autoquant.execution.control import KillSwitchReason
+from autoquant.execution.validated_sma import ValidatedSmaRegistration
+from autoquant.execution.validated_sma_portfolio import (
+    ValidatedSmaPortfolioRegistration,
+)
 from autoquant.web.models import (
     BacktestRun,
     BacktestRunRequest,
@@ -274,6 +279,64 @@ async def test_strategy_registry_status_is_inactive_without_approval() -> None:
     assert status.active is False
     assert status.live_trading_locked is True
     assert "explicit_paper_approval" in status.remaining_gates
+
+
+@pytest.mark.asyncio
+async def test_strategy_status_exposes_portfolio_components() -> None:
+    instruments = (
+        "000001.XSHE",
+        "600000.XSHG",
+        "600519.XSHG",
+    )
+    components = tuple(
+        ValidatedSmaRegistration(
+            account_id="paper-main",
+            strategy_id="validated-sma-paper",
+            strategy_version=f"sma-paper-v1:{index}",
+            experiment_id=uuid4(),
+            validation_result_hash=f"{index:x}" * 64,
+            validation_manifest_hash=f"{index + 3:x}" * 64,
+            signal_manifest_hash=f"{index + 6:x}" * 64,
+            signal_manifest_as_of=NOW - timedelta(hours=1),
+            instrument=instrument,
+            fast_sessions=5,
+            slow_sessions=20,
+            allocation=Decimal("0.20"),
+            slippage_bps=Decimal("5"),
+            risk_policy_hash="a" * 64,
+            rule_version=f"rules-{index}",
+            approved_by="operator",
+            approved_at=NOW,
+        )
+        for index, instrument in enumerate(instruments, start=1)
+    )
+    portfolio = ValidatedSmaPortfolioRegistration(
+        account_id="paper-main",
+        strategy_id="validated-sma-paper",
+        strategy_version="sma-portfolio-paper-v1:test",
+        components=components,
+        valuation_manifest_hash="b" * 64,
+        valuation_manifest_as_of=NOW - timedelta(hours=1),
+        risk_policy_hash="a" * 64,
+        approved_by="operator",
+        approved_at=NOW,
+    )
+    registry = MagicMock()
+    registry.active = AsyncMock(return_value=portfolio)
+    service = _service(
+        operator=MagicMock(),
+        control=MagicMock(),
+        runner=AsyncMock(),
+        strategy_registry=registry,
+    )
+
+    status = await service.paper_strategy_status()
+
+    assert status.deployment_kind == "portfolio"
+    assert status.instruments == instruments
+    assert len(status.components) == 3
+    assert status.total_allocation == Decimal("0.60")
+    assert status.instrument is None
 
 
 @pytest.mark.asyncio

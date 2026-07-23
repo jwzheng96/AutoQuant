@@ -87,7 +87,7 @@ async def test_revocation_stops_when_kill_switch_is_inactive() -> None:
     controls.replay = AsyncMock(return_value=MagicMock(active=False))
     controls.close = AsyncMock()
     registry = MagicMock()
-    registry.revoke = AsyncMock()
+    registry.active = AsyncMock()
     registry.close = AsyncMock()
     frozen_datetime = MagicMock()
     frozen_datetime.now.return_value = NOW
@@ -98,7 +98,7 @@ async def test_revocation_stops_when_kill_switch_is_inactive() -> None:
             return_value=controls,
         ),
         patch(
-            "autoquant.operations.PostgresPaperStrategyRegistry.connect",
+            "autoquant.operations.PostgresPaperDeploymentRegistry.connect",
             return_value=registry,
         ),
     ):
@@ -109,6 +109,6 @@ async def test_revocation_stops_when_kill_switch_is_inactive() -> None:
                 reason="scheduled_research_refresh",
             )
 
-    registry.revoke.assert_not_awaited()
+    registry.active.assert_not_awaited()
     registry.close.assert_awaited_once()
     controls.close.assert_awaited_once()

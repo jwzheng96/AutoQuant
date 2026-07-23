@@ -655,7 +655,7 @@ def test_paper_sma_approval_emits_only_paper_artifact_metadata() -> None:
             [
                 "approve-paper-sma",
                 "--experiment-id",
-                payload["experiment_id"],
+                str(payload["experiment_id"]),
                 "--signal-manifest-hash",
                 "a" * 64,
                 "--reference-date",
@@ -664,6 +664,101 @@ def test_paper_sma_approval_emits_only_paper_artifact_metadata() -> None:
                 "operator",
                 "--confirm-paper-only",
             ],
+            env={
+                "AQ_ENVIRONMENT": "paper",
+                "AQ_POSTGRES_DSN": "postgresql+asyncpg://sensitive",
+            },
+        )
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == payload
+    assert "sensitive" not in result.stdout
+    approval.assert_awaited_once()
+
+
+def test_paper_portfolio_approval_requires_matched_components() -> None:
+    approval = AsyncMock()
+    with patch(
+        "autoquant.cli.approve_paper_sma_portfolio_strategy",
+        new=approval,
+    ):
+        denied = runner.invoke(
+            app,
+            [
+                "approve-paper-portfolio",
+                "--experiment-id",
+                "11111111-1111-1111-1111-111111111111",
+                "--signal-manifest-hash",
+                "a" * 64,
+                "--valuation-manifest-hash",
+                "b" * 64,
+                "--reference-date",
+                "2026-07-23",
+                "--approved-by",
+                "operator",
+                "--confirm-paper-only",
+            ],
+        )
+
+    assert denied.exit_code == 2
+    assert approval.await_count == 0
+
+
+def test_paper_portfolio_approval_emits_redacted_metadata() -> None:
+    experiment_ids = (
+        "11111111-1111-1111-1111-111111111111",
+        "22222222-2222-2222-2222-222222222222",
+        "33333333-3333-3333-3333-333333333333",
+    )
+    payload = {
+        "account_id": "paper-main",
+        "components": [],
+        "execution_mode": "paper",
+        "instruments": [
+            "000001.XSHE",
+            "600000.XSHG",
+            "600519.XSHG",
+        ],
+        "live_trading_locked": True,
+        "registration_hash": "c" * 64,
+        "status": "approved",
+        "strategy_id": "validated-sma-paper",
+        "strategy_version": "sma-portfolio-paper-v1:test",
+        "valuation_manifest_hash": "b" * 64,
+    }
+    approval = AsyncMock(return_value=payload)
+    arguments = ["approve-paper-portfolio"]
+    for experiment_id, suffix in zip(
+        experiment_ids,
+        ("d", "e", "f"),
+        strict=True,
+    ):
+        arguments.extend(
+            [
+                "--experiment-id",
+                experiment_id,
+                "--signal-manifest-hash",
+                suffix * 64,
+            ]
+        )
+    arguments.extend(
+        [
+            "--valuation-manifest-hash",
+            "b" * 64,
+            "--reference-date",
+            "2026-07-23",
+            "--approved-by",
+            "operator",
+            "--confirm-paper-only",
+        ]
+    )
+    with patch(
+        "autoquant.cli.approve_paper_sma_portfolio_strategy",
+        new=approval,
+    ):
+        result = runner.invoke(
+            app,
+            arguments,
             env={
                 "AQ_ENVIRONMENT": "paper",
                 "AQ_POSTGRES_DSN": "postgresql+asyncpg://sensitive",
