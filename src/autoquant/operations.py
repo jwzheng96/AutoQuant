@@ -173,7 +173,7 @@ class _RecyclingDailyDatasetReader:
         *,
         clickhouse_dsn: str,
         control_repository: PostgresControlRepository,
-        recycle_after: int = 20,
+        recycle_after: int = 5,
     ) -> None:
         if recycle_after < 1 or recycle_after > 100:
             raise ValueError("ClickHouse recycle interval is invalid")
@@ -202,6 +202,7 @@ class _RecyclingDailyDatasetReader:
         try:
             dataset = await reader.query(manifest_hash, as_of)
         except PersistenceUnavailableError:
+            await self._purge_allocator(strict=False)
             await self.close()
             raise
         self._queries += 1
@@ -215,6 +216,7 @@ class _RecyclingDailyDatasetReader:
         self._queries = 0
 
     async def _reconnect(self) -> None:
+        await self._purge_allocator(strict=True)
         await self.close()
         self._market = await ClickHouseDailyRepository.connect(
             dsn=self._dsn,
@@ -224,6 +226,19 @@ class _RecyclingDailyDatasetReader:
             control_repository=self._control,
             market_repository=self._market,
         )
+
+    async def _purge_allocator(self, *, strict: bool) -> None:
+        if self._market is None:
+            return
+        try:
+            await self._market.client.command(
+                "SYSTEM JEMALLOC PURGE"
+            )
+        except Exception:
+            if strict:
+                raise PersistenceUnavailableError(
+                    "ClickHouse allocator purge failed"
+                ) from None
 
 
 async def run_daily_ingestion(

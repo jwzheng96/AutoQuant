@@ -141,8 +141,10 @@ def _settings() -> AppSettings:
 async def test_daily_dataset_reader_recycles_clickhouse_connections() -> None:
     market_one = MagicMock()
     market_one.client.close = AsyncMock()
+    market_one.client.command = AsyncMock()
     market_two = MagicMock()
     market_two.client.close = AsyncMock()
+    market_two.client.command = AsyncMock()
     reader_one = MagicMock()
     reader_one.query = AsyncMock(side_effect=["one", "two"])
     reader_two = MagicMock()
@@ -170,6 +172,9 @@ async def test_daily_dataset_reader_recycles_clickhouse_connections() -> None:
 
     assert connect.await_count == 2
     market_one.client.close.assert_awaited_once()
+    market_one.client.command.assert_awaited_once_with(
+        "SYSTEM JEMALLOC PURGE"
+    )
     market_two.client.close.assert_awaited_once()
 
 
@@ -177,8 +182,10 @@ async def test_daily_dataset_reader_recycles_clickhouse_connections() -> None:
 async def test_daily_dataset_reader_drops_failed_clickhouse_connection() -> None:
     market_one = MagicMock()
     market_one.client.close = AsyncMock()
+    market_one.client.command = AsyncMock()
     market_two = MagicMock()
     market_two.client.close = AsyncMock()
+    market_two.client.command = AsyncMock()
     reader_one = MagicMock()
     reader_one.query = AsyncMock(
         side_effect=PersistenceUnavailableError("malformed response")
@@ -210,6 +217,9 @@ async def test_daily_dataset_reader_drops_failed_clickhouse_connection() -> None
 
     assert connect.await_count == 2
     market_one.client.close.assert_awaited_once()
+    market_one.client.command.assert_awaited_once_with(
+        "SYSTEM JEMALLOC PURGE"
+    )
     market_two.client.close.assert_awaited_once()
 
 

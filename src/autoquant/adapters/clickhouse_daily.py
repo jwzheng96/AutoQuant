@@ -31,13 +31,32 @@ _LIFECYCLE_TABLE = "instrument_lifecycle_revisions"
 _SUSPENSION_TABLE = "daily_suspension_revisions"
 _LIMIT_TABLE = "daily_price_limit_revisions"
 _HISTORICAL_QUERY_SETTINGS: dict[str, int] = {
-    "max_block_size": 8_192,
-    "max_bytes_before_external_group_by": 64 * 1024 * 1024,
+    "max_block_size": 1_024,
+    "max_bytes_before_external_group_by": 32 * 1024 * 1024,
+    "max_read_buffer_size": 64 * 1024,
+    "max_read_buffer_size_local_fs": 32 * 1024,
     "max_threads": 1,
 }
 _TABLE_IDENTIFIER = re.compile(
     r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?\Z"
 )
+
+
+def _year_intervals(
+    start: date,
+    end: date,
+) -> tuple[tuple[date, date], ...]:
+    if start > end:
+        raise ValueError("historical interval is invalid")
+    intervals: list[tuple[date, date]] = []
+    current = start
+    while current <= end:
+        chunk_end = min(end, date(current.year, 12, 31))
+        intervals.append((current, chunk_end))
+        current = date(current.year + 1, 1, 1)
+    return tuple(intervals)
+
+
 _BAR_NAMESPACE = UUID("59a27670-8f4f-4d69-a823-d3cc2406d8a5")
 _FACTOR_NAMESPACE = UUID("7fcb33c7-1470-4e80-a702-afcf797cc651")
 _SESSION_NAMESPACE = UUID("3773b145-b18c-468b-bc64-8092a0421687")
@@ -531,7 +550,27 @@ FROM
 )
 ORDER BY instrument, session_date
 """.strip()
-        return await self._coverage_query(sql, result_columns, parameters)
+        start = parameters.get("start_date")
+        end = parameters.get("end_date")
+        if not isinstance(start, date) or not isinstance(end, date):
+            raise ValueError(
+                "coverage query requires date boundaries"
+            )
+        rows: list[tuple[Any, ...]] = []
+        for chunk_start, chunk_end in _year_intervals(start, end):
+            chunk_parameters = {
+                **parameters,
+                "start_date": chunk_start,
+                "end_date": chunk_end,
+            }
+            rows.extend(
+                await self._coverage_query(
+                    sql,
+                    result_columns,
+                    chunk_parameters,
+                )
+            )
+        return tuple(rows)
 
     async def _coverage_query(
         self,
@@ -596,32 +635,40 @@ ORDER BY instrument, session_date
         if not instruments:
             return ()
         cutoff = to_utc(as_of, name="as_of")
-        parameters: dict[str, object] = {
+        base_parameters: dict[str, object] = {
             "source": self._source,
             "instruments": list(instruments),
-            "start_date": start,
-            "end_date": end,
             "as_of_64": cutoff,
         }
         sql = self._as_of_sql(table, result_columns, tuple_columns)
-        try:
-            result = await self._client.query(
-                query=sql,
-                parameters=parameters,
-                settings=_HISTORICAL_QUERY_SETTINGS,
-                tz_mode="aware",
-            )
-            rows = tuple(tuple(row) for row in result.result_rows)
-            actual_columns = tuple(result.column_names)
-            if not rows and not actual_columns:
-                return ()
-            if actual_columns != result_columns:
-                raise ValueError("unexpected columns")
-            return rows
-        except Exception:
-            raise PersistenceUnavailableError(
-                "ClickHouse returned malformed daily rows"
-            ) from None
+        rows: list[tuple[Any, ...]] = []
+        for chunk_start, chunk_end in _year_intervals(start, end):
+            parameters = {
+                **base_parameters,
+                "start_date": chunk_start,
+                "end_date": chunk_end,
+            }
+            try:
+                result = await self._client.query(
+                    query=sql,
+                    parameters=parameters,
+                    settings=_HISTORICAL_QUERY_SETTINGS,
+                    tz_mode="aware",
+                )
+                chunk_rows = tuple(
+                    tuple(row) for row in result.result_rows
+                )
+                actual_columns = tuple(result.column_names)
+                if not chunk_rows and not actual_columns:
+                    continue
+                if actual_columns != result_columns:
+                    raise ValueError("unexpected columns")
+                rows.extend(chunk_rows)
+            except Exception as error:
+                raise PersistenceUnavailableError(
+                    "ClickHouse returned malformed daily rows"
+                ) from error
+        return tuple(rows)
 
     @staticmethod
     def _as_of_sql(

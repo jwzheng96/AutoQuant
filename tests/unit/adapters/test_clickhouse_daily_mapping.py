@@ -14,6 +14,7 @@ from clickhouse_connect.driver.binding import bind_query
 from autoquant.adapters.clickhouse_daily import (
     ClickHouseDailyRepository,
     ClickHouseMergePressure,
+    _year_intervals,
 )
 from autoquant.data.daily_models import AdjustmentFactorRevision, DailyBarRevision
 from autoquant.errors import PersistenceUnavailableError
@@ -87,6 +88,17 @@ def test_migration_adds_two_append_only_tables_and_version_two() -> None:
     assert "adjustment_factor_revisions" in migration
     assert "SELECT 'clickhouse', 2" in migration
     assert migration.count("ENGINE = MergeTree") == 2
+
+
+def test_historical_intervals_are_split_at_year_boundaries() -> None:
+    assert _year_intervals(
+        date(2024, 12, 31),
+        date(2026, 1, 2),
+    ) == (
+        (date(2024, 12, 31), date(2024, 12, 31)),
+        (date(2025, 1, 1), date(2025, 12, 31)),
+        (date(2026, 1, 1), date(2026, 1, 2)),
+    )
 
 
 @pytest.mark.asyncio
@@ -209,8 +221,10 @@ async def test_query_bars_binds_filters_and_verifies_content_hash() -> None:
         "as_of_64": AVAILABLE,
     }
     assert call.kwargs["settings"] == {
-        "max_block_size": 8192,
-        "max_bytes_before_external_group_by": 67_108_864,
+        "max_block_size": 1024,
+        "max_bytes_before_external_group_by": 33_554_432,
+        "max_read_buffer_size": 65_536,
+        "max_read_buffer_size_local_fs": 32_768,
         "max_threads": 1,
     }
     rendered_sql, bound_parameters = bind_query(
@@ -286,11 +300,38 @@ async def test_empty_driver_results_are_valid_empty_daily_and_coverage_queries()
     assert all(
         call.kwargs["settings"]
         == {
-            "max_block_size": 8192,
-            "max_bytes_before_external_group_by": 67_108_864,
+            "max_block_size": 1024,
+            "max_bytes_before_external_group_by": 33_554_432,
+            "max_read_buffer_size": 65_536,
+            "max_read_buffer_size_local_fs": 32_768,
             "max_threads": 1,
         }
         for call in client.query.await_args_list
+    )
+
+
+@pytest.mark.asyncio
+async def test_long_history_queries_each_year_separately() -> None:
+    client = RecordingClient()
+    repo = repository(client)
+
+    assert await repo.query_bars_as_of(
+        ("000001.XSHE",),
+        date(2024, 12, 31),
+        date(2026, 1, 2),
+        AVAILABLE,
+    ) == ()
+
+    assert client.query.await_count == 3
+    assert tuple(
+        (
+            call.kwargs["parameters"]["start_date"],
+            call.kwargs["parameters"]["end_date"],
+        )
+        for call in client.query.await_args_list
+    ) == _year_intervals(
+        date(2024, 12, 31),
+        date(2026, 1, 2),
     )
 
 
