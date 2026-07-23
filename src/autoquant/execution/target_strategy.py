@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date, datetime
+from decimal import Decimal
 from typing import Protocol
 
 from autoquant.backtest.models import InstrumentRules, OrderSide
@@ -135,7 +136,12 @@ class TargetPositionPaperIntentSource:
             if delta == 0:
                 continue
             if delta > 0:
-                quantity = _bounded_buy_quantity(delta=delta, rules=target.rules)
+                quantity = _bounded_buy_quantity(
+                    delta=delta,
+                    rules=target.rules,
+                    policy=target.policy,
+                    reference_price=context.quotes[target.instrument].ask_price,
+                )
                 side = OrderSide.BUY
             else:
                 sellable = 0 if position is None else position.sellable_quantity
@@ -143,6 +149,8 @@ class TargetPositionPaperIntentSource:
                     requested=-delta,
                     sellable=sellable,
                     rules=target.rules,
+                    policy=target.policy,
+                    reference_price=context.quotes[target.instrument].bid_price,
                 )
                 side = OrderSide.SELL
             if quantity == 0:
@@ -207,8 +215,11 @@ def _bounded_buy_quantity(
     *,
     delta: int,
     rules: InstrumentRules,
+    policy: RiskPolicy,
+    reference_price: Decimal,
 ) -> int:
-    bounded = min(delta, rules.max_order_quantity)
+    risk_maximum = int(policy.max_order_notional // reference_price)
+    bounded = min(delta, rules.max_order_quantity, risk_maximum)
     if bounded < rules.buy_minimum:
         return 0
     return rules.buy_minimum + (
@@ -221,8 +232,16 @@ def _bounded_sell_quantity(
     requested: int,
     sellable: int,
     rules: InstrumentRules,
+    policy: RiskPolicy,
+    reference_price: Decimal,
 ) -> int:
-    bounded = min(requested, sellable, rules.max_order_quantity)
+    risk_maximum = int(policy.max_order_notional // reference_price)
+    bounded = min(
+        requested,
+        sellable,
+        rules.max_order_quantity,
+        risk_maximum,
+    )
     return (bounded // rules.sell_step) * rules.sell_step
 
 

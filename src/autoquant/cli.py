@@ -5,6 +5,7 @@ import json
 from collections.abc import Mapping
 from datetime import UTC, date, datetime, timedelta
 from typing import Annotated, NoReturn
+from uuid import UUID
 
 import typer
 from pydantic import SecretStr, ValidationError
@@ -23,7 +24,9 @@ from autoquant.execution.control_store import PostgresExecutionControlRepository
 from autoquant.execution.qmt_preflight import inspect_qmt_readiness
 from autoquant.execution.qmt_session_store import PostgresQmtSessionLeaseRepository
 from autoquant.operations import (
+    approve_paper_sma_strategy,
     inspect_paper_pre_open,
+    revoke_paper_strategy,
     run_daily_ingestion,
     run_session_reference_refresh,
     run_trading_calendar_refresh,
@@ -351,6 +354,66 @@ def refresh_session_reference(
     _emit(payload)
     if payload["status"] != "completed":
         raise typer.Exit(code=2)
+
+
+@app.command("approve-paper-sma")
+def approve_paper_sma(
+    experiment_id: Annotated[str, typer.Option("--experiment-id")],
+    signal_manifest_hash: Annotated[str, typer.Option("--signal-manifest-hash")],
+    reference_date: Annotated[str, typer.Option("--reference-date")],
+    approved_by: Annotated[str, typer.Option("--approved-by")],
+    confirm_paper_only: Annotated[
+        bool,
+        typer.Option("--confirm-paper-only"),
+    ] = False,
+) -> None:
+    """Approve one gate-passing SMA artifact for paper only; never unlock live."""
+
+    if not confirm_paper_only:
+        _fail("paper-only approval confirmation is required")
+    try:
+        parsed_experiment_id = UUID(experiment_id)
+        payload = asyncio.run(
+            approve_paper_sma_strategy(
+                _settings(),
+                experiment_id=parsed_experiment_id,
+                signal_manifest_hash=signal_manifest_hash,
+                reference_session_date=_parse_date(
+                    reference_date,
+                    name="reference-date",
+                ),
+                approved_by=approved_by,
+            )
+        )
+    except (AutoQuantError, LookupError, ValueError):
+        _fail("paper SMA approval failed")
+    _emit(payload)
+
+
+@app.command("revoke-paper-strategy")
+def revoke_paper_strategy_command(
+    revoked_by: Annotated[str, typer.Option("--revoked-by")],
+    reason: Annotated[str, typer.Option("--reason")],
+    confirm_revoke: Annotated[
+        bool,
+        typer.Option("--confirm-revoke"),
+    ] = False,
+) -> None:
+    """Revoke the configured paper strategy; live trading remains locked."""
+
+    if not confirm_revoke:
+        _fail("paper strategy revocation confirmation is required")
+    try:
+        payload = asyncio.run(
+            revoke_paper_strategy(
+                _settings(),
+                revoked_by=revoked_by,
+                reason=reason,
+            )
+        )
+    except (AutoQuantError, LookupError, ValueError):
+        _fail("paper strategy revocation failed")
+    _emit(payload)
 
 
 async def _ingest(

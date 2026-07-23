@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
+from uuid import UUID
 
 from pydantic import SecretStr
 
@@ -8,14 +9,23 @@ from autoquant.adapters.clickhouse_daily import ClickHouseDailyRepository
 from autoquant.adapters.postgres import PostgresControlRepository
 from autoquant.adapters.tushare import TushareDailySource, TushareHttpClient
 from autoquant.clock import to_shanghai
-from autoquant.config import AppSettings
+from autoquant.config import AppSettings, RuntimeEnvironment
 from autoquant.data.calendar_refresh import TradingCalendarRefreshService
-from autoquant.data.daily_ingestion import DailyIngestionRequest, DailyIngestionService
+from autoquant.data.daily_ingestion import (
+    DailyIngestionRequest,
+    DailyIngestionService,
+    ValidatedDailyDatasetReader,
+)
 from autoquant.data.daily_quality import DailyQualityGate
 from autoquant.data.session_reference import SessionReferenceRefreshService
 from autoquant.errors import MissingCapabilityError
 from autoquant.execution.control_store import PostgresExecutionControlRepository
+from autoquant.execution.paper_policy import default_paper_policy
 from autoquant.execution.pre_open_marks import DailyClosePreOpenMarkReader
+from autoquant.execution.session_rules import ExactSessionRuleReader
+from autoquant.execution.strategy_registry_store import PostgresPaperStrategyRegistry
+from autoquant.web.strategy_promotion import PaperStrategyPromotionService
+from autoquant.web.validation_store import PostgresValidationRepository
 
 
 def configured_dsn(value: SecretStr | None, *, capability: str) -> str:
@@ -223,3 +233,148 @@ async def run_session_reference_refresh(
         "session_date": result.session_date.isoformat(),
         "status": result.status,
     }
+
+
+async def approve_paper_sma_strategy(
+    settings: AppSettings,
+    *,
+    experiment_id: UUID,
+    signal_manifest_hash: str,
+    reference_session_date: date,
+    approved_by: str,
+) -> dict[str, object]:
+    """Approve one OOS candidate for paper only while every safety fence remains active."""
+
+    if settings.environment is not RuntimeEnvironment.PAPER:
+        raise MissingCapabilityError("paper environment is not configured")
+    now = datetime.now(UTC)
+    shanghai_today = to_shanghai(now).date()
+    lag_days = (shanghai_today - reference_session_date).days
+    if lag_days < 0 or lag_days > 4:
+        raise ValueError(
+            "paper approval requires a current or recent exact session reference"
+        )
+    postgres_dsn = configured_dsn(
+        settings.postgres_dsn,
+        capability="PostgreSQL",
+    )
+    clickhouse: ClickHouseDailyRepository | None = None
+    control: PostgresControlRepository | None = None
+    execution_controls: PostgresExecutionControlRepository | None = None
+    validations: PostgresValidationRepository | None = None
+    registry: PostgresPaperStrategyRegistry | None = None
+    try:
+        clickhouse = await ClickHouseDailyRepository.connect(
+            dsn=configured_dsn(settings.clickhouse_dsn, capability="ClickHouse"),
+            source="tushare",
+        )
+        control = PostgresControlRepository.connect(dsn=postgres_dsn)
+        execution_controls = PostgresExecutionControlRepository.connect(
+            dsn=postgres_dsn
+        )
+        validations = PostgresValidationRepository.connect(dsn=postgres_dsn)
+        registry = PostgresPaperStrategyRegistry.connect(dsn=postgres_dsn)
+        fence = await execution_controls.replay(
+            account_id=settings.paper_account_id
+        )
+        if not fence.active:
+            raise MissingCapabilityError(
+                "paper strategy approval requires the kill switch to remain active"
+            )
+        detail = await validations.detail(experiment_id)
+        instrument = detail.experiment.request.instrument
+        rules = await ExactSessionRuleReader(
+            market_repository=clickhouse,
+            control_repository=control,
+        ).read(
+            instruments=(instrument,),
+            session_date=reference_session_date,
+            as_of=now,
+        )
+        if rules.suspended_instruments:
+            raise ValueError("paper strategy cannot be approved while suspended")
+        policy = default_paper_policy((instrument,))
+        registration = await PaperStrategyPromotionService(
+            validations=validations,
+            controls=control,
+            datasets=ValidatedDailyDatasetReader(
+                control_repository=control,
+                market_repository=clickhouse,
+            ),
+            registrations=registry,
+        ).approve_sma(
+            account_id=settings.paper_account_id,
+            strategy_id=settings.paper_strategy_id,
+            experiment_id=experiment_id,
+            signal_manifest_hash=signal_manifest_hash,
+            rules=rules.rules[0],
+            policy=policy,
+            approved_by=approved_by,
+            approved_at=now,
+        )
+        return {
+            "account_id": registration.account_id,
+            "execution_mode": registration.execution_mode,
+            "experiment_id": str(registration.experiment_id),
+            "fast_sessions": registration.fast_sessions,
+            "instrument": registration.instrument,
+            "live_trading_locked": True,
+            "registration_hash": registration.registration_hash,
+            "signal_manifest_hash": registration.signal_manifest_hash,
+            "slow_sessions": registration.slow_sessions,
+            "status": "approved",
+            "strategy_id": registration.strategy_id,
+            "strategy_version": registration.strategy_version,
+        }
+    finally:
+        if registry is not None:
+            await registry.close()
+        if validations is not None:
+            await validations.close()
+        if execution_controls is not None:
+            await execution_controls.close()
+        if control is not None:
+            await control.close()
+        if clickhouse is not None:
+            await clickhouse.client.close()
+
+
+async def revoke_paper_strategy(
+    settings: AppSettings,
+    *,
+    revoked_by: str,
+    reason: str,
+) -> dict[str, object]:
+    """Append a paper-strategy revocation while keeping the kill switch active."""
+
+    if settings.environment is not RuntimeEnvironment.PAPER:
+        raise MissingCapabilityError("paper environment is not configured")
+    postgres_dsn = configured_dsn(
+        settings.postgres_dsn,
+        capability="PostgreSQL",
+    )
+    controls = PostgresExecutionControlRepository.connect(dsn=postgres_dsn)
+    registry = PostgresPaperStrategyRegistry.connect(dsn=postgres_dsn)
+    now = datetime.now(UTC)
+    try:
+        fence = await controls.replay(account_id=settings.paper_account_id)
+        if not fence.active:
+            raise MissingCapabilityError(
+                "paper strategy revocation requires the kill switch to remain active"
+            )
+        await registry.revoke(
+            account_id=settings.paper_account_id,
+            strategy_id=settings.paper_strategy_id,
+            revoked_by=revoked_by,
+            reason=reason,
+            revoked_at=now,
+        )
+        return {
+            "account_id": settings.paper_account_id,
+            "live_trading_locked": True,
+            "status": "revoked",
+            "strategy_id": settings.paper_strategy_id,
+        }
+    finally:
+        await registry.close()
+        await controls.close()

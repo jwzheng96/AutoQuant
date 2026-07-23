@@ -107,7 +107,11 @@ def _context(
     )
 
 
-def _signal(*, target_quantity: int) -> TargetPortfolioSignal:
+def _signal(
+    *,
+    target_quantity: int,
+    max_order_notional: Decimal = Decimal("100000"),
+) -> TargetPortfolioSignal:
     return TargetPortfolioSignal(
         strategy_id="audited-target-v1",
         strategy_version="audited-target-implementation-v1",
@@ -118,7 +122,10 @@ def _signal(*, target_quantity: int) -> TargetPortfolioSignal:
                 instrument=INSTRUMENT,
                 target_quantity=target_quantity,
                 rules=_rules(),
-                policy=RiskPolicy(allowed_instruments=(INSTRUMENT,)),
+                policy=RiskPolicy(
+                    allowed_instruments=(INSTRUMENT,),
+                    max_order_notional=max_order_notional,
+                ),
             ),
         ),
         source_evidence_hash="f" * 64,
@@ -157,6 +164,50 @@ async def test_target_strategy_respects_sellable_quantity_and_sell_step() -> Non
     )
 
     evaluation = await source.evaluate(_context(quantity=300, sellable=100))
+
+    assert len(evaluation.intents) == 1
+    assert evaluation.intents[0].order.side is OrderSide.SELL
+    assert evaluation.intents[0].order.quantity == 100
+
+
+@pytest.mark.asyncio
+async def test_target_strategy_slices_buy_by_policy_notional_before_risk() -> None:
+    provider = MagicMock()
+    provider.target = AsyncMock(
+        return_value=_signal(
+            target_quantity=1000,
+            max_order_notional=Decimal("1500"),
+        )
+    )
+    source = TargetPositionPaperIntentSource(
+        strategy_id="audited-target-v1",
+        provider=provider,
+    )
+
+    evaluation = await source.evaluate(_context())
+
+    assert len(evaluation.intents) == 1
+    assert evaluation.intents[0].order.side is OrderSide.BUY
+    assert evaluation.intents[0].order.quantity == 100
+
+
+@pytest.mark.asyncio
+async def test_target_strategy_slices_sell_by_policy_notional_before_risk() -> None:
+    provider = MagicMock()
+    provider.target = AsyncMock(
+        return_value=_signal(
+            target_quantity=0,
+            max_order_notional=Decimal("1500"),
+        )
+    )
+    source = TargetPositionPaperIntentSource(
+        strategy_id="audited-target-v1",
+        provider=provider,
+    )
+
+    evaluation = await source.evaluate(
+        _context(quantity=1000, sellable=1000)
+    )
 
     assert len(evaluation.intents) == 1
     assert evaluation.intents[0].order.side is OrderSide.SELL

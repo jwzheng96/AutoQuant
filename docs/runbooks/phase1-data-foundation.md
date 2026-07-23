@@ -218,6 +218,32 @@ suspension and `stk_limit` rows for every requested instrument. It never calls `
 `adj_factor`. Missing or source-unbacked controls fail closed; the resulting revisions and
 audit hash are the only accepted input to the current-session rule compiler.
 
+After a walk-forward experiment is `completed`, reports `research_candidate`, has no gate
+failures, and its deployment signal manifest is production-complete, approval is an explicit
+paper-only operation:
+
+```bash
+uv run autoquant approve-paper-sma \
+  --experiment-id <completed-experiment-uuid> \
+  --signal-manifest-hash <current-production-complete-manifest-hash> \
+  --reference-date 2026-07-23 \
+  --approved-by operator \
+  --confirm-paper-only
+```
+
+The configured account kill switch must already be active. The command re-verifies the
+experiment, selects the modal training-fold parameters without using OOS returns for tuning,
+reads exact session rules, checks the deployed allocation against the shared paper risk
+policy, and appends an immutable approval event. It cannot approve a live strategy and cannot
+reset the kill switch. Revoke before replacing an active artifact:
+
+```bash
+uv run autoquant revoke-paper-strategy \
+  --revoked-by operator \
+  --reason scheduled_research_refresh \
+  --confirm-revoke
+```
+
 Then run the pre-open evidence gate during the target Shanghai pre-open window:
 
 ```bash

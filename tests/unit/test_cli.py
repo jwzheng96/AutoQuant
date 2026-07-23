@@ -378,3 +378,86 @@ def test_session_reference_refresh_emits_only_audit_metadata() -> None:
     assert json.loads(result.stdout) == payload
     assert "sensitive" not in result.stdout
     refresh.assert_awaited_once()
+
+
+def test_paper_sma_approval_requires_explicit_paper_only_confirmation() -> None:
+    approval = AsyncMock()
+    with patch("autoquant.cli.approve_paper_sma_strategy", new=approval):
+        denied = runner.invoke(
+            app,
+            [
+                "approve-paper-sma",
+                "--experiment-id",
+                "11111111-1111-1111-1111-111111111111",
+                "--signal-manifest-hash",
+                "a" * 64,
+                "--reference-date",
+                "2026-07-23",
+                "--approved-by",
+                "operator",
+            ],
+        )
+
+    assert denied.exit_code == 2
+    assert approval.await_count == 0
+
+
+def test_paper_sma_approval_emits_only_paper_artifact_metadata() -> None:
+    payload = {
+        "account_id": "paper-main",
+        "execution_mode": "paper",
+        "experiment_id": "11111111-1111-1111-1111-111111111111",
+        "fast_sessions": 5,
+        "instrument": "600000.XSHG",
+        "live_trading_locked": True,
+        "registration_hash": "b" * 64,
+        "signal_manifest_hash": "a" * 64,
+        "slow_sessions": 20,
+        "status": "approved",
+        "strategy_id": "validated-sma-paper",
+        "strategy_version": "sma-paper-v1:test:5-20",
+    }
+    approval = AsyncMock(return_value=payload)
+    with patch("autoquant.cli.approve_paper_sma_strategy", new=approval):
+        result = runner.invoke(
+            app,
+            [
+                "approve-paper-sma",
+                "--experiment-id",
+                payload["experiment_id"],
+                "--signal-manifest-hash",
+                "a" * 64,
+                "--reference-date",
+                "2026-07-23",
+                "--approved-by",
+                "operator",
+                "--confirm-paper-only",
+            ],
+            env={
+                "AQ_ENVIRONMENT": "paper",
+                "AQ_POSTGRES_DSN": "postgresql+asyncpg://sensitive",
+            },
+        )
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == payload
+    assert "sensitive" not in result.stdout
+    approval.assert_awaited_once()
+
+
+def test_paper_strategy_revocation_requires_explicit_confirmation() -> None:
+    revocation = AsyncMock()
+    with patch("autoquant.cli.revoke_paper_strategy", new=revocation):
+        result = runner.invoke(
+            app,
+            [
+                "revoke-paper-strategy",
+                "--revoked-by",
+                "operator",
+                "--reason",
+                "scheduled_research_refresh",
+            ],
+        )
+
+    assert result.exit_code == 2
+    assert revocation.await_count == 0
