@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
@@ -107,6 +108,24 @@ def _service(
         market,
         control,
     )
+
+
+def test_session_reference_rejects_instrument_on_delist_date() -> None:
+    batch = _batch()
+
+    with pytest.raises(ValueError, match="inactive"):
+        SessionReferenceBatch(
+            session=batch.session,
+            lifecycles=(
+                replace(
+                    batch.lifecycles[0],
+                    delist_date=SESSION_DATE,
+                ),
+            ),
+            suspensions=batch.suspensions,
+            price_limits=batch.price_limits,
+            source_evidence=batch.source_evidence,
+        )
 
 
 @pytest.mark.asyncio

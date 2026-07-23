@@ -524,7 +524,7 @@ class SessionReferenceBatch:
             value.list_date > self.session.session_date
             or (
                 value.delist_date is not None
-                and value.delist_date < self.session.session_date
+                and value.delist_date <= self.session.session_date
             )
             for value in lifecycles
         ):

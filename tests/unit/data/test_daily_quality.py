@@ -46,6 +46,7 @@ def make_batch(
     omitted_method: str | None = None,
     coverage_available_at: datetime = AS_OF,
     record_available_at: datetime = AVAILABLE,
+    delist_date: date | None = None,
 ) -> DailyDatasetBatch:
     methods = (
         "daily",
@@ -123,7 +124,7 @@ def make_batch(
                     source="tushare",
                     instrument=INSTRUMENT,
                     list_date=date(1991, 4, 3),
-                    delist_date=None,
+                    delist_date=delist_date,
                     available_at=coverage_available_at,
                     response_hash=basic_evidence.response_hash,
                 ),
@@ -178,6 +179,18 @@ def evaluate(batch: DailyDatasetBatch, *, as_of: datetime | None = AS_OF):
 
 def issue_codes(batch: DailyDatasetBatch, *, as_of: datetime | None = AS_OF) -> set[str]:
     return {value.code for value in evaluate(batch, as_of=as_of).issues}
+
+
+def test_delist_date_is_the_first_inactive_session() -> None:
+    report = evaluate(
+        make_batch(
+            include_bar=False,
+            include_factor=False,
+            delist_date=SESSION,
+        )
+    )
+
+    assert report.passed is True
 
 
 def test_complete_open_session_passes_with_deterministic_hash() -> None:

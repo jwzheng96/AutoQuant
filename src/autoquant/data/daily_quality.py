@@ -247,7 +247,7 @@ class DailyQualityGate:
     ) -> bool:
         if lifecycle is None or session_date < lifecycle.list_date:
             return False
-        return lifecycle.delist_date is None or session_date <= lifecycle.delist_date
+        return lifecycle.delist_date is None or session_date < lifecycle.delist_date
 
     @staticmethod
     def _dates(start: date, end: date) -> tuple[date, ...]:
