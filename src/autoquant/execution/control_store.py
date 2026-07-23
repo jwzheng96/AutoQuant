@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
+from time import monotonic
 
 from sqlalchemy import text
 from sqlalchemy.engine import RowMapping
@@ -39,9 +43,7 @@ class PostgresExecutionControlRepository:
         self._schema = schema
 
     @classmethod
-    def connect(
-        cls, *, dsn: str, schema: str = "public"
-    ) -> PostgresExecutionControlRepository:
+    def connect(cls, *, dsn: str, schema: str = "public") -> PostgresExecutionControlRepository:
         if not dsn.strip():
             raise ValueError("dsn cannot be empty")
         try:
@@ -55,9 +57,71 @@ class PostgresExecutionControlRepository:
     async def close(self) -> None:
         await self._engine.dispose()
 
-    async def ensure_fail_closed(
-        self, *, account_id: str, now: datetime
-    ) -> KillSwitchControl:
+    @asynccontextmanager
+    async def coordination_lock(
+        self, *, account_id: str, timeout: timedelta = timedelta(seconds=5)
+    ) -> AsyncIterator[None]:
+        """Serialize a full account cycle across processes without queueing pool slots."""
+        if not account_id.strip():
+            raise ValueError("account_id cannot be empty")
+        if timeout <= timedelta(0):
+            raise ValueError("coordination lock timeout must be positive")
+        deadline = monotonic() + timeout.total_seconds()
+        while True:
+            connection: AsyncConnection | None = None
+            try:
+                connection = await self._engine.connect()
+                acquired = bool(
+                    await connection.scalar(
+                        text("SELECT pg_try_advisory_lock(hashtextextended(:lock_key, 0))"),
+                        {"lock_key": f"autoquant:paper-cycle:{account_id}"},
+                    )
+                )
+            except Exception:
+                if connection is not None:
+                    try:
+                        await connection.close()
+                    except Exception:
+                        pass
+                raise PersistenceUnavailableError(
+                    "Paper coordination lock acquisition failed"
+                ) from None
+            if connection is None:
+                raise PersistenceUnavailableError(
+                    "Paper coordination lock connection is unavailable"
+                )
+            if acquired:
+                try:
+                    yield
+                finally:
+                    released = False
+                    try:
+                        released = bool(
+                            await connection.scalar(
+                                text("SELECT pg_advisory_unlock(hashtextextended(:lock_key, 0))"),
+                                {"lock_key": f"autoquant:paper-cycle:{account_id}"},
+                            )
+                        )
+                        if not released:
+                            await connection.invalidate()
+                    except Exception:
+                        await connection.invalidate()
+                        raise PersistenceUnavailableError(
+                            "Paper coordination lock release failed"
+                        ) from None
+                    finally:
+                        await connection.close()
+                    if not released:
+                        raise PersistenceUnavailableError(
+                            "Paper coordination lock ownership was lost"
+                        )
+                return
+            await connection.close()
+            if monotonic() >= deadline:
+                raise PersistenceUnavailableError("Paper coordination lock acquisition timed out")
+            await asyncio.sleep(0.01)
+
+    async def ensure_fail_closed(self, *, account_id: str, now: datetime) -> KillSwitchControl:
         occurred_at = to_utc(now, name="kill switch initialization time")
         command = KillSwitchCommand(
             command_id=f"initialize-kill-switch:{account_id}",
@@ -93,9 +157,7 @@ class PostgresExecutionControlRepository:
         except (ValueError, PersistenceUnavailableError):
             raise
         except Exception:
-            raise PersistenceUnavailableError(
-                "Kill switch initialization failed"
-            ) from None
+            raise PersistenceUnavailableError("Kill switch initialization failed") from None
 
     async def get(self, *, account_id: str) -> KillSwitchControl:
         try:
@@ -188,9 +250,7 @@ class PostgresExecutionControlRepository:
                     .all()
                 )
         except Exception:
-            raise PersistenceUnavailableError(
-                "Kill switch replay read failed"
-            ) from None
+            raise PersistenceUnavailableError("Kill switch replay read failed") from None
         replayed: KillSwitchControl | None = None
         for row in rows:
             command = _command_from_payload(row["command_payload"])
@@ -200,16 +260,11 @@ class PostgresExecutionControlRepository:
                 or event.sequence != int(row["sequence"])
                 or command.command_hash != str(row["command_hash"])
                 or event.previous_hash != str(row["previous_hash"])
-                or event.transition_state_hash
-                != str(row["transition_state_hash"])
+                or event.transition_state_hash != str(row["transition_state_hash"])
             ):
-                raise PersistenceUnavailableError(
-                    "Kill switch event failed integrity verification"
-                )
+                raise PersistenceUnavailableError("Kill switch event failed integrity verification")
         if replayed is None or replayed != current:
-            raise PersistenceUnavailableError(
-                "Kill switch state does not match event replay"
-            )
+            raise PersistenceUnavailableError("Kill switch state does not match event replay")
         return replayed
 
     async def _mutate(
@@ -222,9 +277,7 @@ class PostgresExecutionControlRepository:
         try:
             async with self._engine.begin() as connection:
                 await _lock(connection, command.account_id)
-                row = await self._select_state(
-                    connection, command.account_id, for_update=True
-                )
+                row = await self._select_state(connection, command.account_id, for_update=True)
                 if row is None:
                     raise LookupError("kill switch is not initialized")
                 current = _state_from_row(row)
@@ -281,9 +334,7 @@ class PostgresExecutionControlRepository:
                     },
                 )
                 if result.rowcount != 1:
-                    raise PersistenceUnavailableError(
-                        "Kill switch optimistic update failed"
-                    )
+                    raise PersistenceUnavailableError("Kill switch optimistic update failed")
                 return state
         except (LookupError, ValueError, PersistenceUnavailableError):
             raise
@@ -318,10 +369,7 @@ class PostgresExecutionControlRepository:
         evaluated_at = to_utc(row["evaluated_at"], name="reconciliation time")
         if str(row["account_id"]) != command.account_id:
             raise ValueError("reset reconciliation belongs to another account")
-        if (
-            command.occurred_at < evaluated_at
-            or command.occurred_at - evaluated_at > max_age
-        ):
+        if command.occurred_at < evaluated_at or command.occurred_at - evaluated_at > max_age:
             raise ValueError("reset reconciliation is stale or from the future")
 
     async def _select_state(
@@ -431,9 +479,7 @@ def _command_from_payload(raw: object) -> KillSwitchCommand:
             actor=str(payload["actor"]),
             occurred_at=_datetime(payload["occurred_at"]),
             evidence_hash=(
-                None
-                if payload["evidence_hash"] is None
-                else str(payload["evidence_hash"])
+                None if payload["evidence_hash"] is None else str(payload["evidence_hash"])
             ),
         )
         if _canonical_hash(payload) != command.command_hash:

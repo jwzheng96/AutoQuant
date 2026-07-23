@@ -19,6 +19,7 @@ from autoquant.data.models import (
     _require_nonblank,
 )
 from autoquant.errors import PersistenceUnavailableError
+from autoquant.execution.control import KillSwitchControl
 from autoquant.execution.models import (
     ZERO_HASH,
     ApprovedPaperOrder,
@@ -36,6 +37,10 @@ order_hash, account_id, client_order_id, broker_order_id, state,
 cumulative_filled_quantity, average_fill_price, last_broker_sequence,
 last_fact_hash, state_hash, order_payload, state_payload, updated_at
 """
+
+
+class SimulatedBrokerControlError(ValueError):
+    """The durable execution-control fence no longer authorizes dispatch."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,9 +111,7 @@ class PersistentSimulatedBroker:
         self._schema = schema
 
     @classmethod
-    def connect(
-        cls, *, dsn: str, schema: str = "public"
-    ) -> PersistentSimulatedBroker:
+    def connect(cls, *, dsn: str, schema: str = "public") -> PersistentSimulatedBroker:
         if not dsn.strip():
             raise ValueError("dsn cannot be empty")
         try:
@@ -128,6 +131,7 @@ class PersistentSimulatedBroker:
         order: ApprovedPaperOrder,
         quote: MarketQuote,
         now: datetime,
+        control_fence: KillSwitchControl | None = None,
     ) -> tuple[BrokerOrderUpdate, ...]:
         submitted_at = to_utc(now, name="simulated submission time")
         if quote.instrument != order.instrument:
@@ -144,6 +148,12 @@ class PersistentSimulatedBroker:
                     if state.order != order:
                         raise ValueError("order hash belongs to another simulated order")
                     return await self._updates(connection, order.order_hash)
+                if control_fence is not None:
+                    await self._verify_control_fence(
+                        connection,
+                        order=order,
+                        expected=control_fence,
+                    )
                 approved = await connection.scalar(
                     text(
                         f"SELECT count(*) FROM {self._schema}.paper_orders "
@@ -219,9 +229,40 @@ class PersistentSimulatedBroker:
         except (ValueError, PersistenceUnavailableError):
             raise
         except Exception:
-            raise PersistenceUnavailableError(
-                "Simulated broker submission failed"
-            ) from None
+            raise PersistenceUnavailableError("Simulated broker submission failed") from None
+
+    async def _verify_control_fence(
+        self,
+        connection: AsyncConnection,
+        *,
+        order: ApprovedPaperOrder,
+        expected: KillSwitchControl,
+    ) -> None:
+        row = (
+            (
+                await connection.execute(
+                    text(
+                        f"""
+                        SELECT active, state_hash
+                        FROM {self._schema}.execution_control_state
+                        WHERE account_id = :account_id
+                        FOR SHARE
+                        """
+                    ),
+                    {"account_id": order.account_id},
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if (
+            expected.account_id != order.account_id
+            or expected.active
+            or row is None
+            or bool(row["active"])
+            or str(row["state_hash"]) != expected.state_hash
+        ):
+            raise SimulatedBrokerControlError("simulated broker control fence rejected submission")
 
     async def replay(self, *, order_hash: str) -> SimulatedBrokerOrder:
         try:
@@ -251,9 +292,7 @@ class PersistentSimulatedBroker:
         except (LookupError, PersistenceUnavailableError):
             raise
         except Exception:
-            raise PersistenceUnavailableError(
-                "Simulated broker replay read failed"
-            ) from None
+            raise PersistenceUnavailableError("Simulated broker replay read failed") from None
         replayed: SimulatedBrokerOrder | None = None
         previous_hash = ZERO_HASH
         for update, fact_row in zip(updates, fact_rows, strict=True):
@@ -276,14 +315,10 @@ class PersistentSimulatedBroker:
                 replayed = _transition(replayed, update, expected_fact)
             previous_hash = expected_fact
         if replayed is None or replayed != current:
-            raise PersistenceUnavailableError(
-                "Simulated broker state does not match fact replay"
-            )
+            raise PersistenceUnavailableError("Simulated broker state does not match fact replay")
         return replayed
 
-    async def verify_recovery(
-        self, *, max_orders: int = 10_000
-    ) -> SimulatedBrokerSummary:
+    async def verify_recovery(self, *, max_orders: int = 10_000) -> SimulatedBrokerSummary:
         if max_orders < 1:
             raise ValueError("max_orders must be positive")
         try:
@@ -448,9 +483,7 @@ class PersistentSimulatedBroker:
             },
         )
         if result.rowcount != 1:
-            raise PersistenceUnavailableError(
-                "Simulated broker optimistic update failed"
-            )
+            raise PersistenceUnavailableError("Simulated broker optimistic update failed")
         return state
 
     async def _select_order(
@@ -494,9 +527,7 @@ class PersistentSimulatedBroker:
         return tuple(_update_from_row(row) for row in rows)
 
 
-def _initial_state(
-    order: ApprovedPaperOrder, update: BrokerOrderUpdate
-) -> SimulatedBrokerOrder:
+def _initial_state(order: ApprovedPaperOrder, update: BrokerOrderUpdate) -> SimulatedBrokerOrder:
     if update.broker_sequence != 1 or update.state is not PaperOrderState.SUBMITTED:
         raise ValueError("first simulated broker fact must be submitted sequence one")
     return SimulatedBrokerOrder(
@@ -555,9 +586,7 @@ def _with_fact(state: SimulatedBrokerOrder, fact_hash: str) -> SimulatedBrokerOr
     )
 
 
-def _marketable_price(
-    order: ApprovedPaperOrder, quote: MarketQuote
-) -> Decimal | None:
+def _marketable_price(order: ApprovedPaperOrder, quote: MarketQuote) -> Decimal | None:
     if order.side is OrderSide.BUY:
         if order.limit_price is not None and order.limit_price < quote.ask_price:
             return None
@@ -567,9 +596,7 @@ def _marketable_price(
     return quote.bid_price
 
 
-def _fact_hash(
-    *, order_hash: str, previous_hash: str, update: BrokerOrderUpdate
-) -> str:
+def _fact_hash(*, order_hash: str, previous_hash: str, update: BrokerOrderUpdate) -> str:
     return _canonical_hash(
         {
             "broker_sequence": update.broker_sequence,
@@ -585,9 +612,7 @@ def simulated_broker_state_payload(
 ) -> dict[str, object]:
     return {
         "average_fill_price": (
-            None
-            if state.average_fill_price is None
-            else _decimal_text(state.average_fill_price)
+            None if state.average_fill_price is None else _decimal_text(state.average_fill_price)
         ),
         "broker_order_id": state.broker_order_id,
         "cumulative_filled_quantity": state.cumulative_filled_quantity,
@@ -626,9 +651,7 @@ def _state_from_row(row: RowMapping) -> SimulatedBrokerOrder:
             order=order,
             broker_order_id=str(state_data["broker_order_id"]),
             state=PaperOrderState(str(state_data["state"])),
-            cumulative_filled_quantity=int(
-                str(state_data["cumulative_filled_quantity"])
-            ),
+            cumulative_filled_quantity=int(str(state_data["cumulative_filled_quantity"])),
             average_fill_price=(
                 None
                 if state_data["average_fill_price"] is None
@@ -644,8 +667,7 @@ def _state_from_row(row: RowMapping) -> SimulatedBrokerOrder:
             or state.order.client_order_id != str(row["client_order_id"])
             or state.broker_order_id != str(row["broker_order_id"])
             or state.state.value != str(row["state"])
-            or state.cumulative_filled_quantity
-            != int(row["cumulative_filled_quantity"])
+            or state.cumulative_filled_quantity != int(row["cumulative_filled_quantity"])
             or state.average_fill_price != row["average_fill_price"]
             or state.last_broker_sequence != int(row["last_broker_sequence"])
             or state.last_fact_hash != str(row["last_fact_hash"])
@@ -669,9 +691,7 @@ def _order_from_payload(payload: dict[str, object]) -> ApprovedPaperOrder:
         side=OrderSide(str(payload["side"])),
         quantity=int(str(payload["quantity"])),
         limit_price=(
-            None
-            if payload["limit_price"] is None
-            else Decimal(str(payload["limit_price"]))
+            None if payload["limit_price"] is None else Decimal(str(payload["limit_price"]))
         ),
         approved_at=_datetime(payload["approved_at"]),
     )
@@ -689,9 +709,7 @@ def _update_from_row(row: RowMapping) -> BrokerOrderUpdate:
             broker_order_id=str(payload["broker_order_id"]),
             broker_sequence=int(str(payload["broker_sequence"])),
             state=PaperOrderState(str(payload["state"])),
-            cumulative_filled_quantity=int(
-                str(payload["cumulative_filled_quantity"])
-            ),
+            cumulative_filled_quantity=int(str(payload["cumulative_filled_quantity"])),
             average_fill_price=(
                 None
                 if payload["average_fill_price"] is None
@@ -699,9 +717,7 @@ def _update_from_row(row: RowMapping) -> BrokerOrderUpdate:
             ),
             occurred_at=_datetime(payload["occurred_at"]),
             rejection_code=(
-                None
-                if payload["rejection_code"] is None
-                else str(payload["rejection_code"])
+                None if payload["rejection_code"] is None else str(payload["rejection_code"])
             ),
         )
         if update.update_hash != str(row["update_hash"]):

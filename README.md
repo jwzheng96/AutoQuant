@@ -48,8 +48,10 @@ independent append-only broker-fact chain, applies deterministic bid/ask marketa
 closed-market submissions, and verifies all broker projections by replay at startup. Internal
 and broker histories can now be rebuilt into independent cash, position, T+1 sellability and
 open-order snapshots whose evidence hashes are persisted with reconciliation reports. The
-projector is not yet connected to an order-coordination API or scheduling loop, so paper
-submission remains unavailable from the console.
+internal coordinator now serializes each account cycle across processes, fences dispatch against
+the durable kill switch inside the broker transaction, and closes callback gaps idempotently.
+It is not connected to a trusted session-risk-state source, continuous quote adapter, API or
+scheduling loop, so paper submission remains unavailable from the console.
 
 All dependency, test, lint, type-check, migration, and Git mutation commands for this
 checkout must run on `rlocal`; see [the phase-1 runbook](docs/runbooks/phase1-data-foundation.md).

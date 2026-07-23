@@ -139,8 +139,11 @@ capability. On startup the console replays its immutable broker facts independen
 internal paper-order event chain. `/api/v1/execution` reports both recovery results. The adapter
 is not an order endpoint. The account projector can independently rebuild both histories using
 the configured initial cash, current marks, cumulative order fees and A-share T+1 lots, then
-persist a hash-committed reconciliation. A coordinator, continuously reconciled quote source
-and scheduler must still be connected before paper submission can be exposed.
+persist a hash-committed reconciliation. The internal coordinator serializes the full account
+cycle with a PostgreSQL advisory lock, persists every risk decision, and uses the durable kill
+switch state hash as a broker-transaction dispatch fence. A trusted session-risk-state source,
+continuous quote adapter and scheduler must still be connected before paper submission can be
+exposed.
 
 ## Research execution boundary
 

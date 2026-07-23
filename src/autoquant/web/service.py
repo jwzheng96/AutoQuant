@@ -82,17 +82,13 @@ class ConsoleServicePort(Protocol):
 
     async def backtest_detail(self, run_id: UUID) -> BacktestRunDetail: ...
 
-    async def list_validations(
-        self, *, limit: int = 50
-    ) -> tuple[ValidationExperiment, ...]: ...
+    async def list_validations(self, *, limit: int = 50) -> tuple[ValidationExperiment, ...]: ...
 
     async def create_validation(
         self, request: WalkForwardJobRequest, *, requested_by: str
     ) -> ValidationExperiment: ...
 
-    async def validation_detail(
-        self, experiment_id: UUID
-    ) -> ValidationExperimentDetail: ...
+    async def validation_detail(self, experiment_id: UUID) -> ValidationExperimentDetail: ...
 
     async def risk_status(self) -> RiskControlStatus: ...
 
@@ -191,9 +187,7 @@ class ConsoleService:
                     )
                 raise
         if self._execution_controls is not None:
-            await self._execution_controls.replay(
-                account_id=self._settings.paper_account_id
-            )
+            await self._execution_controls.replay(account_id=self._settings.paper_account_id)
         await self._operators.interrupt_running_jobs(now=self._now())
         if self._worker is None:
             self._worker = asyncio.create_task(self._work_loop(), name="operator-job-worker")
@@ -314,9 +308,7 @@ class ConsoleService:
         repository, _ = self._require_backtests()
         return await repository.list_runs(limit=limit)
 
-    async def list_research_manifests(
-        self, *, limit: int = 100
-    ) -> tuple[ResearchManifest, ...]:
+    async def list_research_manifests(self, *, limit: int = 100) -> tuple[ResearchManifest, ...]:
         repository, _ = self._require_backtests()
         return await repository.list_manifests(limit=limit)
 
@@ -329,9 +321,7 @@ class ConsoleService:
             raise ValueError("backtests require a production-complete manifest")
         if request.instrument not in manifest.instruments:
             raise ValueError("instrument is not present in the selected manifest")
-        run = await repository.create_run(
-            request, requested_by=requested_by, now=self._now()
-        )
+        run = await repository.create_run(request, requested_by=requested_by, now=self._now())
         try:
             await self._audit(
                 "operator.backtest.requested",
@@ -358,9 +348,7 @@ class ConsoleService:
         repository, _ = self._require_backtests()
         return await repository.detail(run_id)
 
-    async def list_validations(
-        self, *, limit: int = 50
-    ) -> tuple[ValidationExperiment, ...]:
+    async def list_validations(self, *, limit: int = 50) -> tuple[ValidationExperiment, ...]:
         repository, _ = self._require_validations()
         return await repository.list_experiments(limit=limit)
 
@@ -398,9 +386,7 @@ class ConsoleService:
         self._validation_wake.set()
         return experiment
 
-    async def validation_detail(
-        self, experiment_id: UUID
-    ) -> ValidationExperimentDetail:
+    async def validation_detail(self, experiment_id: UUID) -> ValidationExperimentDetail:
         repository, _ = self._require_validations()
         return await repository.detail(experiment_id)
 
@@ -414,7 +400,7 @@ class ConsoleService:
                 recent_decisions=(),
                 remaining_gates=(
                     "risk_audit_store",
-                    "paper_account_state",
+                    "trusted_session_risk_state",
                     "quote_gateway",
                     "reconciliation_loop",
                     "kill_switch_drill",
@@ -430,7 +416,7 @@ class ConsoleService:
             decision_count=count,
             recent_decisions=recent,
             remaining_gates=(
-                "paper_account_state",
+                "trusted_session_risk_state",
                 "quote_gateway",
                 "reconciliation_loop",
                 "kill_switch_drill",
@@ -473,9 +459,7 @@ class ConsoleService:
         control = (
             None
             if self._execution_controls is None
-            else await self._execution_controls.replay(
-                account_id=self._settings.paper_account_id
-            )
+            else await self._execution_controls.replay(account_id=self._settings.paper_account_id)
         )
         return PaperExecutionStatus(
             status="locked",
@@ -504,9 +488,9 @@ class ConsoleService:
                 0 if broker_summary is None else broker_summary.fact_count
             ),
             remaining_gates=(
-                "paper_order_coordinator",
-                "paper_account_projection",
-                "reconciliation_loop",
+                "trusted_session_risk_state",
+                "continuous_quote_source",
+                "coordinator_scheduler",
                 "restart_recovery_drill",
                 "kill_switch_drill",
             ),
@@ -516,9 +500,7 @@ class ConsoleService:
         self, *, command_id: str, reason: str, requested_by: str
     ) -> PaperExecutionStatus:
         if self._execution_controls is None:
-            raise PersistenceUnavailableError(
-                "Execution control service is unavailable"
-            )
+            raise PersistenceUnavailableError("Execution control service is unavailable")
         reason_code = {
             "manual": KillSwitchReason.MANUAL,
             "drill": KillSwitchReason.DRILL,
@@ -609,9 +591,7 @@ class ConsoleService:
             if run is None:
                 self._backtest_wake.clear()
                 try:
-                    await asyncio.wait_for(
-                        self._backtest_wake.wait(), timeout=self._poll_interval
-                    )
+                    await asyncio.wait_for(self._backtest_wake.wait(), timeout=self._poll_interval)
                 except TimeoutError:
                     pass
                 continue
@@ -646,20 +626,14 @@ class ConsoleService:
             await repository.fail_run(
                 run.run_id, error_code="invalid_backtest_input", now=self._now()
             )
-            await self._best_effort_backtest_failure_audit(
-                run.run_id, "invalid_backtest_input"
-            )
+            await self._best_effort_backtest_failure_audit(run.run_id, "invalid_backtest_input")
         except AutoQuantError:
             await repository.fail_run(
                 run.run_id, error_code="backtest_dependency_failed", now=self._now()
             )
-            await self._best_effort_backtest_failure_audit(
-                run.run_id, "backtest_dependency_failed"
-            )
+            await self._best_effort_backtest_failure_audit(run.run_id, "backtest_dependency_failed")
         except Exception:
-            await repository.fail_run(
-                run.run_id, error_code="internal_error", now=self._now()
-            )
+            await repository.fail_run(run.run_id, error_code="internal_error", now=self._now())
             await self._best_effort_backtest_failure_audit(run.run_id, "internal_error")
         else:
             try:
@@ -678,9 +652,7 @@ class ConsoleService:
     async def _run_validation(self, experiment: ValidationExperiment) -> None:
         repository, runner = self._require_validations()
         try:
-            await self._audit(
-                "operator.validation.started", experiment.experiment_id, {}
-            )
+            await self._audit("operator.validation.started", experiment.experiment_id, {})
             result = await runner.run(
                 manifest_hash=experiment.request.manifest_hash,
                 instrument=experiment.request.instrument,
@@ -766,13 +738,9 @@ class ConsoleService:
         except AutoQuantError:
             pass
 
-    async def _best_effort_backtest_failure_audit(
-        self, run_id: UUID, error_code: str
-    ) -> None:
+    async def _best_effort_backtest_failure_audit(self, run_id: UUID, error_code: str) -> None:
         try:
-            await self._audit(
-                "operator.backtest.failed", run_id, {"error_code": error_code}
-            )
+            await self._audit("operator.backtest.failed", run_id, {"error_code": error_code})
         except AutoQuantError:
             pass
 

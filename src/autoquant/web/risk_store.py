@@ -25,9 +25,7 @@ class PostgresRiskDecisionRepository:
         self._schema = schema
 
     @classmethod
-    def connect(
-        cls, *, dsn: str, schema: str = "public"
-    ) -> PostgresRiskDecisionRepository:
+    def connect(cls, *, dsn: str, schema: str = "public") -> PostgresRiskDecisionRepository:
         if not dsn.strip():
             raise ValueError("dsn cannot be empty")
         try:
@@ -96,9 +94,7 @@ class PostgresRiskDecisionRepository:
                         .one()
                     )
         except Exception:
-            raise PersistenceUnavailableError(
-                "Risk decision persistence failed"
-            ) from None
+            raise PersistenceUnavailableError("Risk decision persistence failed") from None
         view = _view(row)
         if view.decision_hash != decision.decision_hash:
             raise ValueError("client_order_id already belongs to another risk decision")
@@ -129,10 +125,39 @@ class PostgresRiskDecisionRepository:
                     .all()
                 )
         except Exception:
-            raise PersistenceUnavailableError(
-                "Risk decision listing failed"
-            ) from None
+            raise PersistenceUnavailableError("Risk decision listing failed") from None
         return tuple(_view(row) for row in rows)
+
+    async def get(self, *, account_id: str, client_order_id: str) -> RiskDecisionView:
+        try:
+            async with self._engine.connect() as connection:
+                row = (
+                    (
+                        await connection.execute(
+                            text(
+                                f"""
+                                SELECT decision_hash, account_id, client_order_id,
+                                       mode, state, evaluated_at, policy_hash,
+                                       account_state_hash, quote_hash, payload
+                                FROM {self._schema}.risk_decisions
+                                WHERE account_id = :account_id
+                                  AND client_order_id = :client_order_id
+                                """
+                            ),
+                            {
+                                "account_id": account_id,
+                                "client_order_id": client_order_id,
+                            },
+                        )
+                    )
+                    .mappings()
+                    .one_or_none()
+                )
+        except Exception:
+            raise PersistenceUnavailableError("Risk decision read failed") from None
+        if row is None:
+            raise LookupError("risk decision not found")
+        return _view(row)
 
     async def count(self) -> int:
         try:

@@ -40,9 +40,7 @@ pytestmark = [
 
 
 @pytest_asyncio.fixture
-async def repository() -> AsyncIterator[
-    tuple[PostgresRiskDecisionRepository, AsyncEngine, str]
-]:
+async def repository() -> AsyncIterator[tuple[PostgresRiskDecisionRepository, AsyncEngine, str]]:
     schema = f"autoquant_test_{uuid4().hex}"
     engine = create_async_engine(POSTGRES_DSN, pool_pre_ping=True)
     control = PostgresControlRepository(engine=engine, schema=schema)
@@ -125,6 +123,16 @@ async def test_risk_decision_is_idempotent_integrity_checked_and_append_only(
     assert repeated.decision_hash == created.decision_hash
     assert await risks.count() == 1
     assert (await risks.list_recent())[0].violations == ()
+    loaded = await risks.get(
+        account_id=decision.account_id,
+        client_order_id=decision.order.client_order_id,
+    )
+    assert loaded == created
+    with pytest.raises(LookupError, match="not found"):
+        await risks.get(
+            account_id=decision.account_id,
+            client_order_id="missing-risk-decision",
+        )
 
     with pytest.raises(ValueError, match="another risk decision"):
         await risks.append(_decision(quantity=200))

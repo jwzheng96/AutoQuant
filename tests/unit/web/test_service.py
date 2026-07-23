@@ -31,6 +31,7 @@ def _request() -> DailyIngestionJobRequest:
         idempotency_key="operator-service-test-0001",
     )
 
+
 def _job(state: OperatorJobState = OperatorJobState.RUNNING) -> OperatorJob:
     return OperatorJob(
         job_id=uuid4(),
@@ -161,7 +162,7 @@ async def test_execution_status_requires_gateway_even_after_verified_recovery() 
     assert isinstance(status, PaperExecutionStatus)
     assert status.recovery_verified is True
     assert status.gateway_available is False
-    assert "paper_order_coordinator" in status.remaining_gates
+    assert "coordinator_scheduler" in status.remaining_gates
 
 
 @pytest.mark.asyncio

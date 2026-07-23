@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import os
 from collections.abc import AsyncIterator
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
@@ -17,12 +18,22 @@ from autoquant.adapters.postgres import PostgresControlRepository
 from autoquant.backtest.models import OrderSide
 from autoquant.backtest.rules import AshareRuleBook, SecurityStatus
 from autoquant.execution.account_projection import PaperAccountProjector
+from autoquant.execution.control import KillSwitchReason
+from autoquant.execution.control_store import PostgresExecutionControlRepository
+from autoquant.execution.coordinator import (
+    PaperCoordinationStatus,
+    PaperOrderCoordinator,
+    PaperSubmissionRequest,
+)
 from autoquant.execution.models import ApprovedPaperOrder, PaperOrderState
 from autoquant.execution.reconciliation import (
     AccountReconciler,
     ReconciliationCode,
 )
-from autoquant.execution.simulated_broker import PersistentSimulatedBroker
+from autoquant.execution.simulated_broker import (
+    PersistentSimulatedBroker,
+    SimulatedBrokerControlError,
+)
 from autoquant.execution.store import PostgresPaperExecutionRepository
 from autoquant.risk.engine import PreTradeRiskEngine
 from autoquant.risk.models import (
@@ -52,6 +63,7 @@ async def repositories() -> AsyncIterator[
     tuple[
         PostgresRiskDecisionRepository,
         PostgresPaperExecutionRepository,
+        PostgresExecutionControlRepository,
         PersistentSimulatedBroker,
         AsyncEngine,
         str,
@@ -62,6 +74,7 @@ async def repositories() -> AsyncIterator[
     control = PostgresControlRepository(engine=engine, schema=schema)
     risks = PostgresRiskDecisionRepository(engine=engine, schema=schema)
     executions = PostgresPaperExecutionRepository(engine=engine, schema=schema)
+    controls = PostgresExecutionControlRepository(engine=engine, schema=schema)
     broker = PersistentSimulatedBroker(engine=engine, schema=schema)
     migration = "\n".join(
         Path(path).read_text(encoding="utf-8")
@@ -69,12 +82,13 @@ async def repositories() -> AsyncIterator[
             "migrations/postgres/001_phase1.sql",
             "migrations/postgres/007_risk_decisions.sql",
             "migrations/postgres/008_paper_execution.sql",
+            "migrations/postgres/009_execution_controls.sql",
             "migrations/postgres/010_simulated_broker.sql",
         )
     )
     try:
         await control.initialize(migration)
-        yield risks, executions, broker, engine, schema
+        yield risks, executions, controls, broker, engine, schema
     finally:
         try:
             await control.drop_test_schema()
@@ -147,17 +161,82 @@ async def _persist_order(
     return order
 
 
+def _submission_request(
+    *,
+    order_id: str,
+    now: datetime = NOW,
+    quantity: int = 100,
+    policy: RiskPolicy | None = None,
+) -> PaperSubmissionRequest:
+    return PaperSubmissionRequest(
+        order=ProposedOrder(
+            client_order_id=order_id,
+            instrument=INSTRUMENT,
+            side=OrderSide.BUY,
+            quantity=quantity,
+            submitted_at=NOW,
+        ),
+        quote=_quote(),
+        rules=AshareRuleBook().resolve(
+            INSTRUMENT,
+            date(2026, 7, 22),
+            SecurityStatus(risk_warning=False, listing_session_number=1000),
+        ),
+        policy=policy or RiskPolicy(allowed_instruments=(INSTRUMENT,)),
+        marks={INSTRUMENT: Decimal("10")},
+        day_start_equity=Decimal("100000"),
+        peak_equity=Decimal("100000"),
+        daily_turnover=Decimal("0"),
+        now=now,
+    )
+
+
+async def _reset_kill_switch(
+    *,
+    executions: PostgresPaperExecutionRepository,
+    controls: PostgresExecutionControlRepository,
+) -> None:
+    snapshot = PaperAccountProjector().project(
+        account_id="paper-main",
+        initial_cash=Decimal("100000"),
+        histories=(),
+        marks={},
+        as_of=NOW,
+    )
+    report = AccountReconciler().reconcile(
+        internal=snapshot,
+        broker=snapshot,
+        now=NOW,
+    )
+    await executions.save_reconciliation(
+        internal=snapshot,
+        broker=snapshot,
+        report=report,
+    )
+    active = await controls.ensure_fail_closed(account_id="paper-main", now=NOW)
+    await controls.reset(
+        account_id="paper-main",
+        command_id="integration-reset-paper-control",
+        actor="integration-test",
+        now=NOW,
+        expected_version=active.version,
+        reconciliation_report_hash=report.report_hash,
+        recovery_verified=True,
+    )
+
+
 @pytest.mark.asyncio
 async def test_simulated_broker_is_persistent_idempotent_and_independently_replayable(
     repositories: tuple[
         PostgresRiskDecisionRepository,
         PostgresPaperExecutionRepository,
+        PostgresExecutionControlRepository,
         PersistentSimulatedBroker,
         AsyncEngine,
         str,
     ],
 ) -> None:
-    risks, executions, broker, engine, schema = repositories
+    risks, executions, _, broker, engine, schema = repositories
     order = await _persist_order(
         risks,
         executions,
@@ -206,9 +285,7 @@ async def test_simulated_broker_is_persistent_idempotent_and_independently_repla
         quote=_quote(),
         now=NOW,
     )
-    assert tuple(update.state for update in resting_updates) == (
-        PaperOrderState.SUBMITTED,
-    )
+    assert tuple(update.state for update in resting_updates) == (PaperOrderState.SUBMITTED,)
 
     with pytest.raises(ValueError, match="market is closed"):
         unsubmitted = await _persist_order(
@@ -227,10 +304,7 @@ async def test_simulated_broker_is_persistent_idempotent_and_independently_repla
     with pytest.raises(DBAPIError):
         async with engine.begin() as connection:
             await connection.execute(
-                text(
-                    f"UPDATE {schema}.simulated_broker_facts "
-                    "SET update_payload = '{}'::jsonb"
-                )
+                text(f"UPDATE {schema}.simulated_broker_facts SET update_payload = '{{}}'::jsonb")
             )
 
 
@@ -239,12 +313,13 @@ async def test_independent_account_projections_detect_and_close_callback_gap(
     repositories: tuple[
         PostgresRiskDecisionRepository,
         PostgresPaperExecutionRepository,
+        PostgresExecutionControlRepository,
         PersistentSimulatedBroker,
         AsyncEngine,
         str,
     ],
 ) -> None:
-    risks, executions, broker, _, _ = repositories
+    risks, executions, _, broker, _, _ = repositories
     order = await _persist_order(
         risks,
         executions,
@@ -312,3 +387,233 @@ async def test_independent_account_projections_detect_and_close_callback_gap(
     assert after.reconciled is True
     assert stored == after
     assert (await executions.verify_recovery()).latest_reconciled is True
+
+
+@pytest.mark.asyncio
+async def test_simulated_broker_requires_an_unchanged_inactive_control_fence(
+    repositories: tuple[
+        PostgresRiskDecisionRepository,
+        PostgresPaperExecutionRepository,
+        PostgresExecutionControlRepository,
+        PersistentSimulatedBroker,
+        AsyncEngine,
+        str,
+    ],
+) -> None:
+    risks, executions, controls, broker, _, _ = repositories
+    order = await _persist_order(
+        risks,
+        executions,
+        order_id="simulated-control-fence-order-0001",
+    )
+    active = await controls.ensure_fail_closed(account_id="paper-main", now=NOW)
+
+    with pytest.raises(SimulatedBrokerControlError, match="control fence"):
+        await broker.submit(
+            order=order,
+            quote=_quote(),
+            now=NOW,
+            control_fence=active,
+        )
+
+    assert (await broker.verify_recovery()).order_count == 0
+
+
+@pytest.mark.asyncio
+async def test_coordinator_runs_risk_submission_callback_and_reconciliation_idempotently(
+    repositories: tuple[
+        PostgresRiskDecisionRepository,
+        PostgresPaperExecutionRepository,
+        PostgresExecutionControlRepository,
+        PersistentSimulatedBroker,
+        AsyncEngine,
+        str,
+    ],
+) -> None:
+    risks, executions, controls, broker, engine, schema = repositories
+    await _reset_kill_switch(executions=executions, controls=controls)
+    coordinator = PaperOrderCoordinator(
+        account_id="paper-main",
+        initial_cash=Decimal("100000"),
+        risks=risks,
+        executions=executions,
+        controls=controls,
+        broker=broker,
+    )
+    request = _submission_request(order_id="coordinated-market-order-0001")
+
+    first = await coordinator.submit(request)
+    repeated = await coordinator.submit(request)
+
+    assert first.status is PaperCoordinationStatus.FILLED
+    assert first.decision is not None
+    assert first.decision.state.value == "accepted"
+    assert first.projection is not None
+    assert first.projection.state is PaperOrderState.FILLED
+    assert first.pre_reconciliation is not None
+    assert first.pre_reconciliation.reconciled is True
+    assert first.post_reconciliation is not None
+    assert first.post_reconciliation.reconciled is True
+    assert first.control.active is False
+    assert repeated.status is PaperCoordinationStatus.RECOVERED
+    assert repeated.decision is None
+    assert repeated.projection == first.projection
+    assert repeated.post_reconciliation is not None
+    assert repeated.post_reconciliation.reconciled is True
+    async with engine.connect() as connection:
+        counts = (
+            (
+                await connection.execute(
+                    text(
+                        f"""
+                        SELECT
+                          (SELECT count(*) FROM {schema}.risk_decisions) AS risks,
+                          (SELECT count(*) FROM {schema}.paper_orders) AS orders,
+                          (SELECT count(*) FROM {schema}.paper_order_events) AS events,
+                          (SELECT count(*) FROM {schema}.simulated_broker_facts) AS facts
+                        """
+                    )
+                )
+            )
+            .mappings()
+            .one()
+        )
+    assert dict(counts) == {"risks": 1, "orders": 1, "events": 2, "facts": 2}
+
+
+@pytest.mark.asyncio
+async def test_account_lock_serializes_concurrent_risk_cycles(
+    repositories: tuple[
+        PostgresRiskDecisionRepository,
+        PostgresPaperExecutionRepository,
+        PostgresExecutionControlRepository,
+        PersistentSimulatedBroker,
+        AsyncEngine,
+        str,
+    ],
+) -> None:
+    risks, executions, controls, broker, _, _ = repositories
+    await _reset_kill_switch(executions=executions, controls=controls)
+    coordinator = PaperOrderCoordinator(
+        account_id="paper-main",
+        initial_cash=Decimal("100000"),
+        risks=risks,
+        executions=executions,
+        controls=controls,
+        broker=broker,
+    )
+    policy = RiskPolicy(
+        allowed_instruments=(INSTRUMENT,),
+        max_position_weight=Decimal("1"),
+        max_gross_exposure=Decimal("1"),
+        max_daily_turnover=Decimal("2"),
+    )
+
+    results = await asyncio.gather(
+        coordinator.submit(
+            _submission_request(
+                order_id="concurrent-paper-order-0001",
+                quantity=6000,
+                policy=policy,
+            )
+        ),
+        coordinator.submit(
+            _submission_request(
+                order_id="concurrent-paper-order-0002",
+                quantity=6000,
+                policy=policy,
+            )
+        ),
+    )
+
+    assert {result.status for result in results} == {
+        PaperCoordinationStatus.FILLED,
+        PaperCoordinationStatus.RISK_REJECTED,
+    }
+    rejected = next(
+        result for result in results if result.status is PaperCoordinationStatus.RISK_REJECTED
+    )
+    assert rejected.decision is not None
+    assert "insufficient_cash" in {violation.value for violation in rejected.decision.violations}
+    assert (await risks.count()) == 2
+    assert (await executions.verify_recovery()).order_count == 1
+    assert (await broker.verify_recovery()).order_count == 1
+
+
+@pytest.mark.asyncio
+async def test_coordinator_persists_rejection_while_kill_switch_is_active(
+    repositories: tuple[
+        PostgresRiskDecisionRepository,
+        PostgresPaperExecutionRepository,
+        PostgresExecutionControlRepository,
+        PersistentSimulatedBroker,
+        AsyncEngine,
+        str,
+    ],
+) -> None:
+    risks, executions, controls, broker, _, _ = repositories
+    active = await controls.ensure_fail_closed(account_id="paper-main", now=NOW)
+    coordinator = PaperOrderCoordinator(
+        account_id="paper-main",
+        initial_cash=Decimal("100000"),
+        risks=risks,
+        executions=executions,
+        controls=controls,
+        broker=broker,
+    )
+
+    result = await coordinator.submit(
+        _submission_request(order_id="coordinated-rejected-order-0001")
+    )
+
+    assert result.status is PaperCoordinationStatus.RISK_REJECTED
+    assert result.control == active
+    assert result.decision is not None
+    assert tuple(code.value for code in result.decision.violations) == ("kill_switch_active",)
+    assert (await risks.count()) == 1
+    assert (await executions.verify_recovery()).order_count == 0
+    assert (await broker.verify_recovery()).order_count == 0
+
+
+@pytest.mark.asyncio
+async def test_coordinator_blocks_stale_unsubmitted_intent_and_activates_kill_switch(
+    repositories: tuple[
+        PostgresRiskDecisionRepository,
+        PostgresPaperExecutionRepository,
+        PostgresExecutionControlRepository,
+        PersistentSimulatedBroker,
+        AsyncEngine,
+        str,
+    ],
+) -> None:
+    risks, executions, controls, broker, _, _ = repositories
+    await _reset_kill_switch(executions=executions, controls=controls)
+    order = await _persist_order(
+        risks,
+        executions,
+        order_id="coordinated-stale-dispatch-0001",
+    )
+    coordinator = PaperOrderCoordinator(
+        account_id="paper-main",
+        initial_cash=Decimal("100000"),
+        risks=risks,
+        executions=executions,
+        controls=controls,
+        broker=broker,
+    )
+
+    result = await coordinator.submit(
+        _submission_request(
+            order_id=order.client_order_id,
+            now=NOW + timedelta(seconds=4),
+        )
+    )
+
+    assert result.status is PaperCoordinationStatus.BLOCKED
+    assert result.control.active is True
+    assert result.control.reason is KillSwitchReason.ORDER_STATE_UNKNOWN
+    assert result.projection is not None
+    assert result.projection.state is PaperOrderState.APPROVED
+    assert result.post_reconciliation is not None
+    assert result.post_reconciliation.reconciled is False
+    assert (await broker.verify_recovery()).order_count == 0
