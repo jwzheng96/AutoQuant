@@ -11,6 +11,9 @@ from pydantic import SecretStr
 from autoquant.adapters.clickhouse_daily import ClickHouseDailyRepository
 from autoquant.adapters.postgres import PostgresControlRepository
 from autoquant.adapters.tushare import TushareDailySource, TushareHttpClient
+from autoquant.backtest.dynamic_portfolio import (
+    DynamicPortfolioResearchSpec,
+)
 from autoquant.backtest.runner import ManifestMarketCompiler
 from autoquant.backtest.validation import (
     SmaParameters,
@@ -108,6 +111,9 @@ from autoquant.execution.strategy_portfolio_store import (
 from autoquant.execution.strategy_registry_store import PostgresPaperStrategyRegistry
 from autoquant.execution.validated_sma_portfolio import (
     ValidatedSmaPortfolioRegistration,
+)
+from autoquant.web.dynamic_research_store import (
+    PostgresDynamicResearchSpecRepository,
 )
 from autoquant.web.models import (
     PortfolioValidationExperiment,
@@ -629,6 +635,95 @@ async def compile_research_input(
         return payload
     finally:
         await control.close()
+        await universes.close()
+        await campaigns.close()
+
+
+async def freeze_dynamic_research_spec(
+    settings: AppSettings,
+    *,
+    manifest_hash: str,
+    requested_by: str,
+) -> dict[str, object]:
+    """Freeze the next dynamic strategy before any result is observed."""
+
+    if settings.live_trading_enabled:
+        raise MissingCapabilityError(
+            "dynamic research pre-registration requires live trading locked"
+        )
+    if (
+        not requested_by.strip()
+        or requested_by != requested_by.strip()
+        or len(requested_by) > 128
+    ):
+        raise ValueError(
+            "requested_by must contain 1-128 trimmed characters"
+        )
+    dsn = configured_dsn(
+        settings.postgres_dsn,
+        capability="PostgreSQL",
+    )
+    campaigns = PostgresResearchDataCampaignRepository.connect(dsn=dsn)
+    universes = PostgresResearchUniverseRepository.connect(dsn=dsn)
+    specifications = PostgresDynamicResearchSpecRepository.connect(
+        dsn=dsn
+    )
+    control = PostgresControlRepository.connect(dsn=dsn)
+    try:
+        plan = await _load_research_input_plan(
+            campaigns=campaigns,
+            universes=universes,
+            manifest_hash=manifest_hash,
+        )
+        spec = DynamicPortfolioResearchSpec(
+            dataset_manifest_hash=plan.dataset_manifest_hash,
+            plan_hash=plan.plan_hash,
+            policy_hash=plan.policy_hash,
+            start_date=plan.start_date,
+            end_date=plan.end_date,
+        )
+        record = await specifications.freeze(
+            spec,
+            requested_by=requested_by,
+            created_at=datetime.now(UTC),
+        )
+        payload: dict[str, object] = {
+            "candidate_count": len(record.spec.candidates),
+            "created_at": record.created_at.isoformat(),
+            "dataset_manifest_hash": (
+                record.spec.dataset_manifest_hash
+            ),
+            "embargo_sessions": record.spec.embargo_sessions,
+            "evidence_policy_hash": (
+                record.spec.evidence_policy.policy_hash
+            ),
+            "gross_allocation": str(record.spec.gross_allocation),
+            "live_trading_locked": record.live_trading_locked,
+            "maximum_position_weight": str(
+                record.spec.maximum_position_weight
+            ),
+            "plan_hash": record.spec.plan_hash,
+            "requested_by": record.requested_by,
+            "slippage_bps": str(record.spec.slippage_bps),
+            "spec_hash": record.spec.spec_hash,
+            "status": "frozen",
+            "strategy_id": record.spec.strategy_id,
+            "test_sessions": record.spec.test_sessions,
+            "train_sessions": record.spec.train_sessions,
+            "version": record.spec.version,
+        }
+        await control.append_audit_event(
+            "research.dynamic_strategy.spec.frozen",
+            datetime.now(UTC),
+            {
+                **payload,
+                "specification": record.spec.payload(),
+            },
+        )
+        return payload
+    finally:
+        await control.close()
+        await specifications.close()
         await universes.close()
         await campaigns.close()
 

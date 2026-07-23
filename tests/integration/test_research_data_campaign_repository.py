@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from collections.abc import AsyncIterator
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
 
@@ -10,9 +11,15 @@ import pytest
 import pytest_asyncio
 
 from autoquant.adapters.postgres import PostgresControlRepository
+from autoquant.backtest.dynamic_portfolio import (
+    DynamicPortfolioResearchSpec,
+)
 from autoquant.data.models import DatasetManifest
 from autoquant.data.quality import QualityReport
 from autoquant.data.research_data_campaign import ResearchDataCampaignSpec
+from autoquant.web.dynamic_research_store import (
+    PostgresDynamicResearchSpecRepository,
+)
 from autoquant.web.research_data_store import (
     PostgresResearchDataCampaignRepository,
 )
@@ -32,11 +39,19 @@ pytestmark = [
 
 @pytest_asyncio.fixture
 async def repositories() -> AsyncIterator[
-    tuple[PostgresControlRepository, PostgresResearchDataCampaignRepository]
+    tuple[
+        PostgresControlRepository,
+        PostgresResearchDataCampaignRepository,
+        PostgresDynamicResearchSpecRepository,
+    ]
 ]:
     schema = f"autoquant_test_{uuid4().hex}"
     control = PostgresControlRepository.connect(dsn=POSTGRES_DSN, schema=schema)
     campaigns = PostgresResearchDataCampaignRepository.connect(
+        dsn=POSTGRES_DSN,
+        schema=schema,
+    )
+    specs = PostgresDynamicResearchSpecRepository.connect(
         dsn=POSTGRES_DSN,
         schema=schema,
     )
@@ -46,12 +61,14 @@ async def repositories() -> AsyncIterator[
             "migrations/postgres/001_phase1.sql",
             "migrations/postgres/023_research_universes.sql",
             "migrations/postgres/024_research_data_campaigns.sql",
+            "migrations/postgres/025_dynamic_research_specs.sql",
         )
     )
     try:
         await control.initialize(migration)
-        yield control, campaigns
+        yield control, campaigns, specs
     finally:
+        await specs.close()
         await campaigns.close()
         try:
             await control.drop_test_schema()
@@ -94,9 +111,10 @@ async def test_campaign_recovers_retries_and_finalizes_verified_shards(
     repositories: tuple[
         PostgresControlRepository,
         PostgresResearchDataCampaignRepository,
+        PostgresDynamicResearchSpecRepository,
     ],
 ) -> None:
-    control, campaigns = repositories
+    control, campaigns, specs = repositories
     spec = ResearchDataCampaignSpec(
         campaign_key="integration-csi300-history-v1",
         policy_hash="a" * 64,
@@ -185,3 +203,37 @@ async def test_campaign_recovers_retries_and_finalizes_verified_shards(
     assert await campaigns.read_manifest(manifest.manifest_hash) == manifest
     with pytest.raises(LookupError):
         await campaigns.read_manifest("0" * 64)
+
+    frozen = DynamicPortfolioResearchSpec(
+        dataset_manifest_hash=manifest.manifest_hash,
+        plan_hash="f" * 64,
+        policy_hash=manifest.policy_hash,
+        start_date=manifest.start_date,
+        end_date=manifest.end_date,
+    )
+    record = await specs.freeze(
+        frozen,
+        requested_by="test",
+        created_at=NOW,
+    )
+    repeated_record = await specs.freeze(
+        frozen,
+        requested_by="another-operator",
+        created_at=NOW,
+    )
+
+    assert record == repeated_record
+    assert await specs.read(frozen.spec_hash) == record
+    with pytest.raises(ValueError, match="already frozen"):
+        await specs.freeze(
+            DynamicPortfolioResearchSpec(
+                dataset_manifest_hash=manifest.manifest_hash,
+                plan_hash="f" * 64,
+                policy_hash=manifest.policy_hash,
+                start_date=manifest.start_date,
+                end_date=manifest.end_date,
+                slippage_bps=Decimal("11"),
+            ),
+            requested_by="test",
+            created_at=NOW,
+        )

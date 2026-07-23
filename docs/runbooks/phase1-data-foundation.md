@@ -436,6 +436,31 @@ quality-report and exact record-hash reader against ClickHouse. The result is
 appended to the immutable audit chain. Downstream research code should use the
 same lazy reader rather than loading the entire historical union into memory.
 
+Before running any dynamic-universe validation, freeze the strategy, execution
+assumptions, fold construction and evidence gates:
+
+```bash
+uv run autoquant dynamic-research-spec-freeze \
+  --manifest-hash <aggregate-research-manifest-hash> \
+  --requested-by operator \
+  --confirm-pre-registration
+```
+
+The v1 specification fixes 50% gross allocation across ten selected names,
+5% maximum position weight, 10 bps slippage, 5% maximum daily volume
+participation, one-session signal lag, 252-session new-member history, and
+504/63/5-session train/test/embargo windows. Candidate lookback/rebalance
+pairs are fixed at 20/5, 60/10, 120/20 and 252/21. Evidence requires at least
+eight folds and 504 out-of-sample sessions, at least 55% profitable folds,
+positive compounded and benchmark-relative OOS returns, no more than 18%
+drawdown, no more than 15% selection optimism, and zero rejected orders.
+
+The database permits only one specification for the same aggregate manifest
+and strategy identity. The row and its full canonical payload are immutable;
+running the command again can only return the original specification. Do not
+change these values after observing validation results. A failed specification
+means the strategy is rejected, not retuned against the same OOS sample.
+
 ```bash
 uv run autoquant approve-paper-sma \
   --experiment-id <completed-experiment-uuid> \

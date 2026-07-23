@@ -249,3 +249,16 @@ def test_research_data_campaign_migration_is_restart_safe_and_versioned() -> Non
     assert "research_data_campaign_items_queue_idx" in migration
     assert "research_dataset_manifests_immutable" in migration
     assert "VALUES ('postgres', 24)" in migration
+
+
+def test_dynamic_research_spec_migration_prevents_post_result_tuning() -> None:
+    migration = Path(
+        "migrations/postgres/025_dynamic_research_specs.sql"
+    ).read_text(encoding="utf-8")
+
+    assert "CREATE TABLE IF NOT EXISTS dynamic_research_specs" in migration
+    assert "REFERENCES research_dataset_manifests(manifest_hash)" in migration
+    assert "UNIQUE (dataset_manifest_hash, strategy_id)" in migration
+    assert "live_trading_locked" in migration
+    assert "dynamic_research_specs_immutable" in migration
+    assert "VALUES ('postgres', 25)" in migration

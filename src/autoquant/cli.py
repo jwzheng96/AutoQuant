@@ -36,6 +36,7 @@ from autoquant.operations import (
     create_research_data_campaign,
     create_research_universe_snapshot,
     create_validation_campaign,
+    freeze_dynamic_research_spec,
     inspect_paper_pre_open,
     inspect_paper_promotion,
     inspect_paper_runtime_readiness,
@@ -967,6 +968,32 @@ def research_input_plan_compile(
         )
     except (AutoQuantError, LookupError, ValueError):
         _fail("research input plan compilation failed")
+    _emit(payload)
+
+
+@app.command("dynamic-research-spec-freeze")
+def dynamic_research_spec_freeze(
+    manifest_hash: Annotated[str, typer.Option("--manifest-hash")],
+    requested_by: Annotated[str, typer.Option("--requested-by")],
+    confirm_pre_registration: Annotated[
+        bool,
+        typer.Option("--confirm-pre-registration"),
+    ] = False,
+) -> None:
+    """Freeze one strategy and its evidence gates before validation."""
+
+    if not confirm_pre_registration:
+        _fail("dynamic research pre-registration confirmation is required")
+    try:
+        payload = asyncio.run(
+            freeze_dynamic_research_spec(
+                _settings(),
+                manifest_hash=manifest_hash,
+                requested_by=requested_by,
+            )
+        )
+    except (AutoQuantError, LookupError, ValueError):
+        _fail("dynamic research specification freeze failed")
     _emit(payload)
 
 

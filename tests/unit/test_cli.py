@@ -818,6 +818,63 @@ def test_research_input_plan_compilation_stays_live_locked_and_redacted() -> Non
     compilation.assert_awaited_once()
 
 
+def test_dynamic_research_freeze_requires_explicit_pre_registration() -> None:
+    freeze = AsyncMock()
+    with patch(
+        "autoquant.cli.freeze_dynamic_research_spec",
+        new=freeze,
+    ):
+        denied = runner.invoke(
+            app,
+            [
+                "dynamic-research-spec-freeze",
+                "--manifest-hash",
+                "a" * 64,
+                "--requested-by",
+                "operator",
+            ],
+        )
+
+    assert denied.exit_code == 2
+    assert freeze.await_count == 0
+
+
+def test_dynamic_research_freeze_is_live_locked_and_redacted() -> None:
+    payload = {
+        "dataset_manifest_hash": "a" * 64,
+        "live_trading_locked": True,
+        "plan_hash": "b" * 64,
+        "spec_hash": "c" * 64,
+        "status": "frozen",
+    }
+    freeze = AsyncMock(return_value=payload)
+    with patch(
+        "autoquant.cli.freeze_dynamic_research_spec",
+        new=freeze,
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "dynamic-research-spec-freeze",
+                "--manifest-hash",
+                "a" * 64,
+                "--requested-by",
+                "operator",
+                "--confirm-pre-registration",
+            ],
+            env={
+                "AQ_POSTGRES_DSN": (
+                    "postgresql+asyncpg://sensitive"
+                )
+            },
+        )
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == payload
+    assert "sensitive" not in result.stdout
+    freeze.assert_awaited_once()
+
+
 def test_research_input_shard_check_is_redacted() -> None:
     payload = {
         "instrument": "000001.XSHE",
