@@ -24,3 +24,11 @@ class VendorRateLimitError(AutoQuantError):
 
 class PersistenceUnavailableError(AutoQuantError):
     """A required durable store is unavailable."""
+
+
+class LiveTradingLockedError(AutoQuantError):
+    """A live-broker mutation was attempted while the release lock is active."""
+
+
+class BrokerStateUnknownError(AutoQuantError):
+    """A broker response could not prove a known account or order state."""

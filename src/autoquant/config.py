@@ -1,5 +1,6 @@
 from decimal import Decimal
 from enum import StrEnum
+from pathlib import Path
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
@@ -50,6 +51,16 @@ class AppSettings(BaseSettings):
     paper_initial_cash: Decimal = Field(
         default=Decimal("1000000"), ge=Decimal("10000"), le=Decimal("1000000000")
     )
+    qmt_userdata_path: Path | None = None
+    qmt_account_id: SecretStr | None = Field(default=None, repr=False)
+    qmt_session_id: int | None = Field(default=None, ge=1, le=2_147_483_647)
+
+    @field_validator("qmt_userdata_path", mode="before")
+    @classmethod
+    def empty_qmt_path_is_unconfigured(cls, value: object) -> object:
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
     @field_validator("tushare_api_url")
     @classmethod

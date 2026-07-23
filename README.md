@@ -71,6 +71,15 @@ Dependency loss leaves the approved local intent recoverable but activates the d
 switch. An `unknown` order activates `order_state_unknown` even when both account projections
 otherwise reconcile, so numerical equality cannot falsely authorize another order.
 
+The QMT preparation boundary now provides explicit Shanghai/Shenzhen symbol translation,
+conservative XtQuant order-state normalization, `None`-query fail-closed handling, a
+thread-safe callback buffer, and a host preflight command. The preflight checks Windows,
+64-bit Python, the exact `userdata_mini` directory, a unique session ID, account configuration,
+the `xtquant` module, the `up_queue_xtquant` permission sentinel, and the durable kill switch
+without importing XtQuant or connecting to MiniQMT. Submit and cancel methods still raise a
+release-lock error unconditionally; this is preparation for read-only reconciliation, not a
+live gateway.
+
 All dependency, test, lint, type-check, migration, and Git mutation commands for this
 checkout must run on `rlocal`; see [the phase-1 runbook](docs/runbooks/phase1-data-foundation.md).
 
@@ -80,6 +89,7 @@ cd AutoQuant
 /Users/zjw/.local/bin/uv sync --frozen --all-groups
 /Users/zjw/.local/bin/uv run autoquant config-check
 /Users/zjw/.local/bin/uv run autoquant tushare-check
+/Users/zjw/.local/bin/uv run autoquant qmt-check
 ```
 
 For local infrastructure and the operator console:
@@ -109,3 +119,7 @@ The current Tushare path uses `daily`, `adj_factor`, `trade_cal`, `stock_basic`,
 boundaries. It does not call `stk_mins` and does not assume that a 2000-point account has
 the independently licensed historical-minute permission. See the
 [phase-1 runbook](docs/runbooks/phase1-data-foundation.md) for migrations and ingestion.
+
+QMT must run on a separately controlled Windows machine with MiniQMT. See the
+[QMT preparation runbook](docs/runbooks/qmt-read-only-preparation.md); no XtQuant package,
+broker account, or MiniQMT process is expected on the current macOS development host.

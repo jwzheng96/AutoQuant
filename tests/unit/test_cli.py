@@ -261,3 +261,25 @@ def test_web_console_starts_only_on_configured_loopback() -> None:
     assert result.exit_code == 0
     assert run.call_args.kwargs["host"] == "127.0.0.1"
     assert run.call_args.kwargs["port"] == 8765
+
+
+def test_qmt_check_is_read_only_blocked_and_does_not_emit_configuration() -> None:
+    with patch(
+        "autoquant.cli._qmt_kill_switch_active", new=AsyncMock(return_value=True)
+    ):
+        result = runner.invoke(
+            app,
+            ["qmt-check"],
+            env={
+                "AQ_QMT_USERDATA_PATH": "/sensitive/userdata_mini",
+                "AQ_QMT_ACCOUNT_ID": "sensitive-broker-account",
+                "AQ_QMT_SESSION_ID": "123456",
+            },
+        )
+
+    assert result.exit_code == 2
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "blocked"
+    assert payload["live_trading_ready"] is False
+    assert "sensitive" not in result.stdout
+    assert "123456" not in result.stdout

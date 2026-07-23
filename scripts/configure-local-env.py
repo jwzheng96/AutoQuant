@@ -73,6 +73,10 @@ def render_app_env(
         "AQ_PAPER_INITIAL_CASH": source.get("AQ_PAPER_INITIAL_CASH", "1000000")
         or "1000000",
     }
+    for key in ("AQ_QMT_USERDATA_PATH", "AQ_QMT_ACCOUNT_ID", "AQ_QMT_SESSION_ID"):
+        value = source.get(key, "").strip()
+        if value:
+            values[key] = value
     return "".join(f"{key}={value}\n" for key, value in values.items())
 
 

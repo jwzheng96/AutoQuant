@@ -18,12 +18,18 @@ def test_defaults_are_non_live_and_fail_closed(monkeypatch: pytest.MonkeyPatch) 
         "AQ_RQDATA_PASSWORD",
         "AQ_TUSHARE_TOKEN",
         "AQ_WEB_PASSWORD",
+        "AQ_QMT_USERDATA_PATH",
+        "AQ_QMT_ACCOUNT_ID",
+        "AQ_QMT_SESSION_ID",
     ):
         monkeypatch.delenv(name, raising=False)
     settings = AppSettings(_env_file=None)
     assert settings.environment is RuntimeEnvironment.BACKTEST
     assert settings.live_trading_enabled is False
     assert settings.paper_initial_cash == Decimal("1000000")
+    assert settings.qmt_userdata_path is None
+    assert settings.qmt_account_id is None
+    assert settings.qmt_session_id is None
     with pytest.raises(MissingCapabilityError, match="RQData credentials"):
         settings.require_rqdata()
     with pytest.raises(MissingCapabilityError, match="Tushare token"):
@@ -160,3 +166,23 @@ def test_paper_account_id_must_be_safe(account_id: str) -> None:
 def test_paper_initial_cash_is_bounded(initial_cash: str) -> None:
     with pytest.raises(ValueError):
         AppSettings(_env_file=None, paper_initial_cash=initial_cash)
+
+
+def test_qmt_account_is_secret_and_empty_path_is_unconfigured() -> None:
+    settings = AppSettings(
+        _env_file=None,
+        qmt_userdata_path="  ",
+        qmt_account_id="sensitive-account-id",
+        qmt_session_id=123456,
+    )
+
+    assert settings.qmt_userdata_path is None
+    assert isinstance(settings.qmt_account_id, SecretStr)
+    assert "sensitive-account-id" not in repr(settings)
+    assert settings.qmt_session_id == 123456
+
+
+@pytest.mark.parametrize("session_id", [0, -1, 2_147_483_648])
+def test_qmt_session_id_is_positive_and_bounded(session_id: int) -> None:
+    with pytest.raises(ValueError):
+        AppSettings(_env_file=None, qmt_session_id=session_id)

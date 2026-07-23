@@ -493,6 +493,7 @@ class ConsoleService:
                 "coordinator_scheduler",
                 "operational_kill_switch_reset_drill",
                 "paper_evidence_period",
+                "qmt_windows_read_only_reconciliation",
             ),
         )
 

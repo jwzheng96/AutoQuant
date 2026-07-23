@@ -19,6 +19,8 @@ from autoquant.data.availability import HistoricalMinutePolicy
 from autoquant.data.ingestion import IngestionRequest, IngestionService
 from autoquant.data.quality import MinuteBarQualityGate
 from autoquant.errors import AutoQuantError, MissingCapabilityError
+from autoquant.execution.control_store import PostgresExecutionControlRepository
+from autoquant.execution.qmt_preflight import inspect_qmt_readiness
 from autoquant.operations import run_daily_ingestion, tushare_source
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
@@ -224,6 +226,48 @@ def db_check() -> None:
     except AutoQuantError:
         _fail("database check failed")
     _emit({"clickhouse": "ok", "postgres": "ok", "status": "ok"})
+
+
+async def _qmt_kill_switch_active(settings: AppSettings) -> bool:
+    repository = PostgresExecutionControlRepository.connect(
+        dsn=_require_dsn(settings.postgres_dsn, capability="PostgreSQL")
+    )
+    try:
+        control = await repository.replay(account_id=settings.paper_account_id)
+        return control.active
+    finally:
+        await repository.close()
+
+
+@app.command("qmt-check")
+def qmt_check() -> None:
+    """Inspect QMT readiness without importing XtQuant or connecting to MiniQMT."""
+
+    settings = _settings()
+    try:
+        kill_switch_active: bool | None = asyncio.run(
+            _qmt_kill_switch_active(settings)
+        )
+    except (AutoQuantError, LookupError, ValueError):
+        kill_switch_active = None
+    report = inspect_qmt_readiness(
+        settings,
+        kill_switch_active=kill_switch_active,
+    )
+    _emit(
+        {
+            "checks": {
+                check.code.value: "pass" if check.passed else "blocked"
+                for check in report.checks
+            },
+            "live_trading_ready": report.live_trading_ready,
+            "order_drill_ready": report.order_drill_ready,
+            "read_only_ready": report.read_only_ready,
+            "status": "ok" if report.order_drill_ready else "blocked",
+        }
+    )
+    if not report.order_drill_ready:
+        raise typer.Exit(code=2)
 
 
 async def _ingest(

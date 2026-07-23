@@ -55,3 +55,27 @@ def test_render_app_env_accepts_an_alternate_loopback_port() -> None:
     )
 
     assert "AQ_WEB_PORT=8010\n" in content
+
+
+def test_render_app_env_preserves_optional_qmt_configuration() -> None:
+    module = _module()
+    content = module.render_app_env(
+        {
+            "AQ_TUSHARE_TOKEN": "local-token",
+            "AQ_QMT_USERDATA_PATH": r"C:\broker\userdata_mini",
+            "AQ_QMT_ACCOUNT_ID": "local-broker-account",
+            "AQ_QMT_SESSION_ID": "246810",
+        },
+        {
+            "POSTGRES_USER": "autoquant",
+            "POSTGRES_PASSWORD": "postgres-secret",
+            "POSTGRES_DB": "autoquant",
+            "CLICKHOUSE_USER": "autoquant",
+            "CLICKHOUSE_PASSWORD": "clickhouse-secret",
+            "CLICKHOUSE_DB": "autoquant",
+        },
+    )
+
+    assert "AQ_QMT_USERDATA_PATH=C:\\broker\\userdata_mini\n" in content
+    assert "AQ_QMT_ACCOUNT_ID=local-broker-account\n" in content
+    assert "AQ_QMT_SESSION_ID=246810\n" in content
