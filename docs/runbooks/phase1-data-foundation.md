@@ -28,6 +28,11 @@ Apply `migrations/postgres/001_phase1.sql`,
 `migrations/postgres/008_paper_execution.sql`, then
 `migrations/postgres/009_execution_controls.sql`, then
 `migrations/postgres/010_simulated_broker.sql`, then
+`migrations/postgres/011_paper_session_risk.sql`, then
+`migrations/postgres/012_qmt_session_leases.sql`, then
+`migrations/postgres/013_paper_scheduler_events.sql`, then
+`migrations/postgres/014_paper_scheduler_leases.sql`, then
+`migrations/postgres/015_paper_strategy_registry.sql`, then
 `migrations/clickhouse/001_phase1.sql` and
 `migrations/clickhouse/002_tushare_daily.sql` and
 `migrations/clickhouse/003_daily_coverage.sql` in order, only to explicitly authorized
@@ -46,6 +51,12 @@ This Compose profile is for a single trusted development host. It binds database
 to loopback, but it is not a production HA deployment. Before any real-money phase, move
 credentials to a secret manager, enable encrypted backups and restore drills, use TLS between
 hosts, monitor disk/replication health, and define retention and disaster-recovery objectives.
+
+Migration 015 adds the paper-only strategy registry. A strategy may be approved only from a
+completed, integrity-checked walk-forward experiment whose evidence status is
+`research_candidate` with no gate failures. Approval and revocation form an immutable hash
+chain; replacing an active strategy requires an explicit revocation first. This registry
+does not unlock live trading.
 
 Configure only a newly rotated Token on the trusted host:
 

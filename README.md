@@ -193,10 +193,12 @@ scripts/local-db.sh migrate
 
 The console binds only to `127.0.0.1` and requires `AQ_WEB_USERNAME` plus a password of at
 least 16 characters in the untracked root `.env`. It can inspect trusted daily data and
-submit bounded ingestion and fixed baseline backtest jobs. Its trading page remains explicitly
-locked until sample-out strategy evidence, a portfolio risk engine, QMT gateway, reconciliation,
-and simulation evidence exist. The portfolio risk core is now present, but the other release
-gates remain open and the current real-data validation result is not profitable evidence.
+submit bounded ingestion and fixed baseline backtest jobs. The execution core now includes
+paper risk, reconciliation, persistent simulation, fenced scheduling, read-only QMT
+convergence, and an immutable paper-strategy approval registry. Live trading remains hard
+locked. No strategy may enter the paper scheduler until a completed walk-forward experiment
+passes every sample-out gate and an operator explicitly approves the resulting paper-only
+artifact. The current infrastructure canary is not profitable strategy evidence.
 
 Copy `.env.example` to an untracked `.env` and supply credentials/DSNs only on the trusted
 runtime host. The Tushare Token previously shared in chat must be rotated before use; set
