@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime
 from decimal import Decimal
 from itertools import pairwise
 
 from autoquant.backtest.ledger import ExecutionModel, PortfolioLedger
 from autoquant.backtest.models import (
+    AccountSnapshot,
     BacktestResult,
     BacktestSession,
     ExecutionReport,
+    MarketState,
+    OrderIntent,
 )
 from autoquant.backtest.rules import FeeSchedule
 from autoquant.clock import to_utc
@@ -34,21 +38,96 @@ class BacktestEngine:
         initial_cash: Decimal,
         sessions: tuple[BacktestSession, ...],
     ) -> BacktestResult:
-        _require_nonblank(strategy_id, name="strategy_id")
-        _require_lowercase_sha256(manifest_hash, name="manifest_hash")
-        cutoff = to_utc(as_of, name="as_of")
         sessions = tuple(sessions)
         if not sessions:
             raise ValueError("sessions cannot be empty")
+        return self._run_with_order_factory(
+            strategy_id=strategy_id,
+            manifest_hash=manifest_hash,
+            as_of=as_of,
+            initial_cash=initial_cash,
+            market_sessions=tuple(
+                session.markets for session in sessions
+            ),
+            order_factory=lambda index, _markets, _previous: (
+                sessions[index].orders
+            ),
+        )
+
+    def run_dynamic(
+        self,
+        *,
+        strategy_id: str,
+        manifest_hash: str,
+        as_of: datetime,
+        initial_cash: Decimal,
+        market_sessions: tuple[tuple[MarketState, ...], ...],
+        order_factory: Callable[
+            [
+                int,
+                tuple[MarketState, ...],
+                AccountSnapshot | None,
+            ],
+            tuple[OrderIntent, ...],
+        ],
+    ) -> BacktestResult:
+        """Run an order policy against actual prior-session fills."""
+
+        return self._run_with_order_factory(
+            strategy_id=strategy_id,
+            manifest_hash=manifest_hash,
+            as_of=as_of,
+            initial_cash=initial_cash,
+            market_sessions=market_sessions,
+            order_factory=order_factory,
+        )
+
+    def _run_with_order_factory(
+        self,
+        *,
+        strategy_id: str,
+        manifest_hash: str,
+        as_of: datetime,
+        initial_cash: Decimal,
+        market_sessions: tuple[tuple[MarketState, ...], ...],
+        order_factory: Callable[
+            [
+                int,
+                tuple[MarketState, ...],
+                AccountSnapshot | None,
+            ],
+            tuple[OrderIntent, ...],
+        ],
+    ) -> BacktestResult:
+        _require_nonblank(strategy_id, name="strategy_id")
+        _require_lowercase_sha256(manifest_hash, name="manifest_hash")
+        cutoff = to_utc(as_of, name="as_of")
+        market_sessions = tuple(
+            tuple(markets) for markets in market_sessions
+        )
+        if not market_sessions:
+            raise ValueError("sessions cannot be empty")
+        if any(not markets for markets in market_sessions):
+            raise ValueError("every session requires market data")
+        empty_sessions = tuple(
+            BacktestSession(
+                session_date=markets[0].bar.session_date,
+                markets=markets,
+                orders=(),
+            )
+            for markets in market_sessions
+        )
         if any(
             current.session_date >= following.session_date
-            for current, following in pairwise(sessions)
+            for current, following in pairwise(empty_sessions)
         ):
             raise ValueError("sessions must be strictly increasing and unique")
-        for session in sessions:
+        for session in empty_sessions:
             for market in session.markets:
                 if market.bar.available_at > cutoff:
-                    raise ValueError("market data is not visible at the requested as_of")
+                    raise ValueError(
+                        "market data is not visible at the requested as_of"
+                    )
 
         ledger = PortfolioLedger(
             initial_cash=initial_cash,
@@ -56,9 +135,21 @@ class BacktestEngine:
             execution=self._execution,
         )
         reports: list[ExecutionReport] = []
-        snapshots = []
+        snapshots: list[AccountSnapshot] = []
         rule_versions: set[str] = set()
-        for session in sessions:
+        for index, empty_session in enumerate(empty_sessions):
+            orders = tuple(
+                order_factory(
+                    index,
+                    empty_session.markets,
+                    None if not snapshots else snapshots[-1],
+                )
+            )
+            session = BacktestSession(
+                session_date=empty_session.session_date,
+                markets=empty_session.markets,
+                orders=orders,
+            )
             ledger.start_session(session.session_date)
             market_by_instrument = {
                 market.bar.instrument: market for market in session.markets

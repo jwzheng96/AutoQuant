@@ -8,9 +8,11 @@ from autoquant.backtest.engine import BacktestEngine
 from autoquant.backtest.models import (
     AccountSnapshot,
     BacktestSession,
+    ExecutionState,
     MarketState,
     OrderIntent,
     OrderSide,
+    RejectionCode,
     backtest_artifact_hash,
 )
 from autoquant.backtest.rules import AshareRuleBook, SecurityStatus
@@ -120,6 +122,52 @@ def test_backtest_is_deterministic_and_records_versions() -> None:
     assert first.result_hash == second.result_hash
     assert first.execution_version == "daily-open-conservative-v1"
     assert "sse-szse-cash-equity-2026-07-06" in first.rule_versions
+
+
+def test_dynamic_orders_observe_actual_prior_fill_state() -> None:
+    following = DAY + timedelta(days=1)
+    observed_position_counts: list[int] = []
+
+    def order_factory(
+        index: int,
+        _: tuple[MarketState, ...],
+        previous: AccountSnapshot | None,
+    ) -> tuple[OrderIntent, ...]:
+        observed_position_counts.append(
+            0 if previous is None else len(previous.positions)
+        )
+        if index == 0:
+            return (order("dynamic-buy", OrderSide.BUY),)
+        return ()
+
+    result = BacktestEngine().run_dynamic(
+        strategy_id="dynamic-orders-v1",
+        manifest_hash="a" * 64,
+        as_of=datetime(2026, 7, 24, tzinfo=UTC),
+        initial_cash=Decimal("500"),
+        market_sessions=(
+            (market(),),
+            (
+                market(
+                    following,
+                    open_price="11",
+                    high_price="11.2",
+                    low_price="10.8",
+                    close_price="11.1",
+                    pre_close="10.2",
+                ),
+            ),
+        ),
+        order_factory=order_factory,
+    )
+
+    assert observed_position_counts == [0, 0]
+    assert len(result.reports) == 1
+    assert result.reports[0].state is ExecutionState.REJECTED
+    assert (
+        result.reports[0].rejection_code
+        is RejectionCode.CASH_INSUFFICIENT
+    )
 
 
 def test_backtest_rejects_data_not_visible_at_as_of() -> None:
