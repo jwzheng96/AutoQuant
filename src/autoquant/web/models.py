@@ -359,6 +359,50 @@ class ValidationExperimentDetail(BaseModel):
     folds: tuple[ValidationFoldView, ...]
 
 
+class ValidationCampaignComponentView(BaseModel):
+    sequence: int = Field(ge=1)
+    instrument: str
+    experiment_id: UUID
+    state: OperatorJobState
+    evidence_status: str | None = None
+    gate_failures: tuple[str, ...] = ()
+    result_hash: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+
+
+class ValidationCampaignView(BaseModel):
+    campaign_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    campaign_key: str
+    manifest_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    instruments: tuple[str, ...] = Field(min_length=3, max_length=20)
+    created_at: datetime
+    status: str
+    components: tuple[ValidationCampaignComponentView, ...]
+    live_trading_locked: bool = True
+
+    @field_validator("created_at")
+    @classmethod
+    def require_aware_campaign_time(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("campaign creation time must be timezone-aware")
+        return value.astimezone(UTC)
+
+    @model_validator(mode="after")
+    def require_campaign_components(self) -> Self:
+        if (
+            len(self.components) != len(self.instruments)
+            or tuple(value.sequence for value in self.components)
+            != tuple(range(1, len(self.components) + 1))
+            or tuple(value.instrument for value in self.components)
+            != self.instruments
+            or not self.live_trading_locked
+        ):
+            raise ValueError("validation campaign view is inconsistent")
+        return self
+
+
 class RiskDecisionView(BaseModel):
     decision_hash: str
     account_id: str

@@ -54,12 +54,18 @@ from autoquant.web.models import (
     QmtReadOnlyStatus,
     ResearchManifest,
     RiskControlStatus,
+    ValidationCampaignComponentView,
+    ValidationCampaignView,
     ValidationExperiment,
     ValidationExperimentDetail,
     WalkForwardJobRequest,
 )
 from autoquant.web.risk_store import PostgresRiskDecisionRepository
 from autoquant.web.store import PostgresOperatorRepository
+from autoquant.web.validation_campaign_store import (
+    PostgresValidationCampaignRepository,
+    ValidationCampaignStatus,
+)
 from autoquant.web.validation_store import (
     PostgresValidationRepository,
     validation_config,
@@ -116,6 +122,10 @@ class ConsoleServicePort(Protocol):
 
     async def validation_detail(self, experiment_id: UUID) -> ValidationExperimentDetail: ...
 
+    async def list_validation_campaigns(
+        self, *, limit: int = 50
+    ) -> tuple[ValidationCampaignView, ...]: ...
+
     async def risk_status(self) -> RiskControlStatus: ...
 
     async def execution_status(self) -> PaperExecutionStatus: ...
@@ -152,6 +162,9 @@ class ConsoleService:
         backtest_runner: BacktestRunnerPort | None = None,
         validation_repository: PostgresValidationRepository | None = None,
         validation_runner: WalkForwardRunnerPort | None = None,
+        validation_campaign_repository: (
+            PostgresValidationCampaignRepository | None
+        ) = None,
         risk_repository: PostgresRiskDecisionRepository | None = None,
         execution_repository: PostgresPaperExecutionRepository | None = None,
         execution_control_repository: PostgresExecutionControlRepository | None = None,
@@ -181,6 +194,7 @@ class ConsoleService:
             raise ValueError("validation repository and runner must be configured together")
         self._validations = validation_repository
         self._validation_runner = validation_runner
+        self._validation_campaigns = validation_campaign_repository
         self._risk = risk_repository
         self._execution = execution_repository
         self._execution_controls = execution_control_repository
@@ -339,6 +353,8 @@ class ConsoleService:
                 pass
         if self._validations is not None:
             await self._validations.close()
+        if self._validation_campaigns is not None:
+            await self._validation_campaigns.close()
         if self._risk is not None:
             await self._risk.close()
         if self._execution is not None:
@@ -505,6 +521,16 @@ class ConsoleService:
     async def validation_detail(self, experiment_id: UUID) -> ValidationExperimentDetail:
         repository, _ = self._require_validations()
         return await repository.detail(experiment_id)
+
+    async def list_validation_campaigns(
+        self,
+        *,
+        limit: int = 50,
+    ) -> tuple[ValidationCampaignView, ...]:
+        if self._validation_campaigns is None:
+            return ()
+        values = await self._validation_campaigns.list_campaigns(limit=limit)
+        return tuple(_validation_campaign_view(value) for value in values)
 
     async def risk_status(self) -> RiskControlStatus:
         if self._risk is None:
@@ -1022,10 +1048,9 @@ class ConsoleService:
         repository, runner = self._require_validations()
         try:
             await self._audit("operator.validation.started", experiment.experiment_id, {})
-            result = await runner.run(
-                manifest_hash=experiment.request.manifest_hash,
-                instrument=experiment.request.instrument,
-                config=validation_config(experiment.request),
+            result = await self._run_validation_with_retry(
+                runner=runner,
+                experiment=experiment,
             )
             await repository.complete_experiment(
                 experiment.experiment_id, result=result, now=self._now()
@@ -1070,6 +1095,28 @@ class ConsoleService:
                 )
             except AutoQuantError:
                 pass
+
+    async def _run_validation_with_retry(
+        self,
+        *,
+        runner: WalkForwardRunnerPort,
+        experiment: ValidationExperiment,
+    ) -> WalkForwardResult:
+        maximum_attempts = 3
+        for attempt in range(1, maximum_attempts + 1):
+            try:
+                return await runner.run(
+                    manifest_hash=experiment.request.manifest_hash,
+                    instrument=experiment.request.instrument,
+                    config=validation_config(experiment.request),
+                )
+            except AutoQuantError:
+                if attempt == maximum_attempts:
+                    raise
+                await asyncio.sleep(
+                    self._poll_interval * attempt
+                )
+        raise AssertionError("validation retry loop exhausted")
 
     async def _run_job(self, job: OperatorJob) -> None:
         try:
@@ -1142,6 +1189,31 @@ class ConsoleService:
     async def _audit(self, event_type: str, job_id: UUID, payload: Mapping[str, object]) -> None:
         normalized = {"job_id": str(job_id), **dict(payload)}
         await self._control.append_audit_event(event_type, self._now(), normalized)
+
+
+def _validation_campaign_view(
+    value: ValidationCampaignStatus,
+) -> ValidationCampaignView:
+    return ValidationCampaignView(
+        campaign_hash=value.spec.campaign_hash,
+        campaign_key=value.spec.campaign_key,
+        manifest_hash=value.spec.manifest_hash,
+        instruments=value.spec.instruments,
+        created_at=value.created_at,
+        status=value.status,
+        components=tuple(
+            ValidationCampaignComponentView(
+                sequence=component.sequence,
+                instrument=component.instrument,
+                experiment_id=component.experiment_id,
+                state=component.state,
+                evidence_status=component.evidence_status,
+                gate_failures=component.gate_failures,
+                result_hash=component.result_hash,
+            )
+            for component in value.components
+        ),
+    )
 
 
 def _safe_result(result: Mapping[str, object]) -> dict[str, object]:

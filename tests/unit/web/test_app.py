@@ -24,6 +24,8 @@ from autoquant.web.models import (
     QmtReadOnlyStatus,
     ResearchManifest,
     RiskControlStatus,
+    ValidationCampaignComponentView,
+    ValidationCampaignView,
     ValidationExperiment,
     ValidationExperimentDetail,
     WalkForwardJobRequest,
@@ -162,6 +164,43 @@ class FakeConsoleService:
             requested_by="operator",
         )
         return ValidationExperimentDetail(experiment=experiment, folds=())
+
+    async def list_validation_campaigns(
+        self,
+        *,
+        limit: int = 50,
+    ) -> tuple[ValidationCampaignView, ...]:
+        assert 1 <= limit <= 200
+        return (
+            ValidationCampaignView(
+                campaign_hash="c" * 64,
+                campaign_key="campaign-web-test-0001",
+                manifest_hash="a" * 64,
+                instruments=(
+                    "000001.XSHE",
+                    "600000.XSHG",
+                    "600519.XSHG",
+                ),
+                created_at=datetime(2025, 1, 1, tzinfo=UTC),
+                status="queued",
+                components=tuple(
+                    ValidationCampaignComponentView(
+                        sequence=sequence,
+                        instrument=instrument,
+                        experiment_id=uuid4(),
+                        state="queued",
+                    )
+                    for sequence, instrument in enumerate(
+                        (
+                            "000001.XSHE",
+                            "600000.XSHG",
+                            "600519.XSHG",
+                        ),
+                        start=1,
+                    )
+                ),
+            ),
+        )
 
     async def risk_status(self) -> RiskControlStatus:
         return RiskControlStatus(
@@ -528,3 +567,19 @@ def test_walk_forward_validation_is_csrf_protected_and_parameter_grid_is_bounded
     assert accepted.json()["validator_id"] == "sma_cross_walk_forward_v1"
     assert rejected.status_code == 422
     assert service.created_validations[0].train_sessions == 60
+
+
+def test_validation_campaigns_are_read_only_and_live_locked() -> None:
+    app = create_app(_settings(), service=FakeConsoleService())
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/v1/validation-campaigns?limit=10",
+            auth=_auth(),
+        )
+
+    assert response.status_code == 200
+    campaign = response.json()["items"][0]
+    assert campaign["status"] == "queued"
+    assert campaign["live_trading_locked"] is True
+    assert len(campaign["components"]) == 3

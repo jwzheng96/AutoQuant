@@ -25,14 +25,69 @@ from autoquant.backtest.runner import (
 from autoquant.data.daily_ingestion import ValidatedDailyDataset
 from autoquant.data.models import _canonical_hash, _decimal_text, _require_lowercase_sha256
 
-VALIDATION_VERSION = "rolling-walk-forward-v2"
+VALIDATION_VERSION = "rolling-walk-forward-v3-common-calendar"
 SELECTION_OBJECTIVE_VERSION = "return-minus-drawdown-turnover-v1"
+MINIMUM_COMMON_CALENDAR_COVERAGE = Decimal("0.98")
 
 
 class MarketCompilerPort(Protocol):
     def compile(
         self, instrument: str, dataset: ValidatedDailyDataset
     ) -> tuple[MarketState, ...]: ...
+
+
+def compile_common_calendar_markets(
+    *,
+    instruments: tuple[str, ...],
+    dataset: ValidatedDailyDataset,
+    compiler: MarketCompilerPort,
+    minimum_coverage: Decimal = MINIMUM_COMMON_CALENDAR_COVERAGE,
+) -> dict[str, tuple[MarketState, ...]]:
+    normalized = tuple(sorted(instruments))
+    if (
+        not normalized
+        or len(set(normalized)) != len(normalized)
+        or not minimum_coverage.is_finite()
+        or not Decimal("0") < minimum_coverage <= Decimal("1")
+    ):
+        raise ValueError("common-calendar inputs are invalid")
+    compiled = {
+        instrument: compiler.compile(instrument, dataset)
+        for instrument in normalized
+    }
+    common_dates = set.intersection(
+        *(
+            {value.bar.session_date for value in markets}
+            for markets in compiled.values()
+        )
+    )
+    maximum_sessions = max(len(value) for value in compiled.values())
+    if (
+        not common_dates
+        or Decimal(len(common_dates)) / Decimal(maximum_sessions)
+        < minimum_coverage
+    ):
+        raise ValueError(
+            "multi-instrument manifest lacks sufficient common-calendar coverage"
+        )
+    values = {
+        instrument: tuple(
+            market
+            for market in markets
+            if market.bar.session_date in common_dates
+        )
+        for instrument, markets in compiled.items()
+    }
+    expected_dates = tuple(
+        value.bar.session_date for value in next(iter(values.values()))
+    )
+    if any(
+        tuple(value.bar.session_date for value in markets)
+        != expected_dates
+        for markets in values.values()
+    ):
+        raise ValueError("common-calendar compilation is not aligned")
+    return values
 
 
 @dataclass(frozen=True, slots=True, order=True)
@@ -312,7 +367,11 @@ class WalkForwardValidator:
         if instrument not in manifest.instruments:
             raise ValueError("instrument is not present in the selected manifest")
         dataset = await self._reader.query(manifest.manifest_hash, manifest.as_of)
-        markets = self._compiler.compile(instrument, dataset)
+        markets = compile_common_calendar_markets(
+            instruments=manifest.instruments,
+            dataset=dataset,
+            compiler=self._compiler,
+        )[instrument]
         minimum = config.train_sessions + config.embargo_sessions + config.test_sessions
         if len(markets) < minimum:
             raise ValueError(

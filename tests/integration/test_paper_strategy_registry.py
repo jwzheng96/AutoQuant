@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from autoquant.adapters.postgres import PostgresControlRepository
 from autoquant.backtest.rules import AshareRuleBook, SecurityStatus
+from autoquant.backtest.validation import SmaParameters
 from autoquant.data.models import DatasetManifest
 from autoquant.data.quality import QualityReport
 from autoquant.execution.control import KillSwitchReason
@@ -84,6 +85,10 @@ from autoquant.execution.validated_sma_portfolio import (
 )
 from autoquant.risk.models import RiskPolicy
 from autoquant.web.models import WalkForwardJobRequest
+from autoquant.web.validation_campaign_store import (
+    PostgresValidationCampaignRepository,
+    ValidationCampaignSpec,
+)
 from autoquant.web.validation_store import PostgresValidationRepository
 
 POSTGRES_DSN = os.environ.get("AQ_POSTGRES_DSN", "").strip()
@@ -133,6 +138,7 @@ async def registry_fixture() -> AsyncIterator[
             "migrations/postgres/018_qmt_recovery_drills.sql",
             "migrations/postgres/019_paper_portfolio_registry.sql",
             "migrations/postgres/020_portfolio_oos_assessment.sql",
+            "migrations/postgres/021_validation_campaigns.sql",
         )
     )
     report = QualityReport(
@@ -335,6 +341,98 @@ async def test_registry_tables_reject_mutation(
                     """
                 ),
                 {"registration_hash": registration.registration_hash},
+            )
+
+
+@pytest.mark.asyncio
+async def test_validation_campaign_atomically_queues_aligned_requests(
+    registry_fixture: tuple[
+        PostgresPaperStrategyRegistry,
+        ValidatedSmaRegistration,
+        AsyncEngine,
+        str,
+    ],
+) -> None:
+    _, _, engine, schema = registry_fixture
+    control = PostgresControlRepository(engine=engine, schema=schema)
+    campaigns = PostgresValidationCampaignRepository(
+        engine=engine,
+        schema=schema,
+    )
+    instruments = (
+        "000001.XSHE",
+        "600000.XSHG",
+        "600519.XSHG",
+    )
+    report = QualityReport(
+        requested_instruments=instruments,
+        start=datetime(2024, 1, 1, tzinfo=UTC),
+        end=datetime(2026, 7, 22, 7, tzinfo=UTC),
+        as_of=AS_OF,
+        issues=(),
+        production_complete=True,
+    )
+    manifest = DatasetManifest(
+        source="tushare",
+        instruments=instruments,
+        start_time=datetime(2024, 1, 1, tzinfo=UTC),
+        end_time=datetime(2026, 7, 22, 7, tzinfo=UTC),
+        as_of=AS_OF,
+        record_hashes=("7" * 64, "8" * 64, "9" * 64),
+        quality_report_hash=report.report_hash,
+        production_complete=True,
+        row_count=3,
+    )
+    await control.save_quality_report(report)
+    await control.save_manifest(manifest)
+    spec = ValidationCampaignSpec(
+        campaign_key="portfolio-research-integration-0001",
+        manifest_hash=manifest.manifest_hash,
+        instruments=instruments,
+        initial_cash=Decimal("1000000"),
+        allocation=Decimal("0.20"),
+        slippage_bps=Decimal("5"),
+        train_sessions=120,
+        test_sessions=20,
+        embargo_sessions=1,
+        candidates=(
+            SmaParameters(5, 20),
+            SmaParameters(10, 30),
+            SmaParameters(20, 60),
+        ),
+        requested_by="operator",
+    )
+
+    first = await campaigns.create(spec, created_at=APPROVED_AT)
+    repeated = await campaigns.create(spec, created_at=APPROVED_AT)
+    listed = await campaigns.list_campaigns(limit=10)
+
+    assert first == repeated
+    assert listed == (first,)
+    assert first.status == "queued"
+    assert len(first.components) == 3
+    assert {
+        value.instrument for value in first.components
+    } == set(instruments)
+    with pytest.raises(ValueError, match="another specification"):
+        await campaigns.create(
+            replace(spec, slippage_bps=Decimal("6")),
+            created_at=APPROVED_AT,
+        )
+    with pytest.raises(SQLAlchemyError):
+        async with engine.begin() as connection:
+            await connection.exec_driver_sql(
+                f'SET LOCAL search_path TO "{schema}"'
+            )
+            await connection.execute(
+                text(
+                    """
+                    UPDATE validation_campaigns
+                    SET requested_by = 'tampered'
+                    WHERE campaign_hash = :campaign_hash
+                    """
+                ),
+                {"campaign_hash": spec.campaign_hash},
             )
 
 

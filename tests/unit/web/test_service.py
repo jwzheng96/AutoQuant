@@ -681,6 +681,44 @@ async def test_validation_worker_commits_result_and_safe_audit_summary() -> None
 
 
 @pytest.mark.asyncio
+async def test_validation_worker_retries_transient_dependency_failure() -> None:
+    validations = MagicMock()
+    validations.complete_experiment = AsyncMock()
+    validations.fail_experiment = AsyncMock()
+    result = MagicMock()
+    result.result_hash = "b" * 64
+    result.manifest_hash = "a" * 64
+    result.folds = (MagicMock(),)
+    runner = MagicMock()
+    runner.run = AsyncMock(
+        side_effect=(
+            PersistenceUnavailableError("temporary dependency failure"),
+            result,
+        )
+    )
+    control = MagicMock()
+    control.append_audit_event = AsyncMock(return_value="d" * 64)
+    service = _service(
+        operator=MagicMock(),
+        control=control,
+        runner=AsyncMock(),
+        validations=validations,
+        validation_runner=runner,
+    )
+    experiment = _validation_experiment()
+
+    await service._run_validation(experiment)
+
+    assert runner.run.await_count == 2
+    validations.complete_experiment.assert_awaited_once_with(
+        experiment.experiment_id,
+        result=result,
+        now=NOW,
+    )
+    validations.fail_experiment.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_validation_worker_uses_stable_failure_code() -> None:
     validations = MagicMock()
     validations.complete_experiment = AsyncMock()

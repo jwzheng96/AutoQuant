@@ -170,17 +170,21 @@ class PaperStrategyPromotionService:
         signal_manifest = await self._controls.read_manifest(
             signal_manifest_hash
         )
-        for name, manifest in (
-            ("validation", validation_manifest),
-            ("signal", signal_manifest),
+        if (
+            not validation_manifest.production_complete
+            or request.instrument
+            not in validation_manifest.instruments
         ):
-            if (
-                not manifest.production_complete
-                or manifest.instruments != (request.instrument,)
-            ):
-                raise ValueError(
-                    f"{name} manifest is not exact and production-complete"
-                )
+            raise ValueError(
+                "validation manifest does not contain the candidate instrument"
+            )
+        if (
+            not signal_manifest.production_complete
+            or signal_manifest.instruments != (request.instrument,)
+        ):
+            raise ValueError(
+                "signal manifest is not exact and production-complete"
+            )
         if validation_manifest.manifest_hash != request.manifest_hash:
             raise ValueError("validation manifest hash does not match the experiment")
         signal_dataset = await self._datasets.query(

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime, time, timedelta
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from typing import Protocol
 
 from autoquant.backtest.engine import BacktestEngine
@@ -15,10 +15,16 @@ from autoquant.backtest.models import (
 )
 from autoquant.backtest.rules import AshareRuleBook
 from autoquant.data.daily_ingestion import ValidatedDailyDataset
-from autoquant.data.models import DatasetManifest
+from autoquant.data.daily_models import (
+    AdjustmentFactorRevision,
+    DailyBarRevision,
+    DailyPriceLimit,
+)
+from autoquant.data.models import DatasetManifest, _canonical_hash
 from autoquant.web.models import BacktestRunRequest
 
 STRATEGY_ID = "manifest_buy_hold_v1"
+ADJUSTMENT_VERSION = "qfq-latest-manifest-anchor-v1"
 
 
 class ManifestControlPort(Protocol):
@@ -51,12 +57,21 @@ class ManifestMarketCompiler:
         if not bars:
             raise ValueError("manifest has no bars for the selected instrument")
         factors = tuple(
-            factor.factor
+            factor
             for factor in dataset.factors
             if factor.instrument == instrument
         )
-        if len(factors) != len(bars) or len(set(factors)) != 1:
-            raise ValueError("corporate-action accounting is required for this manifest")
+        factor_by_date = {
+            factor.session_date: factor for factor in factors
+        }
+        bar_dates = {bar.session_date for bar in bars}
+        if (
+            len(factor_by_date) != len(factors)
+            or set(factor_by_date) != bar_dates
+        ):
+            raise ValueError(
+                "adjustment factors do not exactly cover every market bar"
+            )
 
         lifecycle = tuple(
             item
@@ -86,25 +101,135 @@ class ManifestMarketCompiler:
             for item in dataset.coverage.price_limits
             if item.instrument == instrument
         }
-        bar_dates = {bar.session_date for bar in bars}
         if not bar_dates.issubset(open_sessions):
             raise ValueError("trading calendar does not cover every market bar")
-        if set(suspension_by_date) != bar_dates:
+        if not bar_dates.issubset(suspension_by_date):
             raise ValueError("suspension evidence does not cover every market bar")
-        if set(limit_by_date) != bar_dates:
+        if not bar_dates.issubset(limit_by_date):
             raise ValueError("exact price limits do not cover every market bar")
 
-        return tuple(
-            MarketState(
+        anchor = factor_by_date[bars[-1].session_date]
+        values: list[MarketState] = []
+        for bar in bars:
+            factor = factor_by_date[bar.session_date]
+            ratio = _divide(factor.factor, anchor.factor)
+            limit = limit_by_date[bar.session_date]
+            adjusted_bar = _adjust_bar(
                 bar=bar,
-                rules=self._rulebook.resolve_with_price_limit(
-                    instrument, bar.session_date, limit_by_date[bar.session_date]
-                ),
-                suspended=suspension_by_date[bar.session_date].suspended,
-                daily_price_limit=limit_by_date[bar.session_date],
+                factor=factor,
+                anchor=anchor,
+                ratio=ratio,
             )
-            for bar in bars
-        )
+            adjusted_limit = _adjust_limit(
+                limit=limit,
+                factor=factor,
+                anchor=anchor,
+                ratio=ratio,
+            )
+            values.append(
+                MarketState(
+                    bar=adjusted_bar,
+                    rules=self._rulebook.resolve_with_price_limit(
+                        instrument,
+                        bar.session_date,
+                        adjusted_limit,
+                    ),
+                    suspended=suspension_by_date[
+                        bar.session_date
+                    ].suspended,
+                    daily_price_limit=adjusted_limit,
+                )
+            )
+        return tuple(values)
+
+
+def _adjust_bar(
+    *,
+    bar: DailyBarRevision,
+    factor: AdjustmentFactorRevision,
+    anchor: AdjustmentFactorRevision,
+    ratio: Decimal,
+) -> DailyBarRevision:
+    if ratio == Decimal("1"):
+        return bar
+    evidence_hash = _canonical_hash(
+        {
+            "anchor_factor_hash": anchor.content_hash,
+            "bar_hash": bar.content_hash,
+            "factor_hash": factor.content_hash,
+            "version": ADJUSTMENT_VERSION,
+        }
+    )
+    return DailyBarRevision.from_values(
+        source=bar.source,
+        instrument=bar.instrument,
+        session_date=bar.session_date,
+        event_time=bar.event_time,
+        available_at=max(
+            bar.available_at,
+            factor.available_at,
+            anchor.available_at,
+        ),
+        ingested_at=max(
+            bar.ingested_at,
+            factor.ingested_at,
+            anchor.ingested_at,
+        ),
+        source_revision=f"{bar.source_revision}:{ADJUSTMENT_VERSION}",
+        availability_policy=bar.availability_policy,
+        evidence_hash=evidence_hash,
+        open_price=_multiply(bar.open_price, ratio),
+        high_price=_multiply(bar.high_price, ratio),
+        low_price=_multiply(bar.low_price, ratio),
+        close_price=_multiply(bar.close_price, ratio),
+        pre_close=_multiply(bar.pre_close, ratio),
+        volume=bar.volume,
+        turnover=bar.turnover,
+    )
+
+
+def _adjust_limit(
+    *,
+    limit: DailyPriceLimit,
+    factor: AdjustmentFactorRevision,
+    anchor: AdjustmentFactorRevision,
+    ratio: Decimal,
+) -> DailyPriceLimit:
+    if ratio == Decimal("1"):
+        return limit
+    return DailyPriceLimit(
+        source=limit.source,
+        instrument=limit.instrument,
+        session_date=limit.session_date,
+        pre_close=_multiply(limit.pre_close, ratio),
+        up_limit=_multiply(limit.up_limit, ratio),
+        down_limit=_multiply(limit.down_limit, ratio),
+        available_at=max(
+            limit.available_at,
+            factor.available_at,
+            anchor.available_at,
+        ),
+        response_hash=_canonical_hash(
+            {
+                "anchor_factor_hash": anchor.content_hash,
+                "factor_hash": factor.content_hash,
+                "limit_hash": limit.content_hash,
+                "version": ADJUSTMENT_VERSION,
+            }
+        ),
+    )
+
+
+def _divide(left: Decimal, right: Decimal) -> Decimal:
+    with localcontext() as context:
+        context.prec = 34
+        return +(left / right)
+
+
+def _multiply(left: Decimal, right: Decimal) -> Decimal:
+    with localcontext() as context:
+        context.prec = 34
+        return +(left * right)
 
 
 class ManifestBacktestRunner:

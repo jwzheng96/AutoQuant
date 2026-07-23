@@ -12,6 +12,7 @@ from autoquant.backtest.validation import (
     WalkForwardConfig,
     WalkForwardValidator,
     _sma_sessions,
+    compile_common_calendar_markets,
 )
 from autoquant.data.daily_ingestion import ValidatedDailyDataset
 from autoquant.data.daily_models import (
@@ -126,6 +127,62 @@ class Compiler:
         assert instrument == INSTRUMENT
         assert isinstance(dataset, ValidatedDailyDataset)
         return self.markets
+
+
+class UniverseCompiler:
+    def __init__(
+        self,
+        values: dict[str, tuple[MarketState, ...]],
+    ) -> None:
+        self.values = values
+
+    def compile(
+        self,
+        instrument: str,
+        dataset: ValidatedDailyDataset,
+    ) -> tuple[MarketState, ...]:
+        assert isinstance(dataset, ValidatedDailyDataset)
+        return self.values[instrument]
+
+
+def test_common_calendar_keeps_only_real_dates_and_enforces_coverage() -> None:
+    markets = _markets(100)
+    dataset = ValidatedDailyDataset(
+        bars=(),
+        factors=(),
+        coverage=DailyCoverageEvidence((), (), ()),
+    )
+    instruments = (
+        "000001.XSHE",
+        "600000.XSHG",
+        "600519.XSHG",
+    )
+
+    aligned = compile_common_calendar_markets(
+        instruments=instruments,
+        dataset=dataset,
+        compiler=UniverseCompiler(
+            {
+                instruments[0]: markets,
+                instruments[1]: markets[:-1],
+                instruments[2]: markets,
+            }
+        ),
+    )
+
+    assert {len(value) for value in aligned.values()} == {99}
+    with pytest.raises(ValueError, match="common-calendar coverage"):
+        compile_common_calendar_markets(
+            instruments=instruments,
+            dataset=dataset,
+            compiler=UniverseCompiler(
+                {
+                    instruments[0]: markets,
+                    instruments[1]: markets[:-3],
+                    instruments[2]: markets,
+                }
+            ),
+        )
 
 
 def _config() -> WalkForwardConfig:

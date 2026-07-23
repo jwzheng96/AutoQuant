@@ -1,19 +1,103 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
+from decimal import Decimal
+from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
 
 from autoquant.config import AppSettings, RuntimeEnvironment
+from autoquant.data.daily_ingestion import ValidatedDailyDataset
+from autoquant.data.daily_models import DailyCoverageEvidence
 from autoquant.errors import MissingCapabilityError
 from autoquant.operations import (
+    _validate_campaign_dataset,
     approve_paper_sma_strategy,
     revoke_paper_strategy,
 )
 
 NOW = datetime(2026, 7, 23, 8, tzinfo=UTC)
+
+
+def test_validation_campaign_dataset_requires_aligned_history() -> None:
+    instruments = (
+        "000001.XSHE",
+        "600000.XSHG",
+        "600519.XSHG",
+    )
+    bars = tuple(
+        SimpleNamespace(
+            instrument=instrument,
+            session_date=date(2025, 1, session),
+            pre_close=Decimal("10"),
+            high_price=Decimal("11"),
+        )
+        for instrument in instruments
+        for session in range(1, 7)
+    )
+    factors = tuple(
+        SimpleNamespace(
+            instrument=value.instrument,
+            session_date=value.session_date,
+        )
+        for value in bars
+    )
+    dataset = ValidatedDailyDataset(
+        bars=bars,  # type: ignore[arg-type]
+        factors=factors,  # type: ignore[arg-type]
+        coverage=DailyCoverageEvidence((), (), (), ()),
+    )
+    compiler = MagicMock()
+    compiler.compile.side_effect = lambda instrument, candidate_dataset: tuple(
+        SimpleNamespace(
+            bar=value,
+            rules=SimpleNamespace(buy_minimum=100),
+        )
+        for value in candidate_dataset.bars
+        if value.instrument == instrument
+    )
+
+    _validate_campaign_dataset(
+        dataset=dataset,
+        instruments=instruments,
+        minimum_sessions=6,
+        initial_cash=Decimal("1000000"),
+        allocation=Decimal("0.20"),
+        slippage_bps=Decimal("5"),
+        maximum_order_notional=Decimal("100000"),
+        compiler=cast(Any, compiler),
+    )
+
+    with pytest.raises(ValueError, match="affordable"):
+        _validate_campaign_dataset(
+            dataset=dataset,
+            instruments=instruments,
+            minimum_sessions=6,
+            initial_cash=Decimal("1000000"),
+            allocation=Decimal("0.20"),
+            slippage_bps=Decimal("5"),
+            maximum_order_notional=Decimal("100"),
+            compiler=cast(Any, compiler),
+        )
+
+    with pytest.raises(ValueError, match="common-calendar"):
+        _validate_campaign_dataset(
+            dataset=ValidatedDailyDataset(
+                bars=bars[:-1],  # type: ignore[arg-type]
+                factors=factors[:-1],  # type: ignore[arg-type]
+                coverage=dataset.coverage,
+            ),
+            instruments=instruments,
+            minimum_sessions=6,
+            initial_cash=Decimal("1000000"),
+            allocation=Decimal("0.20"),
+            slippage_bps=Decimal("5"),
+            maximum_order_notional=Decimal("100000"),
+            compiler=cast(Any, compiler),
+        )
 
 
 def _settings() -> AppSettings:

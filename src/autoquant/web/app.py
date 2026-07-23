@@ -51,6 +51,9 @@ from autoquant.web.models import (
 from autoquant.web.risk_store import PostgresRiskDecisionRepository
 from autoquant.web.service import ConsoleService, ConsoleServicePort
 from autoquant.web.store import PostgresOperatorRepository
+from autoquant.web.validation_campaign_store import (
+    PostgresValidationCampaignRepository,
+)
 from autoquant.web.validation_store import PostgresValidationRepository
 
 _WEB_ROOT = Path(__file__).parent
@@ -289,6 +292,19 @@ def create_app(
             ) from None
         return detail.model_dump(mode="json")
 
+    @app.get("/api/v1/validation-campaigns")
+    async def validation_campaigns(
+        request: Request,
+        limit: Annotated[int, Query(ge=1, le=200)] = 50,
+        _: str = Depends(authenticated_user),
+    ) -> dict[str, object]:
+        items = await active_service(request).list_validation_campaigns(
+            limit=limit
+        )
+        return {
+            "items": [item.model_dump(mode="json") for item in items]
+        }
+
     @app.get("/api/v1/trading")
     async def trading(
         request: Request,
@@ -384,6 +400,9 @@ async def _production_service(settings: AppSettings) -> ConsoleService:
     operators = PostgresOperatorRepository.connect(dsn=postgres_dsn)
     backtests = PostgresBacktestRepository.connect(dsn=postgres_dsn)
     validations = PostgresValidationRepository.connect(dsn=postgres_dsn)
+    validation_campaigns = PostgresValidationCampaignRepository.connect(
+        dsn=postgres_dsn
+    )
     risks = PostgresRiskDecisionRepository.connect(dsn=postgres_dsn)
     executions = PostgresPaperExecutionRepository.connect(dsn=postgres_dsn)
     execution_controls = PostgresExecutionControlRepository.connect(dsn=postgres_dsn)
@@ -406,6 +425,7 @@ async def _production_service(settings: AppSettings) -> ConsoleService:
         await operators.close()
         await backtests.close()
         await validations.close()
+        await validation_campaigns.close()
         await risks.close()
         await executions.close()
         await execution_controls.close()
@@ -438,6 +458,7 @@ async def _production_service(settings: AppSettings) -> ConsoleService:
         backtest_runner=backtest_runner,
         validation_repository=validations,
         validation_runner=validation_runner,
+        validation_campaign_repository=validation_campaigns,
         risk_repository=risks,
         execution_repository=executions,
         execution_control_repository=execution_controls,

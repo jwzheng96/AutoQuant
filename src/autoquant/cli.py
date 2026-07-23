@@ -4,6 +4,7 @@ import asyncio
 import json
 from collections.abc import Mapping
 from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from typing import Annotated, NoReturn
 from uuid import UUID
 
@@ -14,6 +15,7 @@ from autoquant.adapters.clickhouse import ClickHouseMinuteBarRepository
 from autoquant.adapters.postgres import PostgresControlRepository
 from autoquant.adapters.rqdata import RqdataHttpSource
 from autoquant.adapters.tushare import TushareDailySource
+from autoquant.backtest.validation import SmaParameters
 from autoquant.clock import to_utc
 from autoquant.config import AppSettings
 from autoquant.data.availability import HistoricalMinutePolicy
@@ -28,9 +30,11 @@ from autoquant.operations import (
     approve_paper_sma_portfolio_strategy,
     approve_paper_sma_strategy,
     complete_qmt_recovery_drill,
+    create_validation_campaign,
     inspect_paper_pre_open,
     inspect_paper_promotion,
     inspect_paper_runtime_readiness,
+    inspect_validation_campaign,
     revoke_paper_strategy,
     run_daily_ingestion,
     run_qmt_readonly_acceptance,
@@ -85,6 +89,29 @@ def _parse_date(value: str, *, name: str) -> date:
     if parsed.isoformat() != value:
         _fail(f"{name}: invalid date")
     return parsed
+
+
+def _parse_decimal(value: str, *, name: str) -> Decimal:
+    try:
+        parsed = Decimal(value)
+    except InvalidOperation:
+        _fail(f"{name}: invalid decimal")
+    if not parsed.is_finite():
+        _fail(f"{name}: invalid decimal")
+    return parsed
+
+
+def _parse_sma_candidate(value: str) -> SmaParameters:
+    try:
+        fast_text, slow_text = value.split(":", maxsplit=1)
+        return SmaParameters(
+            fast_sessions=int(fast_text),
+            slow_sessions=int(slow_text),
+        )
+    except (TypeError, ValueError):
+        _fail(
+            "candidate must use FAST:SLOW with valid SMA windows"
+        )
 
 
 def _require_dsn(value: SecretStr | None, *, capability: str) -> str:
@@ -570,6 +597,86 @@ def approve_paper_sma(
     except (AutoQuantError, LookupError, ValueError):
         _fail("paper SMA approval failed")
     _emit(payload)
+
+
+@app.command("validation-campaign-create")
+def validation_campaign_create(
+    campaign_key: Annotated[str, typer.Option("--campaign-key")],
+    manifest_hash: Annotated[str, typer.Option("--manifest-hash")],
+    instrument: Annotated[list[str], typer.Option("--instrument")],
+    candidate: Annotated[list[str], typer.Option("--candidate")],
+    requested_by: Annotated[str, typer.Option("--requested-by")],
+    allocation: Annotated[str, typer.Option("--allocation")] = "0.20",
+    slippage_bps: Annotated[
+        str,
+        typer.Option("--slippage-bps"),
+    ] = "5",
+    train_sessions: Annotated[
+        int,
+        typer.Option("--train-sessions"),
+    ] = 120,
+    test_sessions: Annotated[
+        int,
+        typer.Option("--test-sessions"),
+    ] = 20,
+    embargo_sessions: Annotated[
+        int,
+        typer.Option("--embargo-sessions"),
+    ] = 1,
+) -> None:
+    """Atomically queue aligned OOS validations; never approve trading."""
+
+    try:
+        payload = asyncio.run(
+            create_validation_campaign(
+                _settings(),
+                campaign_key=campaign_key,
+                manifest_hash=manifest_hash,
+                instruments=tuple(instrument),
+                allocation=_parse_decimal(
+                    allocation,
+                    name="allocation",
+                ),
+                slippage_bps=_parse_decimal(
+                    slippage_bps,
+                    name="slippage-bps",
+                ),
+                train_sessions=train_sessions,
+                test_sessions=test_sessions,
+                embargo_sessions=embargo_sessions,
+                candidates=tuple(
+                    _parse_sma_candidate(value)
+                    for value in candidate
+                ),
+                requested_by=requested_by,
+            )
+        )
+    except (AutoQuantError, LookupError, ValueError):
+        _fail("validation campaign creation failed")
+    _emit(payload)
+
+
+@app.command("validation-campaign-status")
+def validation_campaign_status(
+    campaign_hash: Annotated[str, typer.Option("--campaign-hash")],
+) -> None:
+    """Read one redacted validation campaign status without mutation."""
+
+    try:
+        payload = asyncio.run(
+            inspect_validation_campaign(
+                _settings(),
+                campaign_hash=campaign_hash,
+            )
+        )
+    except (AutoQuantError, LookupError, ValueError):
+        _fail("validation campaign status failed")
+    _emit(payload)
+    if payload["status"] in {
+        "failed",
+        "completed_with_rejections",
+    }:
+        raise typer.Exit(code=2)
 
 
 @app.command("revoke-paper-strategy")

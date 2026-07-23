@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 from uuid import UUID, uuid4
 
 from pydantic import SecretStr
@@ -9,12 +10,18 @@ from pydantic import SecretStr
 from autoquant.adapters.clickhouse_daily import ClickHouseDailyRepository
 from autoquant.adapters.postgres import PostgresControlRepository
 from autoquant.adapters.tushare import TushareDailySource, TushareHttpClient
+from autoquant.backtest.runner import ManifestMarketCompiler
+from autoquant.backtest.validation import (
+    SmaParameters,
+    compile_common_calendar_markets,
+)
 from autoquant.clock import to_shanghai
 from autoquant.config import AppSettings, RuntimeEnvironment
 from autoquant.data.calendar_refresh import TradingCalendarRefreshService
 from autoquant.data.daily_ingestion import (
     DailyIngestionRequest,
     DailyIngestionService,
+    ValidatedDailyDataset,
     ValidatedDailyDatasetReader,
 )
 from autoquant.data.daily_quality import DailyQualityGate
@@ -90,6 +97,11 @@ from autoquant.web.strategy_promotion import (
     PaperPortfolioPromotionService,
     PaperStrategyPromotionService,
 )
+from autoquant.web.validation_campaign_store import (
+    PostgresValidationCampaignRepository,
+    ValidationCampaignSpec,
+    ValidationCampaignStatus,
+)
 from autoquant.web.validation_store import PostgresValidationRepository
 
 
@@ -158,6 +170,221 @@ async def run_daily_ingestion(
         "persisted_factors": result.persisted_factors,
         "quality_hash": result.quality_hash,
         "status": result.status,
+    }
+
+
+async def create_validation_campaign(
+    settings: AppSettings,
+    *,
+    campaign_key: str,
+    manifest_hash: str,
+    instruments: tuple[str, ...],
+    allocation: Decimal,
+    slippage_bps: Decimal,
+    train_sessions: int,
+    test_sessions: int,
+    embargo_sessions: int,
+    candidates: tuple[SmaParameters, ...],
+    requested_by: str,
+) -> dict[str, object]:
+    """Preflight one common data cutoff and atomically queue aligned validations."""
+
+    if settings.live_trading_enabled:
+        raise MissingCapabilityError(
+            "validation campaigns require live trading to remain locked"
+        )
+    normalized = tuple(sorted(instruments))
+    policy = default_paper_policy(normalized)
+    if (
+        len(normalized) < 3
+        or len(normalized) > 20
+        or len(set(normalized)) != len(normalized)
+        or allocation > policy.max_position_weight
+        or allocation * len(normalized) > policy.max_gross_exposure
+    ):
+        raise ValueError(
+            "campaign universe or allocation exceeds paper risk controls"
+        )
+    postgres_dsn = configured_dsn(
+        settings.postgres_dsn,
+        capability="PostgreSQL",
+    )
+    clickhouse: ClickHouseDailyRepository | None = None
+    control: PostgresControlRepository | None = None
+    campaigns: PostgresValidationCampaignRepository | None = None
+    try:
+        clickhouse = await ClickHouseDailyRepository.connect(
+            dsn=configured_dsn(
+                settings.clickhouse_dsn,
+                capability="ClickHouse",
+            ),
+            source="tushare",
+        )
+        control = PostgresControlRepository.connect(dsn=postgres_dsn)
+        campaigns = PostgresValidationCampaignRepository.connect(
+            dsn=postgres_dsn
+        )
+        manifest = await control.read_manifest(manifest_hash)
+        if (
+            not manifest.production_complete
+            or tuple(sorted(manifest.instruments)) != normalized
+        ):
+            raise ValueError(
+                "campaign manifest must exactly cover the requested universe"
+            )
+        dataset = await ValidatedDailyDatasetReader(
+            control_repository=control,
+            market_repository=clickhouse,
+        ).query(
+            manifest.manifest_hash,
+            manifest.as_of,
+        )
+        _validate_campaign_dataset(
+            dataset=dataset,
+            instruments=normalized,
+            minimum_sessions=(
+                train_sessions
+                + embargo_sessions
+                + 6 * test_sessions
+            ),
+            initial_cash=settings.paper_initial_cash,
+            allocation=allocation,
+            slippage_bps=slippage_bps,
+            maximum_order_notional=policy.max_order_notional,
+        )
+        spec = ValidationCampaignSpec(
+            campaign_key=campaign_key,
+            manifest_hash=manifest.manifest_hash,
+            instruments=normalized,
+            initial_cash=settings.paper_initial_cash,
+            allocation=allocation,
+            slippage_bps=slippage_bps,
+            train_sessions=train_sessions,
+            test_sessions=test_sessions,
+            embargo_sessions=embargo_sessions,
+            candidates=candidates,
+            requested_by=requested_by,
+        )
+        status = await campaigns.create(
+            spec,
+            created_at=datetime.now(UTC),
+        )
+        return _validation_campaign_payload(status)
+    finally:
+        if campaigns is not None:
+            await campaigns.close()
+        if control is not None:
+            await control.close()
+        if clickhouse is not None:
+            await clickhouse.client.close()
+
+
+async def inspect_validation_campaign(
+    settings: AppSettings,
+    *,
+    campaign_hash: str,
+) -> dict[str, object]:
+    repository = PostgresValidationCampaignRepository.connect(
+        dsn=configured_dsn(
+            settings.postgres_dsn,
+            capability="PostgreSQL",
+        )
+    )
+    try:
+        return _validation_campaign_payload(
+            await repository.status(campaign_hash=campaign_hash)
+        )
+    finally:
+        await repository.close()
+
+
+def _validate_campaign_dataset(
+    *,
+    dataset: ValidatedDailyDataset,
+    instruments: tuple[str, ...],
+    minimum_sessions: int,
+    initial_cash: Decimal,
+    allocation: Decimal,
+    slippage_bps: Decimal,
+    maximum_order_notional: Decimal,
+    compiler: ManifestMarketCompiler | None = None,
+) -> None:
+    market_compiler = compiler or ManifestMarketCompiler()
+    bar_keys = tuple(
+        (value.instrument, value.session_date)
+        for value in dataset.bars
+    )
+    factor_keys = tuple(
+        (value.instrument, value.session_date)
+        for value in dataset.factors
+    )
+    common_markets = compile_common_calendar_markets(
+        instruments=instruments,
+        dataset=dataset,
+        compiler=market_compiler,
+    )
+    common_dates = tuple(
+        value.bar.session_date
+        for value in common_markets[instruments[0]]
+    )
+    allocated_cash = initial_cash * allocation
+    slippage_multiplier = (
+        Decimal("1") + slippage_bps / Decimal("10000")
+    )
+    minimum_lots_affordable = all(
+        (
+            max(
+                value.bar.pre_close,
+                value.bar.high_price,
+            )
+            * value.rules.buy_minimum
+            * slippage_multiplier
+            <= allocated_cash
+            and max(
+                value.bar.pre_close,
+                value.bar.high_price,
+            )
+            * value.rules.buy_minimum
+            <= maximum_order_notional
+        )
+        for markets in common_markets.values()
+        for value in markets
+    )
+    if (
+        not instruments
+        or len(set(bar_keys)) != len(bar_keys)
+        or len(set(factor_keys)) != len(factor_keys)
+        or set(bar_keys) != set(factor_keys)
+        or {value[0] for value in bar_keys} != set(instruments)
+        or len(common_dates) < minimum_sessions
+        or not minimum_lots_affordable
+    ):
+        raise ValueError(
+            "campaign data lacks aligned, adjusted, affordable minimum OOS history"
+        )
+
+
+def _validation_campaign_payload(
+    status: ValidationCampaignStatus,
+) -> dict[str, object]:
+    return {
+        "campaign_hash": status.spec.campaign_hash,
+        "campaign_key": status.spec.campaign_key,
+        "components": [
+            {
+                "evidence_status": value.evidence_status,
+                "experiment_id": str(value.experiment_id),
+                "gate_failures": list(value.gate_failures),
+                "instrument": value.instrument,
+                "state": value.state,
+            }
+            for value in status.components
+        ],
+        "created_at": status.created_at.isoformat(),
+        "instrument_count": len(status.spec.instruments),
+        "live_trading_locked": True,
+        "manifest_hash": status.spec.manifest_hash,
+        "status": status.status,
     }
 
 

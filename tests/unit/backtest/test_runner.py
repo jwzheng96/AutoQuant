@@ -6,7 +6,10 @@ from decimal import Decimal
 import pytest
 
 from autoquant.backtest.models import ExecutionState
-from autoquant.backtest.runner import ManifestBacktestRunner
+from autoquant.backtest.runner import (
+    ManifestBacktestRunner,
+    ManifestMarketCompiler,
+)
 from autoquant.data.daily_ingestion import ValidatedDailyDataset
 from autoquant.data.daily_models import (
     AdjustmentFactorRevision,
@@ -173,11 +176,26 @@ async def test_runner_uses_previous_close_for_quantity_and_exact_manifest_cutoff
 
 
 @pytest.mark.asyncio
-async def test_runner_fails_closed_when_corporate_action_factor_changes() -> None:
-    runner = ManifestBacktestRunner(
-        control_repository=Control(),
-        dataset_reader=Reader(_dataset(second_factor="1.1")),
+async def test_runner_applies_manifest_anchored_corporate_action_factors() -> None:
+    dataset = _dataset(second_factor="1.1")
+    markets = ManifestMarketCompiler().compile(INSTRUMENT, dataset)
+
+    assert abs(
+        markets[0].bar.close_price
+        - Decimal("10.5") / Decimal("1.1")
+    ) < Decimal("1e-26")
+    assert (
+        markets[0].daily_price_limit.pre_close
+        == markets[0].bar.pre_close
+    )
+    assert markets[1].bar is dataset.bars[1]
+    assert "qfq-latest-manifest-anchor-v1" in (
+        markets[0].bar.source_revision
     )
 
-    with pytest.raises(ValueError, match="corporate-action accounting"):
-        await runner.run(_request())
+    result = await ManifestBacktestRunner(
+        control_repository=Control(),
+        dataset_reader=Reader(dataset),
+    ).run(_request())
+
+    assert result.reports[0].state is ExecutionState.FILLED

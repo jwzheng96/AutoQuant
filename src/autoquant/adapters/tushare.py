@@ -462,6 +462,11 @@ class TushareDailySource:
                     requested=instrument,
                     start=start,
                     end=end,
+                    bar_pre_closes={
+                        value.session_date: value.pre_close
+                        for value in bars
+                        if value.instrument == instrument
+                    },
                 )
             )
 
@@ -831,6 +836,7 @@ class TushareDailySource:
         requested: str,
         start: date,
         end: date,
+        bar_pre_closes: Mapping[date, Decimal] | None = None,
     ) -> tuple[DailyPriceLimit, ...]:
         values: list[DailyPriceLimit] = []
         for row in result.rows:
@@ -838,12 +844,33 @@ class TushareDailySource:
             session_date = cls._date(row, "trade_date")
             if instrument != requested or not start <= session_date <= end:
                 raise VendorResponseError("Tushare stk_limit returned a row outside request")
+            bar_pre_close = (
+                None
+                if bar_pre_closes is None
+                else bar_pre_closes.get(session_date)
+            )
+            raw_pre_close = row.get("pre_close")
+            if raw_pre_close is None:
+                if bar_pre_close is None:
+                    raise VendorResponseError(
+                        "Tushare stk_limit returned invalid pre_close"
+                    )
+                pre_close = bar_pre_close
+            else:
+                pre_close = cls._decimal(row, "pre_close")
+                if (
+                    bar_pre_close is not None
+                    and pre_close != bar_pre_close
+                ):
+                    raise VendorResponseError(
+                        "Tushare daily and stk_limit pre_close disagree"
+                    )
             values.append(
                 DailyPriceLimit(
                     source=_SOURCE,
                     instrument=instrument,
                     session_date=session_date,
-                    pre_close=cls._decimal(row, "pre_close"),
+                    pre_close=pre_close,
                     up_limit=cls._decimal(row, "up_limit"),
                     down_limit=cls._decimal(row, "down_limit"),
                     available_at=result.evidence.requested_at,

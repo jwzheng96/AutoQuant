@@ -704,6 +704,81 @@ def test_paper_portfolio_approval_requires_matched_components() -> None:
     assert approval.await_count == 0
 
 
+def test_validation_campaign_queues_only_redacted_research_metadata() -> None:
+    payload = {
+        "campaign_hash": "a" * 64,
+        "campaign_key": "portfolio-research-20260723-0001",
+        "components": [],
+        "created_at": "2026-07-23T08:00:00+00:00",
+        "instrument_count": 3,
+        "live_trading_locked": True,
+        "manifest_hash": "b" * 64,
+        "status": "queued",
+    }
+    creation = AsyncMock(return_value=payload)
+    with patch(
+        "autoquant.cli.create_validation_campaign",
+        new=creation,
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "validation-campaign-create",
+                "--campaign-key",
+                "portfolio-research-20260723-0001",
+                "--manifest-hash",
+                "b" * 64,
+                "--instrument",
+                "000001.XSHE",
+                "--instrument",
+                "600000.XSHG",
+                "--instrument",
+                "600519.XSHG",
+                "--candidate",
+                "5:20",
+                "--candidate",
+                "10:30",
+                "--candidate",
+                "20:60",
+                "--requested-by",
+                "operator",
+            ],
+            env={"AQ_POSTGRES_DSN": "postgresql+asyncpg://sensitive"},
+        )
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == payload
+    assert "sensitive" not in result.stdout
+    creation.assert_awaited_once()
+
+
+def test_validation_campaign_rejects_invalid_candidate_syntax() -> None:
+    creation = AsyncMock()
+    with patch(
+        "autoquant.cli.create_validation_campaign",
+        new=creation,
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "validation-campaign-create",
+                "--campaign-key",
+                "portfolio-research-20260723-0001",
+                "--manifest-hash",
+                "b" * 64,
+                "--instrument",
+                "000001.XSHE",
+                "--candidate",
+                "invalid",
+                "--requested-by",
+                "operator",
+            ],
+        )
+
+    assert result.exit_code == 2
+    assert creation.await_count == 0
+
+
 def test_paper_portfolio_approval_emits_redacted_metadata() -> None:
     experiment_ids = (
         "11111111-1111-1111-1111-111111111111",

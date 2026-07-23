@@ -198,6 +198,37 @@ async def test_fetch_maps_daily_units_factor_coverage_and_next_open_visibility()
 
 
 @pytest.mark.asyncio
+async def test_historical_limit_uses_matching_daily_pre_close_when_vendor_omits_it() -> None:
+    responses = base_responses()
+    limit_rows = responses["stk_limit"][0]
+    assert isinstance(limit_rows, list)
+    limit_rows[0]["pre_close"] = None
+
+    batch = await source(FakeClient(responses)).fetch_daily_dataset(
+        ("000001.XSHE",),
+        date(2026, 7, 20),
+        date(2026, 7, 20),
+    )
+
+    assert batch.coverage.price_limits[0].pre_close == Decimal("9.95")
+
+
+@pytest.mark.asyncio
+async def test_historical_limit_rejects_disagreement_with_daily_pre_close() -> None:
+    responses = base_responses()
+    limit_rows = responses["stk_limit"][0]
+    assert isinstance(limit_rows, list)
+    limit_rows[0]["pre_close"] = "9.94"
+
+    with pytest.raises(VendorResponseError, match="disagree"):
+        await source(FakeClient(responses)).fetch_daily_dataset(
+            ("000001.XSHE",),
+            date(2026, 7, 20),
+            date(2026, 7, 20),
+        )
+
+
+@pytest.mark.asyncio
 async def test_calendar_refresh_fetches_only_exact_trade_calendar_interval() -> None:
     client = FakeClient(
         {

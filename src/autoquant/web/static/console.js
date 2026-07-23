@@ -488,6 +488,42 @@ async function loadValidations() {
   } catch (error) { showToast(`验证实验读取失败：${error.message}`); }
 }
 
+async function loadValidationCampaigns() {
+  try {
+    const data = await requestJson("/api/v1/validation-campaigns?limit=50");
+    const table = document.getElementById("validation-campaigns-table");
+    table.replaceChildren();
+    data.items.forEach(campaign => {
+      const row = document.createElement("tr");
+      const completed = campaign.components.filter(component => component.state === "completed").length;
+      const gateFailures = campaign.components.reduce(
+        (count, component) => count + (component.gate_failures?.length ?? 0),
+        0,
+      );
+      [
+        new Date(campaign.created_at).toLocaleString(),
+        campaign.campaign_key,
+        campaign.instruments.length,
+      ].forEach(value => {
+        const cell = document.createElement("td");
+        cell.textContent = value;
+        row.append(cell);
+      });
+      const stateCell = document.createElement("td");
+      const badge = document.createElement("span");
+      statusPill(badge, campaign.status);
+      stateCell.append(badge);
+      row.append(stateCell);
+      [`${completed}/${campaign.components.length}`, gateFailures].forEach(value => {
+        const cell = document.createElement("td");
+        cell.textContent = value;
+        row.append(cell);
+      });
+      table.append(row);
+    });
+  } catch (error) { showToast(`验证活动读取失败：${error.message}`); }
+}
+
 function parseCandidates(value) {
   return value.split(",").map(pair => {
     const [fast, slow, extra] = pair.trim().split("/");
@@ -548,9 +584,16 @@ if (page === "/") {
   document.getElementById("validation-manifest").addEventListener("change", syncValidationManifestInstrument);
   document.getElementById("refresh-backtests").addEventListener("click", loadBacktests);
   document.getElementById("validation-form").addEventListener("submit", createValidation);
-  document.getElementById("refresh-validations").addEventListener("click", loadValidations);
+  document.getElementById("refresh-validations").addEventListener(
+    "click",
+    () => Promise.all([loadValidations(), loadValidationCampaigns()]),
+  );
   renderEquityChart([]);
-  loadResearchManifests().then(() => Promise.all([loadBacktests(), loadValidations()]));
+  loadResearchManifests().then(() => Promise.all([
+    loadBacktests(),
+    loadValidations(),
+    loadValidationCampaigns(),
+  ]));
 } else {
   statusPill(document.getElementById("global-status"), "研究模式");
   document.getElementById("page-title").textContent = "交易中心";

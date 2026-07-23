@@ -38,6 +38,7 @@ Apply `migrations/postgres/001_phase1.sql`,
 `migrations/postgres/018_qmt_recovery_drills.sql`, then
 `migrations/postgres/019_paper_portfolio_registry.sql`, then
 `migrations/postgres/020_portfolio_oos_assessment.sql`, then
+`migrations/postgres/021_validation_campaigns.sql`, then
 `migrations/clickhouse/001_phase1.sql` and
 `migrations/clickhouse/002_tushare_daily.sql` and
 `migrations/clickhouse/003_daily_coverage.sql` in order, only to explicitly authorized
@@ -226,6 +227,45 @@ audit hash are the only accepted input to the current-session rule compiler.
 After a walk-forward experiment is `completed`, reports `research_candidate`, has no gate
 failures, and its deployment signal manifest is production-complete, approval is an explicit
 paper-only operation:
+
+For portfolio research, first ingest one production-complete manifest that exactly
+covers 3-20 instruments at a common cutoff. Queue all component validations
+atomically with identical capital, allocation, costs, fold geometry and candidate
+grid:
+
+```bash
+uv run autoquant validation-campaign-create \
+  --campaign-key portfolio-research-20260723-0001 \
+  --manifest-hash <exact-multi-instrument-manifest> \
+  --instrument 000001.XSHE \
+  --instrument 600000.XSHG \
+  --instrument 600519.XSHG \
+  --candidate 5:20 \
+  --candidate 10:30 \
+  --candidate 20:60 \
+  --allocation 0.20 \
+  --slippage-bps 5 \
+  --train-sessions 120 \
+  --test-sessions 20 \
+  --embargo-sessions 1 \
+  --requested-by operator
+```
+
+Creation fails before queuing anything unless adjusted bar/factor keys are exact,
+the intersection of real (never synthesized) market dates covers at least 98% of
+the longest component history, and that common calendar covers at least six OOS
+folds. Every component must also afford at least one board lot within both its
+allocation and the paper policy's order-notional cap. Every component is trained
+and scored on this same calendar. The campaign
+and component mappings are immutable, while component state is derived from the
+existing validation experiment records. Run `serve-web` to process the queue; the
+research console shows read-only campaign progress. Inspect the same redacted
+aggregate status with:
+
+```bash
+uv run autoquant validation-campaign-status \
+  --campaign-hash <campaign-hash>
+```
 
 ```bash
 uv run autoquant approve-paper-sma \

@@ -24,17 +24,24 @@ NOW = datetime(2026, 7, 23, 1, tzinfo=UTC)
 INSTRUMENT = "600000.XSHG"
 
 
-def _manifest(*, suffix: str) -> DatasetManifest:
+def _manifest(
+    *,
+    suffix: str,
+    instruments: tuple[str, ...] = (INSTRUMENT,),
+) -> DatasetManifest:
     return DatasetManifest(
         source="tushare",
-        instruments=(INSTRUMENT,),
+        instruments=instruments,
         start_time=datetime(2025, 1, 1, tzinfo=UTC),
         end_time=datetime(2026, 7, 22, tzinfo=UTC),
         as_of=datetime(2026, 7, 22, 8, tzinfo=UTC),
-        record_hashes=(suffix * 64,),
+        record_hashes=tuple(
+            f"{int(suffix, 16) + index:x}" * 64
+            for index in range(len(instruments))
+        ),
         quality_report_hash="f" * 64,
         production_complete=True,
-        row_count=1,
+        row_count=len(instruments),
     )
 
 
@@ -100,7 +107,14 @@ def _detail(
 
 @pytest.mark.asyncio
 async def test_promotion_requires_gate_passing_oos_and_persists_modal_parameters() -> None:
-    validation_manifest = _manifest(suffix="1")
+    validation_manifest = _manifest(
+        suffix="1",
+        instruments=(
+            "000001.XSHE",
+            INSTRUMENT,
+            "600519.XSHG",
+        ),
+    )
     signal_manifest = _manifest(suffix="2")
     experiment_id = uuid4()
     validations = MagicMock()
