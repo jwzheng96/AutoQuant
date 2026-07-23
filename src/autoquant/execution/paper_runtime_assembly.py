@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Self
+from uuid import uuid4
 
 from pydantic import SecretStr
 
@@ -12,6 +13,7 @@ from autoquant.adapters.postgres import PostgresControlRepository
 from autoquant.config import AppSettings, RuntimeEnvironment
 from autoquant.data.daily_ingestion import ValidatedDailyDatasetReader
 from autoquant.errors import MissingCapabilityError, PersistenceUnavailableError
+from autoquant.execution.control import KillSwitchReason
 from autoquant.execution.control_store import PostgresExecutionControlRepository
 from autoquant.execution.coordinator import PaperOrderCoordinator
 from autoquant.execution.market_clock import AShareMarketClock
@@ -165,8 +167,15 @@ async def assemble_paper_runtime(
             now=clock_now(),
         )
         if not cold_start_control.active:
+            await controls.activate(
+                account_id=settings.paper_account_id,
+                command_id=f"paper-runtime-cold-start-{uuid4()}",
+                reason=KillSwitchReason.DEPENDENCY_UNAVAILABLE,
+                actor="paper-runtime-assembly",
+                now=max(clock_now(), cold_start_control.changed_at),
+            )
             raise MissingCapabilityError(
-                "paper runtime cold start requires an active kill switch"
+                "paper runtime cold start re-armed the inactive kill switch"
             )
         registration = await strategies.active(
             account_id=settings.paper_account_id,

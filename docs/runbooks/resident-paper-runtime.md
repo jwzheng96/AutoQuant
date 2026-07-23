@@ -75,8 +75,25 @@ uv run autoquant run-paper
 4. 获取账户级 scheduler 租约；
 5. 在停机开关 active 状态下驻留并记录 locked/idle/盘前周期。
 
-当前进程不会自动解锁，所以首次启动不会生成订单。后续只能通过尚待完成的“带当日盘前
-对账证据的人工复位流程”进入真正模拟下单阶段。
+当前进程不会自动解锁，所以首次启动不会生成订单。只有在驻留进程已经持有有效 scheduler
+租约、当日 session 已初始化且处于连续交易时段时，才可在另一个受控终端执行：
+
+```powershell
+uv run autoquant unlock-paper `
+  --actor operator `
+  --confirm-paper-unlock
+```
+
+该命令只调用只读 `get_full_tick`，不会另建交易连接。它把完整实时行情、当前 active
+策略批准、当日 session-risk 状态、内部订单与模拟券商即时对账、scheduler
+holder/token/generation 组合成不可变证据，再由 PostgreSQL 在一次事务内重新验证全部
+状态并复位模拟盘停机开关。证据最多允许 3 秒；租约释放/过期、策略撤销、session
+状态变化、行情关闭或对账变化都会拒绝复位。
+
+`paper_unlocked` 仅允许 PostgreSQL 模拟券商接受经过风控的订单；真实 QMT 提交和撤单
+仍然代码级硬锁。每次进程重启都必须从 active 停机开关重新开始，不能复用旧证据。
+如果上次进程被强制终止并遗留 inactive 状态，下一次冷启动检查会先重新激活停机开关，
+然后拒绝本次启动；修复退出原因后再次启动并重新收集解锁证据。
 
 正常维护优先使用控制台中断进程。中断会停止调度、反订阅行情、尝试释放租约并保持停机
 开关 active。若进程崩溃，租约到期后才允许新实例接管；不得通过修改数据库绕过租约。

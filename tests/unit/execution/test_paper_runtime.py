@@ -216,10 +216,12 @@ async def test_readiness_refuses_missing_strategy_before_quote_start() -> None:
 
 @pytest.mark.asyncio
 async def test_readiness_refuses_cold_start_with_inactive_kill_switch() -> None:
-    gate, _ = _readiness_gate(control=_control(active=False))
+    gate, dependencies = _readiness_gate(control=_control(active=False))
 
-    with pytest.raises(MissingCapabilityError, match="active kill switch"):
+    with pytest.raises(MissingCapabilityError, match="re-armed"):
         await gate.verify(now=NOW)
+
+    dependencies["controls"].activate.assert_awaited_once()
 
 
 @pytest.mark.asyncio

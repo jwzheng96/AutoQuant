@@ -17,6 +17,10 @@ from autoquant.execution.market_clock import AShareMarketClock, AShareTradingPha
 from autoquant.execution.paper_runtime import RuntimeCalendarReader
 from autoquant.execution.qmt_models import to_qmt_instrument
 from autoquant.execution.qmt_quote_adapter import QmtWholeQuoteBridge
+from autoquant.execution.quote_book import (
+    ContinuousQuoteBook,
+    QuoteBookSnapshot,
+)
 
 QmtQuoteCallback = Callable[[Mapping[str, object]], None]
 
@@ -260,3 +264,70 @@ class QmtWholeQuoteRuntime:
     def _read_callback_failure(self) -> BaseException | None:
         with self._state_lock:
             return self._callback_failure
+
+
+class QmtFullTickSnapshotReader:
+    """Take one complete read-only XtData snapshot for paper unlock evidence."""
+
+    def __init__(
+        self,
+        *,
+        client: XtDataClient,
+        market_clock: AShareMarketClock | None = None,
+        now: Callable[[], datetime] | None = None,
+        max_age: timedelta = timedelta(seconds=1),
+    ) -> None:
+        if max_age <= timedelta(0):
+            raise ValueError("QMT full-tick snapshot age must be positive")
+        self._client = client
+        self._clock = market_clock or AShareMarketClock()
+        self._now = now or (lambda: datetime.now(UTC))
+        self._max_age = max_age
+
+    async def __call__(
+        self,
+        *,
+        instruments: tuple[str, ...],
+        session: TradingSession,
+        now: datetime,
+    ) -> QuoteBookSnapshot:
+        requested_at = to_utc(now, name="QMT full-tick request time")
+        normalized = tuple(sorted(instruments))
+        if (
+            not normalized
+            or len(set(normalized)) != len(normalized)
+            or any(not value.strip() for value in normalized)
+        ):
+            raise ValueError("QMT full-tick instruments must be nonempty and unique")
+        if session.session_date != to_shanghai(requested_at).date():
+            raise QuoteStreamUnavailableError(
+                "QMT full-tick session does not match request date"
+            )
+        payload = await asyncio.to_thread(
+            self._client.get_full_tick,
+            [to_qmt_instrument(value) for value in normalized],
+        )
+        received_at = to_utc(
+            self._now(),
+            name="QMT full-tick receipt time",
+        )
+        if to_shanghai(received_at).date() != session.session_date:
+            raise QuoteStreamUnavailableError(
+                "QMT full-tick crossed the trusted calendar session"
+            )
+        book = ContinuousQuoteBook(source="qmt")
+        QmtWholeQuoteBridge(
+            quote_book=book,
+            instruments=normalized,
+        ).reset_from_full_tick(
+            payload,
+            received_at=received_at,
+            phase=self._clock.phase(now=received_at, session=session),
+            reset_id=f"paper-unlock-{uuid4()}",
+        )
+        return book.snapshot(
+            instruments=normalized,
+            now=received_at,
+            max_age=self._max_age,
+            require_market_open=True,
+        )

@@ -5,6 +5,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Protocol
+from uuid import uuid4
 
 from autoquant.clock import to_shanghai, to_utc
 from autoquant.data.daily_models import TradingSession
@@ -15,7 +16,7 @@ from autoquant.errors import (
     MissingCapabilityError,
     PersistenceUnavailableError,
 )
-from autoquant.execution.control import KillSwitchControl
+from autoquant.execution.control import KillSwitchControl, KillSwitchReason
 from autoquant.execution.models import PaperOrderHistory
 from autoquant.execution.paper_scheduler import (
     CycleSink,
@@ -34,6 +35,17 @@ class ExecutionControlReader(Protocol):
         *,
         account_id: str,
         now: datetime,
+    ) -> KillSwitchControl: ...
+
+    async def activate(
+        self,
+        *,
+        account_id: str,
+        command_id: str,
+        reason: KillSwitchReason,
+        actor: str,
+        now: datetime,
+        evidence_hash: str | None = None,
     ) -> KillSwitchControl: ...
 
 
@@ -228,8 +240,15 @@ class PaperRuntimeReadinessGate:
             now=instant,
         )
         if not control.active:
+            await self._controls.activate(
+                account_id=self._account_id,
+                command_id=f"paper-runtime-cold-start-{uuid4()}",
+                reason=KillSwitchReason.DEPENDENCY_UNAVAILABLE,
+                actor="resident-paper-runtime",
+                now=max(instant, control.changed_at),
+            )
             raise MissingCapabilityError(
-                "paper runtime cold start requires an active kill switch"
+                "paper runtime cold start re-armed the inactive kill switch"
             )
         registration = await self._strategies.active(
             account_id=self._account_id,

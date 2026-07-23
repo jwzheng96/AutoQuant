@@ -163,6 +163,43 @@ def test_run_paper_refuses_non_windows_before_database_or_quote_connection() -> 
     assert secret not in result.stdout
 
 
+def test_unlock_paper_requires_explicit_confirmation() -> None:
+    result = runner.invoke(
+        app,
+        ["unlock-paper", "--actor", "operator"],
+    )
+
+    assert result.exit_code == 2
+    assert "confirmation is required" in result.stdout
+
+
+def test_unlock_paper_emits_only_fenced_result() -> None:
+    payload = {
+        "account_id": "paper-main",
+        "control_version": 4,
+        "evidence_hash": "a" * 64,
+        "live_trading_locked": True,
+        "status": "paper_unlocked",
+        "strategy_id": "validated-sma-paper",
+    }
+    with patch(
+        "autoquant.cli.unlock_paper_runtime",
+        new=AsyncMock(return_value=payload),
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "unlock-paper",
+                "--actor",
+                "operator",
+                "--confirm-paper-unlock",
+            ],
+        )
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == payload
+
+
 def test_tushare_check_requires_token_without_leaking_configuration() -> None:
     result = runner.invoke(app, ["tushare-check"], env={"AQ_TUSHARE_TOKEN": ""})
 

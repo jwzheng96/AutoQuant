@@ -14,6 +14,7 @@ from autoquant.execution.market_clock import AShareMarketClock
 from autoquant.execution.qmt_quote_adapter import QmtWholeQuoteBridge
 from autoquant.execution.qmt_quote_runtime import (
     ImportedXtDataClient,
+    QmtFullTickSnapshotReader,
     QmtQuoteCallback,
     QmtWholeQuoteRuntime,
 )
@@ -170,6 +171,52 @@ def test_imported_client_rejects_malformed_vendor_results() -> None:
         client.get_full_tick(["600000.SH"])
     with pytest.raises(QuoteStreamUnavailableError, match="invalid"):
         client.subscribe_whole_quote(["600000.SH"])
+
+
+@pytest.mark.asyncio
+async def test_full_tick_reader_produces_complete_open_unlock_snapshot() -> None:
+    client = FakeXtData()
+    session = TradingSession(
+        source="tushare",
+        session_date=SESSION_DATE,
+        is_open=True,
+        available_at=NOW - timedelta(days=1),
+        response_hash="a" * 64,
+    )
+
+    snapshot = await QmtFullTickSnapshotReader(
+        client=client,
+        now=lambda: NOW,
+    )(
+        instruments=(INSTRUMENT,),
+        session=session,
+        now=NOW,
+    )
+
+    assert snapshot.quotes[INSTRUMENT].market_open
+    assert snapshot.as_of == NOW
+
+
+@pytest.mark.asyncio
+async def test_full_tick_reader_rejects_incomplete_unlock_snapshot() -> None:
+    client = FakeXtData(baseline={"000001.SZ": _tick()})
+    session = TradingSession(
+        source="tushare",
+        session_date=SESSION_DATE,
+        is_open=True,
+        available_at=NOW - timedelta(days=1),
+        response_hash="a" * 64,
+    )
+
+    with pytest.raises(ValueError, match="outside"):
+        await QmtFullTickSnapshotReader(
+            client=client,
+            now=lambda: NOW,
+        )(
+            instruments=(INSTRUMENT,),
+            session=session,
+            now=NOW,
+        )
 
 
 class AnyModule:

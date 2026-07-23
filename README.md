@@ -111,6 +111,14 @@ opening quotes. The Windows-only XtData runtime uses `get_full_tick` before
 stream on any callback, calendar or subscription failure. It imports no XtTrader API and cannot
 submit or cancel a real order.
 
+Paper control reset now has a separate schema-v16 evidence path. A manual `unlock-paper` request
+must take a fresh complete XtData snapshot during continuous trading, replay identical internal
+and simulated-broker histories, persist a passing account reconciliation, advance the current
+session-risk state and prove ownership of the running scheduler lease. PostgreSQL then atomically
+rechecks the active strategy registration, exact session state, lease holder/token/generation and
+three-second evidence age before resetting only the paper kill switch. The immutable unlock
+artifact is never accepted by a live gateway.
+
 The QMT trading-side read-only core now normalizes the documented `XtAsset`, `XtPosition`,
 `XtOrder` and `XtTrade` fields through a Windows shim contract. A trusted baseline requires all
 four queries to complete without an intervening callback; `None` never means an empty account.

@@ -87,7 +87,7 @@ class PaperSchedulerLease:
         return self.released_at is None and self.expires_at > instant
 
 
-def _token_hash(token: SecretStr) -> str:
+def scheduler_lease_token_hash(token: SecretStr) -> str:
     raw = token.get_secret_value()
     if len(raw) < 32:
         raise ValueError("scheduler lease token must contain at least 32 characters")
@@ -111,7 +111,10 @@ def _validate_request(
         raise ValueError("holder_id must be a safe 1-64 character identifier")
     if not timedelta(0) < ttl <= _MAX_TTL:
         raise ValueError("scheduler lease ttl must be positive and no more than five minutes")
-    return _token_hash(token), to_utc(now, name="scheduler lease time")
+    return scheduler_lease_token_hash(token), to_utc(
+        now,
+        name="scheduler lease time",
+    )
 
 
 def _event_payload(
@@ -253,6 +256,47 @@ class PostgresPaperSchedulerLeaseRepository:
             raise PersistenceUnavailableError(
                 "paper scheduler lease acquisition failed"
             ) from None
+
+    async def verify_owner(
+        self,
+        *,
+        account_id: str,
+        strategy_id: str,
+        holder_id: str,
+        token: SecretStr,
+        now: datetime,
+    ) -> PaperSchedulerLease:
+        token_hash, instant = _validate_request(
+            account_id=account_id,
+            strategy_id=strategy_id,
+            holder_id=holder_id,
+            token=token,
+            now=now,
+            ttl=timedelta(seconds=1),
+        )
+        try:
+            async with self._engine.connect() as connection:
+                current = await self._select(
+                    connection,
+                    account_id,
+                    for_update=False,
+                )
+        except Exception:
+            raise PersistenceUnavailableError(
+                "paper scheduler lease ownership read failed"
+            ) from None
+        self._require_owner(
+            current,
+            strategy_id=strategy_id,
+            token_hash=token_hash,
+            holder_id=holder_id,
+            now=instant,
+        )
+        if current is None:
+            raise PaperSchedulerLeaseLostError(
+                "paper scheduler lease is unavailable"
+            )
+        return current
 
     async def renew(
         self,
@@ -427,8 +471,13 @@ class PostgresPaperSchedulerLeaseRepository:
         )
 
     async def _select(
-        self, connection: AsyncConnection, account_id: str
+        self,
+        connection: AsyncConnection,
+        account_id: str,
+        *,
+        for_update: bool = True,
     ) -> PaperSchedulerLease | None:
+        suffix = " FOR UPDATE" if for_update else ""
         row = (
             (
                 await connection.execute(
@@ -437,7 +486,7 @@ class PostgresPaperSchedulerLeaseRepository:
                         "acquired_at, heartbeat_at, expires_at, released_at, generation, "
                         "version, event_sequence, last_event_hash "
                         f"FROM {self._schema}.paper_scheduler_leases "
-                        "WHERE account_id=:account_id FOR UPDATE"
+                        f"WHERE account_id=:account_id{suffix}"
                     ),
                     {"account_id": account_id},
                 )

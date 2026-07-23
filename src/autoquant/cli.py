@@ -32,6 +32,7 @@ from autoquant.operations import (
     run_session_reference_refresh,
     run_trading_calendar_refresh,
     tushare_source,
+    unlock_paper_runtime,
 )
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
@@ -362,6 +363,32 @@ def run_paper() -> None:
         asyncio.run(_run_resident_paper(_settings()))
     except (AutoQuantError, LookupError, ValueError):
         _fail("resident paper runtime failed closed")
+
+
+@app.command("unlock-paper")
+def unlock_paper(
+    actor: Annotated[str, typer.Option("--actor")],
+    confirm_paper_unlock: Annotated[
+        bool,
+        typer.Option("--confirm-paper-unlock"),
+    ] = False,
+) -> None:
+    """Unlock only the running paper simulator from fresh fenced evidence."""
+
+    if not confirm_paper_unlock:
+        _fail("paper runtime unlock confirmation is required")
+    try:
+        payload = asyncio.run(
+            unlock_paper_runtime(
+                _settings(),
+                actor=actor,
+            )
+        )
+    except MissingCapabilityError as error:
+        _fail(str(error))
+    except (AutoQuantError, LookupError, ValueError):
+        _fail("paper runtime unlock failed closed")
+    _emit(payload)
 
 
 @app.command("refresh-trading-calendar")

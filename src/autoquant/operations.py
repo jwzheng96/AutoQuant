@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from pydantic import SecretStr
 
@@ -19,16 +19,33 @@ from autoquant.data.daily_ingestion import (
 from autoquant.data.daily_quality import DailyQualityGate
 from autoquant.data.session_reference import SessionReferenceRefreshService
 from autoquant.errors import MissingCapabilityError
+from autoquant.execution.control import KillSwitchReason
 from autoquant.execution.control_store import PostgresExecutionControlRepository
 from autoquant.execution.paper_policy import default_paper_policy
 from autoquant.execution.paper_runtime import (
     ExactTradingCalendarReader,
     PaperRuntimeReadinessGate,
 )
+from autoquant.execution.paper_scheduler_lease_store import (
+    PostgresPaperSchedulerLeaseRepository,
+)
 from autoquant.execution.paper_scheduler_store import (
     PostgresPaperSchedulerRepository,
 )
+from autoquant.execution.paper_unlock import (
+    PostgresPaperRuntimeUnlockRepository,
+)
+from autoquant.execution.paper_unlock_service import (
+    PaperRuntimeUnlockService,
+)
 from autoquant.execution.pre_open_marks import DailyClosePreOpenMarkReader
+from autoquant.execution.qmt_quote_runtime import (
+    ImportedXtDataClient,
+    QmtFullTickSnapshotReader,
+)
+from autoquant.execution.session_risk_store import (
+    PostgresPaperSessionRiskRepository,
+)
 from autoquant.execution.session_rules import ExactSessionRuleReader
 from autoquant.execution.simulated_broker import PersistentSimulatedBroker
 from autoquant.execution.store import PostgresPaperExecutionRepository
@@ -202,8 +219,15 @@ async def inspect_paper_runtime_readiness(
             now=datetime.now(UTC),
         )
         if not cold_start_control.active:
+            await controls.activate(
+                account_id=settings.paper_account_id,
+                command_id=f"paper-runtime-cold-start-{uuid4()}",
+                reason=KillSwitchReason.DEPENDENCY_UNAVAILABLE,
+                actor="paper-runtime-readiness",
+                now=max(datetime.now(UTC), cold_start_control.changed_at),
+            )
             raise MissingCapabilityError(
-                "paper runtime cold start requires an active kill switch"
+                "paper runtime cold start re-armed the inactive kill switch"
             )
         registration = await registry.active(
             account_id=settings.paper_account_id,
@@ -247,6 +271,106 @@ async def inspect_paper_runtime_readiness(
             await registry.close()
         if scheduler_events is not None:
             await scheduler_events.close()
+        if broker is not None:
+            await broker.close()
+        if executions is not None:
+            await executions.close()
+        if controls is not None:
+            await controls.close()
+        if evidence is not None:
+            await evidence.close()
+        if clickhouse is not None:
+            await clickhouse.client.close()
+
+
+async def unlock_paper_runtime(
+    settings: AppSettings,
+    *,
+    actor: str,
+) -> dict[str, object]:
+    """Reset only the paper control from a fresh Windows XtData evidence bundle."""
+
+    if settings.environment is not RuntimeEnvironment.PAPER:
+        raise MissingCapabilityError("paper environment is not configured")
+    lease_credentials = settings.require_paper_runtime()
+    postgres_dsn = configured_dsn(
+        settings.postgres_dsn,
+        capability="PostgreSQL",
+    )
+    clickhouse: ClickHouseDailyRepository | None = None
+    evidence: PostgresControlRepository | None = None
+    controls: PostgresExecutionControlRepository | None = None
+    executions: PostgresPaperExecutionRepository | None = None
+    broker: PersistentSimulatedBroker | None = None
+    sessions: PostgresPaperSessionRiskRepository | None = None
+    strategies: PostgresPaperStrategyRegistry | None = None
+    leases: PostgresPaperSchedulerLeaseRepository | None = None
+    unlocks: PostgresPaperRuntimeUnlockRepository | None = None
+    try:
+        clickhouse = await ClickHouseDailyRepository.connect(
+            dsn=configured_dsn(
+                settings.clickhouse_dsn,
+                capability="ClickHouse",
+            ),
+            source="tushare",
+        )
+        evidence = PostgresControlRepository.connect(dsn=postgres_dsn)
+        controls = PostgresExecutionControlRepository.connect(dsn=postgres_dsn)
+        executions = PostgresPaperExecutionRepository.connect(dsn=postgres_dsn)
+        broker = PersistentSimulatedBroker.connect(dsn=postgres_dsn)
+        sessions = PostgresPaperSessionRiskRepository.connect(dsn=postgres_dsn)
+        strategies = PostgresPaperStrategyRegistry.connect(dsn=postgres_dsn)
+        leases = PostgresPaperSchedulerLeaseRepository.connect(dsn=postgres_dsn)
+        unlocks = PostgresPaperRuntimeUnlockRepository.connect(dsn=postgres_dsn)
+        await unlocks.check_connection()
+        registration = await strategies.active(
+            account_id=settings.paper_account_id,
+            strategy_id=settings.paper_strategy_id,
+        )
+        if registration is None:
+            raise MissingCapabilityError(
+                "paper unlock requires an active approved strategy"
+            )
+        result = await PaperRuntimeUnlockService(
+            account_id=settings.paper_account_id,
+            strategy_id=settings.paper_strategy_id,
+            initial_cash=settings.paper_initial_cash,
+            holder_id=lease_credentials.holder_id,
+            lease_token=lease_credentials.lease_token,
+            controls=controls,
+            executions=executions,
+            broker=broker,
+            sessions=sessions,
+            strategies=strategies,
+            leases=leases,
+            unlocks=unlocks,
+            calendar=ExactTradingCalendarReader(
+                instruments=(registration.instrument,),
+                market_repository=clickhouse,
+                control_repository=evidence,
+            ),
+            quotes=QmtFullTickSnapshotReader(
+                client=ImportedXtDataClient.load(),
+            ),
+        ).unlock(actor=actor)
+        return {
+            "account_id": result.control.account_id,
+            "control_state_hash": result.control.state_hash,
+            "control_version": result.control.version,
+            "evidence_hash": result.evidence.evidence_hash,
+            "live_trading_locked": True,
+            "status": "paper_unlocked",
+            "strategy_id": result.evidence.strategy_id,
+        }
+    finally:
+        if unlocks is not None:
+            await unlocks.close()
+        if leases is not None:
+            await leases.close()
+        if strategies is not None:
+            await strategies.close()
+        if sessions is not None:
+            await sessions.close()
         if broker is not None:
             await broker.close()
         if executions is not None:

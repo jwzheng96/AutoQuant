@@ -88,6 +88,24 @@ async def test_scheduler_lease_is_fenced_renewable_releasable_and_reacquirable(
     )
     assert renewed.version == 2
     assert renewed.event_sequence == 1
+    assert (
+        await repository.verify_owner(
+            account_id="paper-main",
+            strategy_id="strategy-v1",
+            holder_id="scheduler-a",
+            token=TOKEN_ONE,
+            now=NOW + timedelta(seconds=6),
+        )
+        == renewed
+    )
+    with pytest.raises(PaperSchedulerLeaseLostError):
+        await repository.verify_owner(
+            account_id="paper-main",
+            strategy_id="strategy-v1",
+            holder_id="scheduler-a",
+            token=TOKEN_TWO,
+            now=NOW + timedelta(seconds=6),
+        )
 
     with pytest.raises(PaperSchedulerLeaseConflictError):
         await repository.acquire(

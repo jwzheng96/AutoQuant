@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from time import monotonic
 
+from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.engine import RowMapping
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
@@ -25,6 +26,10 @@ from autoquant.execution.control import (
     command_payload,
     control_payload,
 )
+from autoquant.execution.paper_scheduler_lease_store import (
+    scheduler_lease_token_hash,
+)
+from autoquant.execution.paper_unlock import PaperRuntimeUnlockEvidence
 
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _STATE_COLUMNS = """
@@ -226,6 +231,39 @@ class PostgresExecutionControlRepository:
             max_reconciliation_age=max_reconciliation_age,
         )
 
+    async def reset_paper_runtime(
+        self,
+        *,
+        evidence: PaperRuntimeUnlockEvidence,
+        lease_token: SecretStr,
+        command_id: str,
+        actor: str,
+        now: datetime,
+        expected_version: int,
+        max_evidence_age: timedelta = timedelta(seconds=3),
+    ) -> KillSwitchControl:
+        if not isinstance(evidence, PaperRuntimeUnlockEvidence):
+            raise TypeError("evidence must be PaperRuntimeUnlockEvidence")
+        if scheduler_lease_token_hash(lease_token) != evidence.lease_token_hash:
+            raise ValueError("paper runtime lease token does not match evidence")
+        if max_evidence_age <= timedelta(0):
+            raise ValueError("paper runtime evidence age must be positive")
+        command = KillSwitchCommand(
+            command_id=command_id,
+            account_id=evidence.account_id,
+            action=KillSwitchAction.RESET,
+            reason=KillSwitchReason.RESET_APPROVED,
+            actor=actor,
+            occurred_at=now,
+            evidence_hash=evidence.evidence_hash,
+        )
+        return await self._mutate(
+            command=command,
+            expected_version=expected_version,
+            max_reconciliation_age=max_evidence_age,
+            runtime_evidence=evidence,
+        )
+
     async def replay(self, *, account_id: str) -> KillSwitchControl:
         current = await self.get(account_id=account_id)
         try:
@@ -273,6 +311,7 @@ class PostgresExecutionControlRepository:
         command: KillSwitchCommand,
         expected_version: int | None = None,
         max_reconciliation_age: timedelta | None = None,
+        runtime_evidence: PaperRuntimeUnlockEvidence | None = None,
     ) -> KillSwitchControl:
         try:
             async with self._engine.begin() as connection:
@@ -305,11 +344,19 @@ class PostgresExecutionControlRepository:
                         raise ValueError("kill switch is already inactive")
                     if max_reconciliation_age is None:
                         raise ValueError("reset reconciliation age is missing")
-                    await self._verify_reset_evidence(
-                        connection,
-                        command=command,
-                        max_age=max_reconciliation_age,
-                    )
+                    if runtime_evidence is None:
+                        await self._verify_reset_evidence(
+                            connection,
+                            command=command,
+                            max_age=max_reconciliation_age,
+                        )
+                    else:
+                        await self._verify_paper_runtime_reset(
+                            connection,
+                            command=command,
+                            evidence=runtime_evidence,
+                            max_age=max_reconciliation_age,
+                        )
                 state, event = apply_kill_switch_command(current, command)
                 await self._insert_event(connection, state, event)
                 result = await connection.execute(
@@ -371,6 +418,164 @@ class PostgresExecutionControlRepository:
             raise ValueError("reset reconciliation belongs to another account")
         if command.occurred_at < evaluated_at or command.occurred_at - evaluated_at > max_age:
             raise ValueError("reset reconciliation is stale or from the future")
+
+    async def _verify_paper_runtime_reset(
+        self,
+        connection: AsyncConnection,
+        *,
+        command: KillSwitchCommand,
+        evidence: PaperRuntimeUnlockEvidence,
+        max_age: timedelta,
+    ) -> None:
+        if command.evidence_hash != evidence.evidence_hash:
+            raise ValueError("paper runtime reset evidence hash does not match")
+        row = (
+            (
+                await connection.execute(
+                    text(
+                        f"""
+                        SELECT *
+                        FROM {self._schema}.paper_runtime_unlock_evidence
+                        WHERE evidence_hash = :evidence_hash
+                        """
+                    ),
+                    {"evidence_hash": evidence.evidence_hash},
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if row is None:
+            raise ValueError("paper runtime reset evidence is not persisted")
+        payload = dict(row["evidence_payload"])
+        if (
+            _canonical_hash(payload) != evidence.evidence_hash
+            or payload != evidence.payload()
+            or str(row["account_id"]) != evidence.account_id
+            or str(row["strategy_id"]) != evidence.strategy_id
+            or row["session_date"] != evidence.session_date
+            or str(row["registration_hash"]) != evidence.registration_hash
+            or str(row["calendar_hash"]) != evidence.calendar_hash
+            or str(row["session_state_hash"]) != evidence.session_state_hash
+            or str(row["quote_evidence_hash"]) != evidence.quote_evidence_hash
+            or str(row["reconciliation_report_hash"])
+            != evidence.reconciliation_report_hash
+            or str(row["lease_holder_id"]) != evidence.lease_holder_id
+            or str(row["lease_token_hash"]) != evidence.lease_token_hash
+            or int(row["lease_generation"]) != evidence.lease_generation
+        ):
+            raise ValueError("paper runtime reset evidence is inconsistent")
+        evaluated_at = to_utc(
+            row["evaluated_at"],
+            name="paper runtime evidence time",
+        )
+        if (
+            evaluated_at != evidence.evaluated_at
+            or command.occurred_at < evaluated_at
+            or command.occurred_at - evaluated_at > max_age
+        ):
+            raise ValueError("paper runtime reset evidence is stale or from the future")
+
+        reconciliation = (
+            (
+                await connection.execute(
+                    text(
+                        f"""
+                        SELECT account_id, evaluated_at, reconciled
+                        FROM {self._schema}.execution_reconciliation_reports
+                        WHERE report_hash = :report_hash
+                        """
+                    ),
+                    {"report_hash": evidence.reconciliation_report_hash},
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if (
+            reconciliation is None
+            or str(reconciliation["account_id"]) != evidence.account_id
+            or not bool(reconciliation["reconciled"])
+            or to_utc(reconciliation["evaluated_at"]) != evaluated_at
+        ):
+            raise ValueError("paper runtime reset reconciliation is not current")
+
+        session_state_hash = await connection.scalar(
+            text(
+                f"""
+                SELECT state_hash
+                FROM {self._schema}.paper_session_risk_state
+                WHERE account_id = :account_id
+                  AND session_date = :session_date
+                """
+            ),
+            {
+                "account_id": evidence.account_id,
+                "session_date": evidence.session_date,
+            },
+        )
+        if str(session_state_hash) != evidence.session_state_hash:
+            raise ValueError("paper runtime session state changed before reset")
+
+        activation = (
+            (
+                await connection.execute(
+                    text(
+                        f"""
+                        SELECT action, registration_hash
+                        FROM {self._schema}.paper_strategy_activation_events
+                        WHERE account_id = :account_id
+                          AND strategy_id = :strategy_id
+                        ORDER BY sequence DESC
+                        LIMIT 1
+                        """
+                    ),
+                    {
+                        "account_id": evidence.account_id,
+                        "strategy_id": evidence.strategy_id,
+                    },
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if (
+            activation is None
+            or str(activation["action"]) != "approve"
+            or str(activation["registration_hash"])
+            != evidence.registration_hash
+        ):
+            raise ValueError("paper runtime strategy approval changed before reset")
+
+        lease = (
+            (
+                await connection.execute(
+                    text(
+                        f"""
+                        SELECT strategy_id, holder_id, token_hash, generation,
+                               acquired_at, expires_at, released_at
+                        FROM {self._schema}.paper_scheduler_leases
+                        WHERE account_id = :account_id
+                        FOR SHARE
+                        """
+                    ),
+                    {"account_id": evidence.account_id},
+                )
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if (
+            lease is None
+            or str(lease["strategy_id"]) != evidence.strategy_id
+            or str(lease["holder_id"]) != evidence.lease_holder_id
+            or str(lease["token_hash"]) != evidence.lease_token_hash
+            or int(lease["generation"]) != evidence.lease_generation
+            or lease["released_at"] is not None
+            or to_utc(lease["acquired_at"]) > evidence.evaluated_at
+            or to_utc(lease["expires_at"]) <= command.occurred_at
+        ):
+            raise ValueError("paper scheduler lease changed before reset")
 
     async def _select_state(
         self, connection: AsyncConnection, account_id: str, *, for_update: bool

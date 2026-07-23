@@ -4,13 +4,14 @@ import json
 import os
 from collections.abc import AsyncIterator
 from dataclasses import replace
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
 import pytest_asyncio
+from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
@@ -19,6 +20,29 @@ from autoquant.adapters.postgres import PostgresControlRepository
 from autoquant.backtest.rules import AshareRuleBook, SecurityStatus
 from autoquant.data.models import DatasetManifest
 from autoquant.data.quality import QualityReport
+from autoquant.execution.control import KillSwitchReason
+from autoquant.execution.control_store import (
+    PostgresExecutionControlRepository,
+)
+from autoquant.execution.paper_scheduler_lease_store import (
+    PostgresPaperSchedulerLeaseRepository,
+)
+from autoquant.execution.paper_unlock import (
+    PaperRuntimeUnlockEvidence,
+    PostgresPaperRuntimeUnlockRepository,
+)
+from autoquant.execution.reconciliation import (
+    AccountReconciler,
+    ExecutionAccountSnapshot,
+)
+from autoquant.execution.session_risk import (
+    SessionRiskObservation,
+    derive_session_turnover,
+)
+from autoquant.execution.session_risk_store import (
+    PostgresPaperSessionRiskRepository,
+)
+from autoquant.execution.store import PostgresPaperExecutionRepository
 from autoquant.execution.strategy_registry_store import (
     PostgresPaperStrategyRegistry,
 )
@@ -61,7 +85,13 @@ async def registry_fixture() -> AsyncIterator[
             "migrations/postgres/001_phase1.sql",
             "migrations/postgres/005_walk_forward_validation.sql",
             "migrations/postgres/006_validation_benchmark.sql",
+            "migrations/postgres/007_risk_decisions.sql",
+            "migrations/postgres/008_paper_execution.sql",
+            "migrations/postgres/009_execution_controls.sql",
+            "migrations/postgres/011_paper_session_risk.sql",
+            "migrations/postgres/014_paper_scheduler_leases.sql",
             "migrations/postgres/015_paper_strategy_registry.sql",
+            "migrations/postgres/016_paper_runtime_unlock.sql",
         )
     )
     report = QualityReport(
@@ -265,3 +295,121 @@ async def test_registry_tables_reject_mutation(
                 ),
                 {"registration_hash": registration.registration_hash},
             )
+
+
+@pytest.mark.asyncio
+async def test_paper_runtime_reset_atomically_rechecks_persisted_fences(
+    registry_fixture: tuple[
+        PostgresPaperStrategyRegistry,
+        ValidatedSmaRegistration,
+        AsyncEngine,
+        str,
+    ],
+) -> None:
+    registry, registration, engine, schema = registry_fixture
+    await registry.approve(registration)
+    controls = PostgresExecutionControlRepository(engine=engine, schema=schema)
+    executions = PostgresPaperExecutionRepository(engine=engine, schema=schema)
+    sessions = PostgresPaperSessionRiskRepository(engine=engine, schema=schema)
+    leases = PostgresPaperSchedulerLeaseRepository(engine=engine, schema=schema)
+    unlocks = PostgresPaperRuntimeUnlockRepository(engine=engine, schema=schema)
+    await unlocks.check_connection()
+    now = datetime(2026, 7, 23, 2, tzinfo=UTC)
+    session_date = date(2026, 7, 23)
+    active = await controls.ensure_fail_closed(
+        account_id="paper-main",
+        now=now,
+    )
+    snapshot = ExecutionAccountSnapshot(
+        account_id="paper-main",
+        as_of=now,
+        cash=Decimal("1000000"),
+        equity=Decimal("1000000"),
+    )
+    report = AccountReconciler().reconcile(
+        internal=snapshot,
+        broker=snapshot,
+        now=now,
+    )
+    await executions.save_reconciliation(
+        internal=snapshot,
+        broker=snapshot,
+        report=report,
+    )
+    turnover = derive_session_turnover(
+        account_id="paper-main",
+        session_date=session_date,
+        histories=(),
+    )
+    session = await sessions.initialize(
+        SessionRiskObservation(
+            account_id="paper-main",
+            session_date=session_date,
+            as_of=now,
+            equity=snapshot.equity,
+            cumulative_turnover=turnover.cumulative_turnover,
+            snapshot_hash=snapshot.snapshot_hash,
+            turnover_evidence_hash=turnover.evidence_hash,
+        )
+    )
+    token = SecretStr("integration-paper-runtime-token-0001")
+    lease = await leases.acquire(
+        account_id="paper-main",
+        strategy_id="validated-sma-paper",
+        holder_id="paper-node-01",
+        token=token,
+        now=now,
+        ttl=timedelta(seconds=30),
+    )
+    evidence = PaperRuntimeUnlockEvidence(
+        account_id="paper-main",
+        strategy_id="validated-sma-paper",
+        session_date=session_date,
+        evaluated_at=now,
+        registration_hash=registration.registration_hash,
+        calendar_hash="c" * 64,
+        session_state_hash=session.state_hash,
+        quote_evidence_hash="d" * 64,
+        reconciliation_report_hash=report.report_hash,
+        lease_holder_id=lease.holder_id,
+        lease_token_hash=lease.token_hash,
+        lease_generation=lease.generation,
+    )
+    await unlocks.append(evidence)
+
+    reset = await controls.reset_paper_runtime(
+        evidence=evidence,
+        lease_token=token,
+        command_id="paper-runtime-integration-reset-0001",
+        actor="operator",
+        now=now + timedelta(seconds=1),
+        expected_version=active.version,
+    )
+
+    assert not reset.active
+    assert reset.last_event_hash
+    assert await unlocks.get(evidence_hash=evidence.evidence_hash) == evidence
+
+    reactivated = await controls.activate(
+        account_id="paper-main",
+        command_id="paper-runtime-reactivate-integration-0001",
+        reason=KillSwitchReason.MANUAL,
+        actor="operator",
+        now=now + timedelta(milliseconds=1100),
+    )
+    await leases.release(
+        account_id="paper-main",
+        strategy_id="validated-sma-paper",
+        holder_id="paper-node-01",
+        token=token,
+        now=now + timedelta(milliseconds=1200),
+    )
+    with pytest.raises(ValueError, match="lease changed"):
+        await controls.reset_paper_runtime(
+            evidence=evidence,
+            lease_token=token,
+            command_id="paper-runtime-lost-lease-reset-0001",
+            actor="operator",
+            now=now + timedelta(seconds=2),
+            expected_version=reactivated.version,
+        )
