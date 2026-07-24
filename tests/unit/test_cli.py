@@ -866,6 +866,54 @@ def test_low_volatility_validation_emits_only_redacted_evidence() -> None:
     validation.assert_awaited_once()
 
 
+def test_low_volatility_forward_spec_discloses_outcome_observation() -> None:
+    payload = {
+        "created_at": "2026-07-24T12:00:00+00:00",
+        "formal_hypothesis_count": 4,
+        "forward_start_date": "2026-07-23",
+        "historical_result_eligible_for_promotion": False,
+        "live_trading_locked": True,
+        "minimum_forward_sessions": 126,
+        "minimum_paper_sessions": 60,
+        "outcome_observed_at_design": True,
+        "predecessor_result_hash": "a" * 64,
+        "retrospective_reclassification_allowed": False,
+        "spec_hash": "b" * 64,
+        "stability_method_version": (
+            "annualized-geometric-return-gap-v1"
+        ),
+        "status": "frozen_awaiting_forward_data",
+        "strategy_parameters_unchanged": True,
+        "version": "low-volatility-forward-evidence-spec-v1",
+    }
+    freeze = AsyncMock(return_value=payload)
+    with patch(
+        "autoquant.cli."
+        "freeze_low_volatility_forward_evidence_spec",
+        new=freeze,
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "low-volatility-forward-spec-freeze",
+                "--predecessor-result-hash",
+                "a" * 64,
+                "--requested-by",
+                "operator",
+            ],
+            env={
+                "AQ_POSTGRES_DSN": (
+                    "postgresql+asyncpg://sensitive"
+                )
+            },
+        )
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == payload
+    assert "sensitive" not in result.stdout
+    freeze.assert_awaited_once()
+
+
 def test_research_input_plan_compilation_stays_live_locked_and_redacted() -> None:
     payload = {
         "activation_rule": "session_date>snapshot.reference_date",

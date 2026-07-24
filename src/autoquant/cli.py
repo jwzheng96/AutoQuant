@@ -41,6 +41,7 @@ from autoquant.operations import (
     freeze_dynamic_regime_research_spec,
     freeze_dynamic_research_spec,
     freeze_fundamental_research_spec,
+    freeze_low_volatility_forward_evidence_spec,
     freeze_low_volatility_research_spec,
     inspect_fundamental_data_backfill,
     inspect_paper_pre_open,
@@ -1102,6 +1103,32 @@ def low_volatility_spec_freeze(
         )
     except (AutoQuantError, LookupError, ValueError):
         _fail("low-volatility specification freeze failed")
+    _emit(payload)
+
+
+@app.command("low-volatility-forward-spec-freeze")
+def low_volatility_forward_spec_freeze(
+    predecessor_result_hash: Annotated[
+        str,
+        typer.Option("--predecessor-result-hash"),
+    ],
+    requested_by: Annotated[
+        str,
+        typer.Option("--requested-by"),
+    ],
+) -> None:
+    """Freeze future-only v5 evidence; v4 remains rejected."""
+
+    try:
+        payload = asyncio.run(
+            freeze_low_volatility_forward_evidence_spec(
+                _settings(),
+                predecessor_result_hash=(predecessor_result_hash),
+                requested_by=requested_by,
+            )
+        )
+    except (AutoQuantError, LookupError, ValueError):
+        _fail("low-volatility forward evidence freeze failed")
     _emit(payload)
 
 

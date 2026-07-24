@@ -42,6 +42,9 @@ from autoquant.backtest.fundamental_validation import (
     FundamentalWalkForwardValidator,
     assess_fundamental_validation,
 )
+from autoquant.backtest.low_volatility_forward import (
+    LowVolatilityForwardEvidenceSpec,
+)
 from autoquant.backtest.low_volatility_portfolio import (
     LowVolatilityResearchSpec,
 )
@@ -178,6 +181,9 @@ from autoquant.web.fundamental_research_store import (
 from autoquant.web.fundamental_validation_store import (
     FundamentalValidationRecord,
     PostgresFundamentalValidationRepository,
+)
+from autoquant.web.low_volatility_forward_store import (
+    PostgresLowVolatilityForwardEvidenceSpecRepository,
 )
 from autoquant.web.low_volatility_research_store import (
     PostgresLowVolatilityResearchSpecRepository,
@@ -1259,6 +1265,89 @@ async def freeze_low_volatility_research_spec(
         await specifications.close()
         await fundamental_specs.close()
         await predecessors.close()
+
+
+async def freeze_low_volatility_forward_evidence_spec(
+    settings: AppSettings,
+    *,
+    predecessor_result_hash: str,
+    requested_by: str,
+) -> dict[str, object]:
+    """Freeze a future-only methodology correction after rejected v4."""
+
+    if settings.live_trading_enabled:
+        raise MissingCapabilityError("forward evidence specification requires live trading locked")
+    if not requested_by.strip() or requested_by != requested_by.strip() or len(requested_by) > 128:
+        raise ValueError("requested_by must contain 1-128 trimmed characters")
+    postgres_dsn = configured_dsn(
+        settings.postgres_dsn,
+        capability="PostgreSQL",
+    )
+    validations = PostgresLowVolatilityValidationRepository.connect(dsn=postgres_dsn)
+    source_specs = PostgresLowVolatilityResearchSpecRepository.connect(dsn=postgres_dsn)
+    forward_specs = PostgresLowVolatilityForwardEvidenceSpecRepository.connect(dsn=postgres_dsn)
+    control = PostgresControlRepository.connect(dsn=postgres_dsn)
+    try:
+        predecessor = await validations.read(predecessor_result_hash)
+        if (
+            predecessor.evidence.evidence_status != "rejected"
+            or predecessor.evidence.gate_failures != ("train_test_gap",)
+        ):
+            raise ValueError("forward correction requires the isolated v4 stability-gate rejection")
+        source_record = await source_specs.read(predecessor.result.spec_hash)
+        source = source_record.spec
+        policy = source.evidence_policy
+        spec = LowVolatilityForwardEvidenceSpec(
+            predecessor_result_hash=(predecessor.result.result_hash),
+            predecessor_assessment_hash=(predecessor.evidence.assessment_hash),
+            source_spec_hash=source.spec_hash,
+            source_dataset_manifest_hash=(source.dataset_manifest_hash),
+            forward_start_date=(source.end_date + timedelta(days=1)),
+            maximum_annualized_stability_gap=(policy.maximum_selection_optimism),
+            minimum_profitable_block_rate=(policy.minimum_profitable_fold_rate),
+            maximum_forward_drawdown=(policy.maximum_oos_drawdown),
+            minimum_forward_compounded_return=(policy.minimum_compounded_oos_return),
+            minimum_forward_excess_return=(policy.minimum_excess_oos_return),
+            maximum_rejected_orders=(policy.maximum_rejected_orders),
+        )
+        created_at = datetime.now(UTC)
+        record = await forward_specs.freeze(
+            spec,
+            requested_by=requested_by,
+            created_at=created_at,
+        )
+        payload: dict[str, object] = {
+            "created_at": record.created_at.isoformat(),
+            "formal_hypothesis_count": (record.spec.formal_hypothesis_count),
+            "forward_start_date": (record.spec.forward_start_date.isoformat()),
+            "historical_result_eligible_for_promotion": False,
+            "live_trading_locked": True,
+            "minimum_forward_sessions": (record.spec.minimum_forward_sessions),
+            "minimum_paper_sessions": (record.spec.minimum_paper_sessions),
+            "outcome_observed_at_design": True,
+            "predecessor_result_hash": (record.spec.predecessor_result_hash),
+            "retrospective_reclassification_allowed": False,
+            "spec_hash": record.spec.spec_hash,
+            "stability_method_version": (record.spec.stability_method_version),
+            "status": "frozen_awaiting_forward_data",
+            "strategy_parameters_unchanged": True,
+            "version": record.spec.version,
+        }
+        await control.append_audit_event(
+            "research.low_volatility.forward_evidence.frozen",
+            created_at,
+            {
+                **payload,
+                "requested_by": requested_by,
+                "specification": record.spec.payload(),
+            },
+        )
+        return payload
+    finally:
+        await control.close()
+        await forward_specs.close()
+        await source_specs.close()
+        await validations.close()
 
 
 async def inspect_fundamental_data_backfill(

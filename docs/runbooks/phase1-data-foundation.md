@@ -51,6 +51,7 @@ Apply `migrations/postgres/001_phase1.sql`,
 `migrations/postgres/031_fundamental_validation.sql`, then
 `migrations/postgres/032_low_volatility_research.sql`, then
 `migrations/postgres/033_low_volatility_validation.sql`, then
+`migrations/postgres/034_low_volatility_forward_evidence.sql`, then
 `migrations/clickhouse/001_phase1.sql` and
 `migrations/clickhouse/002_tushare_daily.sql` and
 `migrations/clickhouse/003_daily_coverage.sql` and
@@ -794,3 +795,37 @@ intervals, so a future methodology version must pre-register a horizon-normalize
 This observation cannot retroactively change, overwrite, or promote v4; any revised method
 requires separately frozen evidence and a new forward-data requirement. Live trading remains
 locked.
+
+## Future-only low-volatility evidence correction
+
+After schema v34 is applied, freeze the methodology correction once:
+
+```bash
+uv run autoquant low-volatility-forward-spec-freeze \
+  --predecessor-result-hash \
+  f3a9acca898d30ef0672a16f43a73fb20644d8f19a6603c026a58a8a868f2a92 \
+  --requested-by operator
+```
+
+The specification keeps every v4 portfolio, signal, rebalance, cost and risk parameter
+unchanged. It replaces only the invalid comparison of unequal holding-period totals with
+annualized geometric returns:
+
+```text
+annualized_return = exp(252 / sessions * ln(1 + total_return)) - 1
+stability_gap = annualized_training_return - annualized_forward_return
+```
+
+The record discloses that the outcome was observed before this correction and that v4 was the
+fourth formal hypothesis. It sets `retrospective_reclassification_allowed=false` and
+`historical_result_eligible_for_promotion=false`, so neither the corrected formula nor a
+retrospective calculation can turn the rejected v4 record into a paper candidate.
+
+Only sessions strictly after the frozen historical dataset ending 2026-07-22 may enter the new
+forward ledger. At least 126 forward sessions in six non-overlapping 21-session blocks are
+required, with positive compounded and excess return, at least a 55% profitable-block rate,
+no more than 18% drawdown, zero rejected orders, zero unresolved strategy positions, and an
+annualized stability gap no greater than the unchanged 0.15 threshold. Passing those gates
+still requires at least 60 separately controlled paper sessions. The rationale follows the
+warning that repeated historical trials increase backtest-overfitting risk:
+<https://papers.ssrn.com/sol3/papers.cfm?abstract_id=2326253>.

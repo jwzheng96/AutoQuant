@@ -40,6 +40,14 @@ failed the frozen `train_test_gap` gate at 15.130%. The console exposes the comp
 hash-verified result and separate benchmark diagnostics read-only; positive returns cannot
 override the failed gate or unlock trading.
 
+PostgreSQL schema v34 freezes a future-only methodology correction without changing the v4
+strategy. It compares annualized geometric returns rather than unequal 504- and 63-session
+holding-period totals, explicitly records that the v4 outcome was already observed and that
+four formal hypotheses have been tried, and permanently forbids retrospective reclassification
+or promotion of the historical v4 result. The next evidence stage starts after 2026-07-22,
+requires at least 126 new trading sessions, and still requires at least 60 paper sessions after
+all forward gates pass. This is a waiting-data contract, not a shortcut to deployment.
+
 The repository also contains a deterministic A-share research ledger with versioned board
 rules, T+1 sellability, lot-size validation, conservative daily-open fills, liquidity caps,
 configurable commission/slippage, sell-side stamp duty, bilateral transfer fees, and a
