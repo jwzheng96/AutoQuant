@@ -71,6 +71,7 @@ async def callback_fixture() -> AsyncIterator[
             "migrations/postgres/038_qmt_canary_order_staging.sql",
             "migrations/postgres/039_qmt_canary_remark_recovery.sql",
             "migrations/postgres/040_qmt_callback_inbox.sql",
+            "migrations/postgres/041_qmt_callback_persistence_receipts.sql",
         )
     )
     try:
@@ -343,16 +344,29 @@ async def test_callback_inbox_is_redacted_idempotent_replayable_and_immutable(
         qmt_lease_generation=generation,
         lease_token=LEASE_TOKEN,
     ) == (stored_first, stored_second)
+    receipt = await inbox.persistence_receipt(
+        stored_first,
+        lease_token=LEASE_TOKEN,
+    )
+    assert receipt.event == stored_first
+    assert (
+        receipt.persisted_at - receipt.event.callback.received_at
+        <= timedelta(seconds=5)
+    )
 
     async with engine.connect() as connection:
         serialized = await connection.scalar(
             text(
                 f"""
                 SELECT string_agg(
-                    event_payload::text || redacted_payload::text,
+                    e.event_payload::text ||
+                    e.redacted_payload::text ||
+                    r.receipt_payload::text,
                     ''
                 )
-                FROM {schema}.qmt_callback_inbox_events
+                FROM {schema}.qmt_callback_inbox_events e
+                JOIN {schema}.qmt_callback_persistence_receipts r
+                  ON r.event_hash = e.event_hash
                 """
             )
         )
@@ -364,6 +378,13 @@ async def test_callback_inbox_is_redacted_idempotent_replayable_and_immutable(
     with pytest.raises(SQLAlchemyError):
         async with engine.begin() as connection:
             await connection.execute(text(f"DELETE FROM {schema}.qmt_callback_inbox_events"))
+    with pytest.raises(SQLAlchemyError):
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    f"DELETE FROM {schema}.qmt_callback_persistence_receipts"
+                )
+            )
 
 
 @pytest.mark.asyncio

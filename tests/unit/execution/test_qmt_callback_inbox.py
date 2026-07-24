@@ -10,6 +10,7 @@ import pytest
 from autoquant.execution.models import ZERO_HASH
 from autoquant.execution.qmt_callback_inbox import (
     QmtCallbackInboxEvent,
+    QmtCallbackPersistenceReceipt,
     replay_qmt_callback_inbox,
     sanitize_qmt_callback,
 )
@@ -79,6 +80,31 @@ def test_order_callback_is_allowlisted_and_removes_broker_identity_and_message()
     assert BROKER_ACCOUNT not in serialized
     assert "sensitive broker rejection" not in serialized
     assert event.broker_mutation_allowed is False
+
+
+def test_persistence_receipt_proves_bounded_database_acceptance_without_secrets() -> None:
+    callback = _sanitize(QmtCallbackKind.ORDER, _order_payload())
+    event = QmtCallbackInboxEvent(
+        callback=callback,
+        gateway_holder_id="windows-qmt-canary-01",
+        qmt_session_id=20260724,
+        qmt_lease_generation=3,
+        previous_hash=ZERO_HASH,
+    )
+    receipt = QmtCallbackPersistenceReceipt(
+        event=event,
+        persisted_at=NOW + timedelta(seconds=4),
+    )
+
+    serialized = json.dumps(receipt.payload(), sort_keys=True)
+    assert receipt.broker_mutation_allowed is False
+    assert receipt.payload()["event_hash"] == event.event_hash
+    assert BROKER_ACCOUNT not in serialized
+    with pytest.raises(ValueError, match="within five seconds"):
+        QmtCallbackPersistenceReceipt(
+            event=event,
+            persisted_at=NOW + timedelta(seconds=6),
+        )
 
 
 @pytest.mark.parametrize(
@@ -184,3 +210,15 @@ def test_callback_inbox_migration_is_append_only_redacted_and_locked() -> None:
     assert "NOT broker_mutation_allowed" in sql
     assert "autoquant_reject_immutable_change()" in sql
     assert "VALUES ('postgres', 40)" in sql
+
+
+def test_callback_receipt_migration_proves_timely_immutable_persistence() -> None:
+    sql = Path(
+        "migrations/postgres/041_qmt_callback_persistence_receipts.sql"
+    ).read_text(encoding="utf-8")
+
+    assert "qmt_callback_persistence_receipts" in sql
+    assert "persisted_at <= received_at + interval '5 seconds'" in sql
+    assert "qmt_callback_persistence_receipts_immutable" in sql
+    assert "NOT broker_mutation_allowed" in sql
+    assert "VALUES ('postgres', 41)" in sql

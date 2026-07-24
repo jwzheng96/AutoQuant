@@ -42,6 +42,11 @@ logical account、XtQuant `seq`、券商 `order_id` 和预提交的 24 字符 `o
 同一 lease generation 内恢复时，必须先用 `restore_before_capture` 回放完整收件箱到一个
 全新的空 buffer，恢复最后一个 durable `local_sequence`，之后才能注册 XtQuant 回调；
 否则新进程从序号 1 开始会与历史事实冲突。
+schema v41 为每个收件箱事件在同一数据库事务内追加独立、不可变的及时持久化回执。回执
+使用数据库时间证明原回调在 5 秒内落库，并绑定 event hash、账号别名、holder、session、
+lease generation 和序号。只有完整回放且回执校验通过的异步回报，才允许在 5 秒窗口之后
+补写订单关联，从而恢复“事件已落库但关联前崩溃”的状态；未持久化事件、缺少回执的历史
+事件和伪造回执仍按过期或券商状态未知处理。
 候选外键必须指向同一 holder 的真实 `acquire` 事件；预留事务还会锁定并检查当前租约
 未释放、未过期且 generation 未变化。候选预留、异步券商订单号绑定和重启恢复都必须
 提交当前租约 bearer token；数据库只比较其 SHA-256，并以数据库时钟在持有 lease 行锁

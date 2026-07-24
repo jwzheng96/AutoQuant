@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 from collections.abc import AsyncIterator
 from dataclasses import replace
@@ -137,6 +138,7 @@ async def ledger_fixture() -> AsyncIterator[
             "migrations/postgres/038_qmt_canary_order_staging.sql",
             "migrations/postgres/039_qmt_canary_remark_recovery.sql",
             "migrations/postgres/040_qmt_callback_inbox.sql",
+            "migrations/postgres/041_qmt_callback_persistence_receipts.sql",
         )
     )
     try:
@@ -403,8 +405,93 @@ async def test_persisted_async_callback_binds_exact_staged_remark_and_replays(
         qmt_lease_generation=durable.qmt_lease_generation,
         previous_hash=durable.event_hash,
     )
-    with pytest.raises(BrokerStateUnknownError, match="must be durable"):
+    with pytest.raises(BrokerStateUnknownError, match="durable event"):
         await binder.bind(unpersisted, lease_token=lease_token)
+
+
+@pytest.mark.asyncio
+async def test_timely_callback_receipt_allows_delayed_crash_replay_only(
+    ledger_fixture: tuple[
+        PostgresQmtCanaryOrderLedger,
+        PostgresQmtSessionLeaseRepository,
+        SecretStr,
+        AsyncEngine,
+        str,
+    ],
+) -> None:
+    ledger, _, lease_token, engine, schema = ledger_fixture
+    candidate = _candidate(
+        client_order_id="canary-delayed-callback-0001",
+        created_at=datetime.now(UTC),
+    )
+    stage = await ledger.stage(
+        candidate,
+        lease_token=lease_token,
+        staged_at=datetime.now(UTC),
+    )
+    await ledger.reserve(
+        candidate,
+        lease_token=lease_token,
+        async_request_id=52,
+        reserved_at=datetime.now(UTC),
+    )
+    buffer = QmtCallbackBuffer()
+    buffer.capture(
+        QmtCallbackKind.ASYNC_ORDER_RESPONSE,
+        {
+            "account_id": "integration-broker-account",
+            "order_id": 99052,
+            "order_remark": stage.broker_order_remark,
+            "seq": 52,
+        },
+        received_at=datetime.now(UTC),
+    )
+    inbox = PostgresQmtCallbackInbox(engine=engine, schema=schema)
+    coordinator = QmtCallbackPersistenceCoordinator(
+        buffer=buffer,
+        inbox=inbox,
+        expected_broker_account_id="integration-broker-account",
+        logical_account_id=candidate.account_id,
+        gateway_holder_id=candidate.gateway_holder_id,
+        qmt_session_id=candidate.qmt_session_id,
+        qmt_lease_generation=candidate.qmt_lease_generation,
+    )
+
+    with pytest.raises(BrokerStateUnknownError, match="configured binder"):
+        await coordinator.persist_and_process(lease_token=lease_token)
+    events = await inbox.replay_current(
+        account_id=candidate.account_id,
+        gateway_holder_id=candidate.gateway_holder_id,
+        qmt_session_id=candidate.qmt_session_id,
+        qmt_lease_generation=candidate.qmt_lease_generation,
+        lease_token=lease_token,
+    )
+    assert len(events) == 1
+    event = events[0]
+    receipt = await inbox.persistence_receipt(
+        event,
+        lease_token=lease_token,
+    )
+    assert receipt.event == event
+
+    await asyncio.sleep(5.2)
+    with pytest.raises(BrokerStateUnknownError, match="fresh same-session"):
+        await ledger.bind(
+            account_id=candidate.account_id,
+            broker_order_remark=stage.broker_order_remark,
+            gateway_holder_id=candidate.gateway_holder_id,
+            qmt_session_id=candidate.qmt_session_id,
+            qmt_lease_generation=candidate.qmt_lease_generation,
+            lease_token=lease_token,
+            async_request_id=52,
+            broker_order_id="99052",
+            bound_at=event.callback.received_at,
+        )
+
+    binder = QmtPersistedAsyncResponseBinder(inbox=inbox, ledger=ledger)
+    bound = await binder.bind(event, lease_token=lease_token)
+    assert bound.async_request_id == 52
+    assert bound.broker_order_id == "99052"
 
 
 @pytest.mark.asyncio
@@ -499,6 +586,19 @@ async def test_qmt_canary_ledger_rejects_conflicts_and_mutation(
             async_request_id=17,
             broker_order_id="88001",
             bound_at=datetime.now(UTC),
+        )
+    with pytest.raises(BrokerStateUnknownError, match="no durable callback"):
+        await ledger.bind(
+            account_id=candidate.account_id,
+            broker_order_remark=qmt_canary_order_remark(candidate.candidate_hash),
+            gateway_holder_id=candidate.gateway_holder_id,
+            qmt_session_id=candidate.qmt_session_id,
+            qmt_lease_generation=candidate.qmt_lease_generation,
+            lease_token=lease_token,
+            async_request_id=17,
+            broker_order_id="88001",
+            bound_at=datetime.now(UTC),
+            callback_receipt_hash="a" * 64,
         )
     await ledger.bind(
         account_id=candidate.account_id,

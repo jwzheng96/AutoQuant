@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from math import isfinite
 from types import MappingProxyType
 from typing import Final
@@ -23,6 +23,10 @@ from autoquant.execution.qmt_gateway import (
 )
 
 QMT_CALLBACK_INBOX_VERSION: Final = "qmt-callback-inbox-event-v1"
+QMT_CALLBACK_PERSISTENCE_RECEIPT_VERSION: Final = (
+    "qmt-callback-persistence-receipt-v1"
+)
+MAXIMUM_CALLBACK_PERSISTENCE_AGE: Final = timedelta(seconds=5)
 _SAFE_REASON = re.compile(r"[a-z0-9_]{1,64}\Z")
 _HOLDER_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z")
 _STOCK_CODE = re.compile(r"[0-9]{6}\.(?:SH|SZ)\Z")
@@ -334,6 +338,62 @@ class QmtCallbackInboxEvent:
             "qmt_session_id": self.qmt_session_id,
             "received_at": _datetime_text(self.callback.received_at),
             "redacted_payload": dict(self.callback.redacted_payload),
+            "version": self.version,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class QmtCallbackPersistenceReceipt:
+    event: QmtCallbackInboxEvent
+    persisted_at: datetime
+    version: str = QMT_CALLBACK_PERSISTENCE_RECEIPT_VERSION
+    receipt_hash: str = field(init=False)
+
+    @property
+    def broker_mutation_allowed(self) -> bool:
+        return False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.event, QmtCallbackInboxEvent):
+            raise TypeError("event must be QmtCallbackInboxEvent")
+        persisted_at = to_utc(
+            self.persisted_at,
+            name="QMT callback persistence time",
+        )
+        latency = persisted_at - self.event.callback.received_at
+        if (
+            latency < timedelta(0)
+            or latency > MAXIMUM_CALLBACK_PERSISTENCE_AGE
+            or persisted_at.astimezone(SHANGHAI).date()
+            != self.event.callback.broker_session_date
+        ):
+            raise ValueError(
+                "QMT callback persistence receipt must be within five seconds"
+            )
+        if self.version != QMT_CALLBACK_PERSISTENCE_RECEIPT_VERSION:
+            raise ValueError(
+                "QMT callback persistence receipt version is unsupported"
+            )
+        object.__setattr__(self, "persisted_at", persisted_at)
+        object.__setattr__(
+            self,
+            "receipt_hash",
+            _canonical_hash(self.payload()),
+        )
+
+    def payload(self) -> dict[str, object]:
+        callback = self.event.callback
+        return {
+            "account_id": callback.account_id,
+            "broker_mutation_allowed": False,
+            "broker_session_date": callback.broker_session_date.isoformat(),
+            "event_hash": self.event.event_hash,
+            "gateway_holder_id": self.event.gateway_holder_id,
+            "local_sequence": callback.local_sequence,
+            "persisted_at": _datetime_text(self.persisted_at),
+            "qmt_lease_generation": self.event.qmt_lease_generation,
+            "qmt_session_id": self.event.qmt_session_id,
+            "received_at": _datetime_text(callback.received_at),
             "version": self.version,
         }
 

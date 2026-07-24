@@ -81,6 +81,12 @@ account、`seq`、`order_id` 和预提交 `order_remark`。收件箱已落库但
 把完整收件箱回放到全新空 buffer，并把 cursor 恢复为最后一个 durable
 `local_sequence`。已捕获事实的 buffer、序号回退或并发消费者均失败关闭。
 
+schema v41 的 persistence receipt 与 inbox event 同事务写入，以数据库观察时间证明回调
+在收到后 5 秒内持久化。receipt 绑定完整事件 scope、event hash 和时序并保持不可变。
+异步关联超过原 freshness 窗口时必须从数据库重新读取并校验 receipt；只有 receipt 中的
+账号、session、generation、`seq`、`order_id`、remark 和回调时间全部与候选一致才可
+幂等绑定。无 receipt 的调用仍受原 5 秒限制，不能用“重启恢复”名义放宽。
+
 该收件箱只提供持久化核心，尚未授权任何报单。Windows 常驻协调器完成装配和真实故障演练
 前，不能把内存队列或数据库表的存在解释为可实盘。
 

@@ -103,6 +103,10 @@ then acknowledges its removal from the queue. Partial database writes, lease fai
 cancellation retain the exact batch for idempotent retry; stream overflow prevents acknowledgement
 and requires a reconnect. A replacement process must replay the current lease generation into a
 fresh empty buffer, restore the last durable local sequence, and only then register new callbacks.
+Schema v41 adds a separate immutable persistence receipt in the same transaction as each inbox
+event. Database time proves the original callback reached durable storage within five seconds.
+Only an exact receipt-backed async response may be correlated after that freshness window, which
+closes the crash-after-inbox/before-binding gap without relaxing stale unpersisted callbacks.
 Request and broker identifiers are scoped by QMT session-lease generation, so vendor counters may
 restart without ever joining a new process callback to an old process order.
 Candidate reservation, asynchronous broker-order binding and restart recovery also require the

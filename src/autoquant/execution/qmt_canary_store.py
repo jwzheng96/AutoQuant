@@ -12,11 +12,19 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from autoquant.backtest.models import OrderSide
 from autoquant.clock import SHANGHAI
-from autoquant.data.models import _canonical_hash, _require_nonblank
+from autoquant.data.models import (
+    _canonical_hash,
+    _require_lowercase_sha256,
+    _require_nonblank,
+)
 from autoquant.errors import (
     BrokerStateUnknownError,
     PersistenceUnavailableError,
     QmtSessionLeaseLostError,
+)
+from autoquant.execution.qmt_callback_store import (
+    qmt_callback_event_from_row,
+    qmt_callback_receipt_from_row,
 )
 from autoquant.execution.qmt_canary_contract import (
     QmtCanaryOrderCandidate,
@@ -25,6 +33,7 @@ from autoquant.execution.qmt_canary_contract import (
     QmtOrderCorrelationBook,
 )
 from autoquant.execution.qmt_canary_recovery import QmtCanaryRemarkRecovery
+from autoquant.execution.qmt_gateway import QmtCallbackKind
 from autoquant.execution.qmt_session_store import qmt_session_token_hash
 
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
@@ -60,6 +69,8 @@ class PostgresQmtCanaryOrderLedger:
 
     async def check_connection(self) -> None:
         required = {
+            "qmt_callback_inbox_events",
+            "qmt_callback_persistence_receipts",
             "qmt_canary_order_candidates",
             "qmt_order_correlation_reservations",
             "qmt_order_correlation_bindings",
@@ -91,8 +102,8 @@ class PostgresQmtCanaryOrderLedger:
                 )
         except Exception:
             raise PersistenceUnavailableError("QMT canary ledger schema check failed") from None
-        if set(map(str, rows)) != required or not isinstance(version, int) or version < 39:
-            raise PersistenceUnavailableError("QMT canary ledger schema v39 is unavailable")
+        if set(map(str, rows)) != required or not isinstance(version, int) or version < 41:
+            raise PersistenceUnavailableError("QMT canary ledger schema v41 is unavailable")
 
     async def stage(
         self,
@@ -465,6 +476,7 @@ class PostgresQmtCanaryOrderLedger:
         broker_order_id: str,
         broker_order_remark: str,
         bound_at: datetime,
+        callback_receipt_hash: str | None = None,
     ) -> QmtOrderCorrelation:
         _require_nonblank(account_id, name="QMT canary account_id")
         if account_id != account_id.strip() or len(account_id) > 128:
@@ -488,6 +500,11 @@ class PostgresQmtCanaryOrderLedger:
             qmt_session_id=qmt_session_id,
             qmt_lease_generation=qmt_lease_generation,
         )
+        if callback_receipt_hash is not None:
+            _require_lowercase_sha256(
+                callback_receipt_hash,
+                name="QMT callback persistence receipt hash",
+            )
         token_hash = _lease_token_hash(lease_token)
         try:
             async with self._engine.begin() as connection:
@@ -527,6 +544,68 @@ class PostgresQmtCanaryOrderLedger:
                         "QMT order binding requires its matching active bearer lease"
                     )
                 assert lease_row is not None
+                durable_receipt = None
+                if callback_receipt_hash is not None:
+                    callback_row = (
+                        (
+                            await connection.execute(
+                                text(
+                                    f"""
+                                    SELECT e.*, r.receipt_hash,
+                                           r.persisted_at,
+                                           r.receipt_version,
+                                           r.receipt_payload
+                                    FROM
+                                        {self._schema}.qmt_callback_persistence_receipts r
+                                    JOIN
+                                        {self._schema}.qmt_callback_inbox_events e
+                                      ON e.event_hash = r.event_hash
+                                    WHERE r.receipt_hash =
+                                        :callback_receipt_hash
+                                    FOR SHARE OF e, r
+                                    """
+                                ),
+                                {
+                                    "callback_receipt_hash": (
+                                        callback_receipt_hash
+                                    )
+                                },
+                            )
+                        )
+                        .mappings()
+                        .one_or_none()
+                    )
+                    if callback_row is None:
+                        raise BrokerStateUnknownError(
+                            "QMT order binding has no durable callback receipt"
+                        )
+                    callback_event = qmt_callback_event_from_row(callback_row)
+                    durable_receipt = qmt_callback_receipt_from_row(
+                        callback_row,
+                        event=callback_event,
+                    )
+                    callback_payload = callback_event.callback.redacted_payload
+                    if (
+                        callback_event.callback.kind
+                        is not QmtCallbackKind.ASYNC_ORDER_RESPONSE
+                        or callback_event.callback.account_id != account_id
+                        or callback_event.gateway_holder_id
+                        != gateway_holder_id
+                        or callback_event.qmt_session_id != qmt_session_id
+                        or callback_event.qmt_lease_generation
+                        != qmt_lease_generation
+                        or callback_event.callback.received_at
+                        < lease_row["acquired_at"]
+                        or callback_event.callback.received_at != bound_at
+                        or callback_payload.get("seq") != async_request_id
+                        or str(callback_payload.get("order_id"))
+                        != broker_order_id
+                        or callback_payload.get("order_remark")
+                        != broker_order_remark
+                    ):
+                        raise BrokerStateUnknownError(
+                            "QMT callback receipt conflicts with order identity"
+                        )
                 reservation_row = (
                     (
                         await connection.execute(
@@ -579,8 +658,11 @@ class PostgresQmtCanaryOrderLedger:
                 if (
                     proposed.bound_at is None
                     or proposed.bound_at > lease_row["observed_at"]
-                    or lease_row["observed_at"] - proposed.bound_at
-                    > _MAXIMUM_CANARY_PERSISTENCE_AGE
+                    or (
+                        durable_receipt is None
+                        and lease_row["observed_at"] - proposed.bound_at
+                        > _MAXIMUM_CANARY_PERSISTENCE_AGE
+                    )
                     or proposed.bound_at.astimezone(SHANGHAI).date()
                     != lease_row["observed_at"].astimezone(SHANGHAI).date()
                 ):
