@@ -57,6 +57,7 @@ from autoquant.operations import (
     freeze_low_volatility_forward_evidence_spec,
     freeze_low_volatility_research_spec,
     inspect_fundamental_data_backfill,
+    inspect_low_volatility_paper_deployment,
     inspect_paper_pre_open,
     inspect_paper_promotion,
     inspect_paper_runtime_readiness,
@@ -1650,6 +1651,32 @@ def low_volatility_paper_signal_prepare(
     except (AutoQuantError, LookupError, ValueError):
         _fail("low-volatility paper signal preparation failed closed")
     _emit(payload)
+
+
+@app.command("low-volatility-paper-deployment-status")
+def low_volatility_paper_deployment_status(
+    session_date: Annotated[
+        str,
+        typer.Option("--session-date"),
+    ],
+) -> None:
+    """Inspect low-volatility paper blockers without activation."""
+
+    try:
+        payload = asyncio.run(
+            inspect_low_volatility_paper_deployment(
+                _settings(),
+                session_date=_parse_date(
+                    session_date,
+                    name="session-date",
+                ),
+            )
+        )
+    except (AutoQuantError, LookupError, ValueError):
+        _fail("low-volatility paper deployment status failed closed")
+    _emit(payload)
+    if not payload["ready_for_runtime"]:
+        raise typer.Exit(code=2)
 
 
 @app.command("low-volatility-forward-evaluation-data-create")

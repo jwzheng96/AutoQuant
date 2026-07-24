@@ -1097,3 +1097,22 @@ hard-codes `paper_activation_allowed=false`, `runtime_activation_allowed=false`,
 `live_trading_locked=true`. Paper deployment needs a later, separately reviewed schema that
 binds this result to daily signal evidence, session risk controls, and an explicitly approved
 paper target; live trading remains out of scope.
+
+Inspect the current deployment blockers without changing state:
+
+```bash
+uv run autoquant low-volatility-paper-deployment-status \
+  --session-date 2026-07-27
+```
+
+This command requires `AQ_ENVIRONMENT=paper`, emits only hashes and blocker codes, and returns
+exit code 2 while blocked. The resident runtime performs the same candidate lookup before
+opening its quote connection. It rejects a missing compatibility run, an incompatible run, a
+missing exact-session signal, any candidate/signal/spec hash mismatch, the observation-only
+signal policy, and every v46/v49 artifact that still lacks runtime authority.
+
+The current expected output contains `candidate_missing`, because no terminal 126-session
+evaluation or candidate approval exists. Even after those artifacts exist, the current code
+will continue to report `candidate_runtime_locked`,
+`compatibility_runtime_authority_missing`, and `daily_signal_runtime_locked`. Removing those
+blockers requires a future reviewed deployment contract and is not part of this stage.

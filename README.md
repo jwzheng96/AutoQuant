@@ -108,6 +108,11 @@ The stored artifact includes all 126 account snapshots and execution reports. Bo
 and incompatible outcomes permanently retain `paper_activation_allowed=false`,
 `runtime_activation_allowed=false`, and `live_trading_locked=true`. With the official ledger
 currently at 1/126, the command fails closed and the compatibility-run table remains empty.
+The resident paper assembly now reads the active low-volatility candidate, compatibility
+specification/run, and exact-session daily signal before it opens a quote connection. Any
+candidate found through this path is still rejected because the v46, v47 and v49 artifacts
+carry no runtime authority. `low-volatility-paper-deployment-status` exposes the exact blockers
+read-only and returns a nonzero exit while blocked.
 PostgreSQL schema v36 adds an append-only, revocable compliance-approval artifact bound to the
 active paper registration and exact promotion policy. No approval is created automatically,
 and even a valid artifact can only satisfy an evidence gate while the code-level live release

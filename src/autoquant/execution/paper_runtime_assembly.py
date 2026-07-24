@@ -10,12 +10,22 @@ from pydantic import SecretStr
 
 from autoquant.adapters.clickhouse_daily import ClickHouseDailyRepository
 from autoquant.adapters.postgres import PostgresControlRepository
+from autoquant.clock import to_shanghai
 from autoquant.config import AppSettings, RuntimeEnvironment
 from autoquant.data.daily_ingestion import ValidatedDailyDatasetReader
 from autoquant.errors import MissingCapabilityError, PersistenceUnavailableError
 from autoquant.execution.control import KillSwitchReason
 from autoquant.execution.control_store import PostgresExecutionControlRepository
 from autoquant.execution.coordinator import PaperOrderCoordinator
+from autoquant.execution.low_volatility_paper_approval_store import (
+    PostgresLowVolatilityPaperCandidateRepository,
+)
+from autoquant.execution.low_volatility_paper_deployment import (
+    LowVolatilityPaperDeploymentGate,
+)
+from autoquant.execution.low_volatility_paper_signal_store import (
+    PostgresLowVolatilityPaperSignalRepository,
+)
 from autoquant.execution.market_clock import AShareMarketClock
 from autoquant.execution.paper_deployment import (
     PostgresPaperDeploymentRegistry,
@@ -58,6 +68,12 @@ from autoquant.execution.validated_sma import ValidatedSmaTargetProvider
 from autoquant.execution.validated_sma_portfolio import (
     ValidatedSmaPortfolioRegistration,
     ValidatedSmaPortfolioTargetProvider,
+)
+from autoquant.web.low_volatility_execution_compatibility_run_store import (
+    PostgresLowVolatilityExecutionCompatibilityRunRepository,
+)
+from autoquant.web.low_volatility_execution_compatibility_store import (
+    PostgresLowVolatilityExecutionCompatibilityRepository,
 )
 from autoquant.web.risk_store import PostgresRiskDecisionRepository
 
@@ -158,18 +174,28 @@ async def assemble_paper_runtime(
         closers.append(sessions.close)
         risks = PostgresRiskDecisionRepository.connect(dsn=postgres_dsn)
         closers.append(risks.close)
-        scheduler_events = PostgresPaperSchedulerRepository.connect(
-            dsn=postgres_dsn
-        )
+        scheduler_events = PostgresPaperSchedulerRepository.connect(dsn=postgres_dsn)
         closers.append(scheduler_events.close)
-        scheduler_leases = PostgresPaperSchedulerLeaseRepository.connect(
-            dsn=postgres_dsn
-        )
+        scheduler_leases = PostgresPaperSchedulerLeaseRepository.connect(dsn=postgres_dsn)
         closers.append(scheduler_leases.close)
-        deployments = PostgresPaperDeploymentRegistry.connect(
+        deployments = PostgresPaperDeploymentRegistry.connect(dsn=postgres_dsn)
+        closers.append(deployments.close)
+        low_volatility_candidates = PostgresLowVolatilityPaperCandidateRepository.connect(
             dsn=postgres_dsn
         )
-        closers.append(deployments.close)
+        closers.append(low_volatility_candidates.close)
+        low_volatility_compatibility_specs = (
+            PostgresLowVolatilityExecutionCompatibilityRepository.connect(dsn=postgres_dsn)
+        )
+        closers.append(low_volatility_compatibility_specs.close)
+        low_volatility_compatibility_runs = (
+            PostgresLowVolatilityExecutionCompatibilityRunRepository.connect(dsn=postgres_dsn)
+        )
+        closers.append(low_volatility_compatibility_runs.close)
+        low_volatility_signals = PostgresLowVolatilityPaperSignalRepository.connect(
+            dsn=postgres_dsn
+        )
+        closers.append(low_volatility_signals.close)
 
         cold_start_control = await controls.ensure_fail_closed(
             account_id=settings.paper_account_id,
@@ -186,14 +212,22 @@ async def assemble_paper_runtime(
             raise MissingCapabilityError(
                 "paper runtime cold start re-armed the inactive kill switch"
             )
+        low_volatility_readiness = await LowVolatilityPaperDeploymentGate(
+            account_id=settings.paper_account_id,
+            strategy_id=settings.paper_strategy_id,
+            candidates=low_volatility_candidates,
+            compatibility_specs=(low_volatility_compatibility_specs),
+            compatibility_runs=(low_volatility_compatibility_runs),
+            signals=low_volatility_signals,
+        ).inspect(session_date=to_shanghai(clock_now()).date())
+        if low_volatility_readiness.candidate_present:
+            raise MissingCapabilityError("low-volatility candidate remains evidence-only")
         registration = await deployments.active(
             account_id=settings.paper_account_id,
             strategy_id=settings.paper_strategy_id,
         )
         if registration is None:
-            raise MissingCapabilityError(
-                "paper runtime requires an active approved strategy"
-            )
+            raise MissingCapabilityError("paper runtime requires an active approved strategy")
         instruments = registration.instruments
         policy = default_paper_policy(instruments)
         calendar = ExactTradingCalendarReader(
@@ -301,12 +335,8 @@ async def assemble_paper_runtime(
             leases=scheduler_leases,
             holder_id=lease.holder_id,
             token=lease.lease_token,
-            ttl=timedelta(
-                seconds=settings.paper_scheduler_lease_ttl_seconds
-            ),
-            renewal_interval=timedelta(
-                seconds=settings.paper_scheduler_renewal_seconds
-            ),
+            ttl=timedelta(seconds=settings.paper_scheduler_lease_ttl_seconds),
+            renewal_interval=timedelta(seconds=settings.paper_scheduler_renewal_seconds),
         )
         quote_runtime = quote_runtime_factory(
             quote_bridge,
@@ -324,9 +354,7 @@ async def assemble_paper_runtime(
             runner=runner,
             quotes=quote_runtime,
             sink=persist_cycle,
-            poll_interval=timedelta(
-                seconds=float(settings.paper_poll_interval_seconds)
-            ),
+            poll_interval=timedelta(seconds=float(settings.paper_poll_interval_seconds)),
             now=clock_now,
         )
         return AssembledPaperRuntime(

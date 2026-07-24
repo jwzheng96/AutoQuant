@@ -133,6 +133,9 @@ from autoquant.execution.low_volatility_paper_approval import (
 from autoquant.execution.low_volatility_paper_approval_store import (
     PostgresLowVolatilityPaperCandidateRepository,
 )
+from autoquant.execution.low_volatility_paper_deployment import (
+    LowVolatilityPaperDeploymentGate,
+)
 from autoquant.execution.low_volatility_paper_signal import (
     LowVolatilityPaperDailySignal,
 )
@@ -2695,6 +2698,56 @@ async def create_low_volatility_paper_signal_campaign(
         await candidates.close()
 
 
+async def inspect_low_volatility_paper_deployment(
+    settings: AppSettings,
+    *,
+    session_date: date,
+) -> dict[str, object]:
+    """Read every low-volatility deployment gate without activating it."""
+
+    if settings.environment is not RuntimeEnvironment.PAPER:
+        raise MissingCapabilityError("paper environment is not configured")
+    if settings.live_trading_enabled:
+        raise MissingCapabilityError("live trading must remain hard-locked")
+    dsn = configured_dsn(
+        settings.postgres_dsn,
+        capability="PostgreSQL",
+    )
+    candidates = PostgresLowVolatilityPaperCandidateRepository.connect(dsn=dsn)
+    compatibility_specs = PostgresLowVolatilityExecutionCompatibilityRepository.connect(dsn=dsn)
+    compatibility_runs = PostgresLowVolatilityExecutionCompatibilityRunRepository.connect(dsn=dsn)
+    signals = PostgresLowVolatilityPaperSignalRepository.connect(dsn=dsn)
+    try:
+        report = await LowVolatilityPaperDeploymentGate(
+            account_id=settings.paper_account_id,
+            strategy_id=settings.paper_strategy_id,
+            candidates=candidates,
+            compatibility_specs=compatibility_specs,
+            compatibility_runs=compatibility_runs,
+            signals=signals,
+        ).inspect(session_date=session_date)
+        return {
+            "account_id": report.account_id,
+            "blockers": [value.value for value in report.blockers],
+            "candidate_approval_hash": (report.candidate_approval_hash),
+            "compatibility_run_hash": (report.compatibility_run_hash),
+            "compatibility_spec_hash": (report.compatibility_spec_hash),
+            "daily_signal_hash": report.daily_signal_hash,
+            "live_trading_locked": True,
+            "paper_activation_allowed": False,
+            "ready_for_runtime": False,
+            "runtime_activation_allowed": False,
+            "session_date": report.session_date.isoformat(),
+            "status": "blocked",
+            "strategy_id": report.strategy_id,
+        }
+    finally:
+        await signals.close()
+        await compatibility_runs.close()
+        await compatibility_specs.close()
+        await candidates.close()
+
+
 async def prepare_low_volatility_paper_signal(
     settings: AppSettings,
     *,
@@ -4320,6 +4373,14 @@ async def inspect_paper_runtime_readiness(
     broker: PersistentSimulatedBroker | None = None
     scheduler_events: PostgresPaperSchedulerRepository | None = None
     registry: PostgresPaperDeploymentRegistry | None = None
+    low_volatility_candidates: PostgresLowVolatilityPaperCandidateRepository | None = None
+    low_volatility_compatibility_specs: (
+        PostgresLowVolatilityExecutionCompatibilityRepository | None
+    ) = None
+    low_volatility_compatibility_runs: (
+        PostgresLowVolatilityExecutionCompatibilityRunRepository | None
+    ) = None
+    low_volatility_signals: PostgresLowVolatilityPaperSignalRepository | None = None
     try:
         clickhouse = await ClickHouseDailyRepository.connect(
             dsn=configured_dsn(
@@ -4334,6 +4395,18 @@ async def inspect_paper_runtime_readiness(
         broker = PersistentSimulatedBroker.connect(dsn=postgres_dsn)
         scheduler_events = PostgresPaperSchedulerRepository.connect(dsn=postgres_dsn)
         registry = PostgresPaperDeploymentRegistry.connect(dsn=postgres_dsn)
+        low_volatility_candidates = PostgresLowVolatilityPaperCandidateRepository.connect(
+            dsn=postgres_dsn
+        )
+        low_volatility_compatibility_specs = (
+            PostgresLowVolatilityExecutionCompatibilityRepository.connect(dsn=postgres_dsn)
+        )
+        low_volatility_compatibility_runs = (
+            PostgresLowVolatilityExecutionCompatibilityRunRepository.connect(dsn=postgres_dsn)
+        )
+        low_volatility_signals = PostgresLowVolatilityPaperSignalRepository.connect(
+            dsn=postgres_dsn
+        )
         cold_start_control = await controls.ensure_fail_closed(
             account_id=settings.paper_account_id,
             now=datetime.now(UTC),
@@ -4349,6 +4422,16 @@ async def inspect_paper_runtime_readiness(
             raise MissingCapabilityError(
                 "paper runtime cold start re-armed the inactive kill switch"
             )
+        low_volatility_readiness = await LowVolatilityPaperDeploymentGate(
+            account_id=settings.paper_account_id,
+            strategy_id=settings.paper_strategy_id,
+            candidates=low_volatility_candidates,
+            compatibility_specs=(low_volatility_compatibility_specs),
+            compatibility_runs=(low_volatility_compatibility_runs),
+            signals=low_volatility_signals,
+        ).inspect(session_date=to_shanghai(datetime.now(UTC)).date())
+        if low_volatility_readiness.candidate_present:
+            raise MissingCapabilityError("low-volatility candidate remains evidence-only")
         registration = await registry.active(
             account_id=settings.paper_account_id,
             strategy_id=settings.paper_strategy_id,
@@ -4386,6 +4469,14 @@ async def inspect_paper_runtime_readiness(
             "strategy_id": report.strategy_id,
         }
     finally:
+        if low_volatility_signals is not None:
+            await low_volatility_signals.close()
+        if low_volatility_compatibility_runs is not None:
+            await low_volatility_compatibility_runs.close()
+        if low_volatility_compatibility_specs is not None:
+            await low_volatility_compatibility_specs.close()
+        if low_volatility_candidates is not None:
+            await low_volatility_candidates.close()
         if registry is not None:
             await registry.close()
         if scheduler_events is not None:

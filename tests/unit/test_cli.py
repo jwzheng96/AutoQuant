@@ -1368,6 +1368,41 @@ def test_execution_compatibility_incompatibility_exits_nonzero() -> None:
     assert json.loads(result.stdout) == payload
 
 
+def test_low_volatility_paper_deployment_status_is_blocked() -> None:
+    payload = {
+        "account_id": "paper-main",
+        "blockers": ["candidate_missing"],
+        "candidate_approval_hash": None,
+        "compatibility_run_hash": None,
+        "compatibility_spec_hash": None,
+        "daily_signal_hash": None,
+        "live_trading_locked": True,
+        "paper_activation_allowed": False,
+        "ready_for_runtime": False,
+        "runtime_activation_allowed": False,
+        "session_date": "2026-07-27",
+        "status": "blocked",
+        "strategy_id": "low-volatility-paper",
+    }
+    inspect = AsyncMock(return_value=payload)
+    with patch(
+        "autoquant.cli.inspect_low_volatility_paper_deployment",
+        new=inspect,
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "low-volatility-paper-deployment-status",
+                "--session-date",
+                "2026-07-27",
+            ],
+        )
+
+    assert result.exit_code == 2
+    assert json.loads(result.stdout) == payload
+    inspect.assert_awaited_once()
+
+
 def test_low_volatility_candidate_approval_requires_confirmation() -> None:
     approval = AsyncMock()
     with patch(
