@@ -60,6 +60,19 @@ MiniQMT，也不查询账户。逐项检查 Windows、64 位 Python、目录、�
 账号状态、回调序号缺口，以及任何委托、成交或错误回调都会清除可信快照并要求全量重查。
 回调队列有固定容量，溢出后整个进程实例必须重连，不能继续 drain 后假装恢复。
 
+schema v40 的 `qmt_callback_inbox_events` 为未来交易侧消费者建立先持久化、后解释的门槛：
+
+- 只接受每类官方回调的精确字段集合，额外字段和非标量值均拒绝；
+- 真实资金账号只在内存校验，持久化证据移除账号和自由文本 `status_msg`；
+- 本地序号必须从 1 连续递增，事件按 logical account、holder、session、lease
+  generation 和上海日期隔离并形成哈希链；
+- 只有同日有效 bearer lease owner 可在回调到达后 5 秒内追加；精确重试幂等，内容冲突、
+  缺号、跨 scope 回放和租约丢失均失败关闭；
+- 表为不可更新、不可删除，且每行固定 `broker_mutation_allowed=false`。
+
+该收件箱只提供持久化核心，尚未授权任何报单。Windows 常驻协调器完成装配和真实故障演练
+前，不能把内存队列或数据库表的存在解释为可实盘。
+
 Windows shim 只负责从 XtQuant 对象复制官方字段，并用该节点实际 `xtconstant` 将股票
 买卖映射成 `buy` / `sell`；核心模块不硬编码券商包中的委托类型数值。
 

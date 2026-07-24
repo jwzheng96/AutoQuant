@@ -86,6 +86,14 @@ exactly one same-day broker order has the committed remark, instrument, side, qu
 No match remains unresolved; duplicate or conflicting matches fail closed. Successful matches
 are stored in a fourth immutable, non-mutating ledger and can be restored only by the current
 daily lease owner.
+Schema v40 adds the future Windows trading coordinator's append-only QMT callback inbox. Each
+callback is accepted only through an exact field allowlist, validates the real broker account in
+memory, and persists only the logical account alias; free-form `status_msg` and the broker account
+are prohibited from the redacted evidence. Local callback sequence, holder, session, lease
+generation and Shanghai date are hash-chained under the matching active bearer lease. New facts
+must reach PostgreSQL within five seconds; exact retries are idempotent, while gaps, conflicting
+duplicates, cross-scope replay or a lost lease fail closed. The inbox cannot call the broker and
+every row commits `broker_mutation_allowed=false`.
 Request and broker identifiers are scoped by QMT session-lease generation, so vendor counters may
 restart without ever joining a new process callback to an old process order.
 Candidate reservation, asynchronous broker-order binding and restart recovery also require the
