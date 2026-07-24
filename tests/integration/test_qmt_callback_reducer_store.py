@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -16,8 +17,19 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from autoquant.adapters.postgres import PostgresControlRepository
 from autoquant.backtest.models import OrderSide
+from autoquant.errors import BrokerStateUnknownError
+from autoquant.execution.control_store import (
+    PostgresExecutionControlRepository,
+)
 from autoquant.execution.qmt_callback_coordinator import (
     QmtCallbackPersistenceCoordinator,
+)
+from autoquant.execution.qmt_callback_reconciliation import (
+    QmtCallbackReconciliationState,
+    reconcile_qmt_callback_state,
+)
+from autoquant.execution.qmt_callback_reconciliation_store import (
+    PostgresQmtCallbackReconciliationRepository,
 )
 from autoquant.execution.qmt_callback_reducer import (
     QmtCallbackDisposition,
@@ -33,8 +45,21 @@ from autoquant.execution.qmt_canary_contract import (
 )
 from autoquant.execution.qmt_canary_store import PostgresQmtCanaryOrderLedger
 from autoquant.execution.qmt_gateway import QmtCallbackBuffer, QmtCallbackKind
+from autoquant.execution.qmt_models import QmtOrderStatus
+from autoquant.execution.qmt_readonly import (
+    QmtReadOnlyBaseline,
+    build_qmt_readonly_baseline,
+    normalize_qmt_asset,
+    normalize_qmt_order,
+    normalize_qmt_trade,
+)
+from autoquant.execution.qmt_readonly_store import (
+    PostgresQmtReadOnlyAcceptanceRepository,
+    QmtReadOnlyAcceptanceEvidence,
+)
 from autoquant.execution.qmt_session_store import (
     PostgresQmtSessionLeaseRepository,
+    QmtSessionLease,
 )
 from autoquant.risk.models import (
     ExecutionMode,
@@ -112,6 +137,7 @@ async def reducer_fixture() -> AsyncIterator[
         str,
         int,
         QmtCanaryOrderCandidate,
+        QmtSessionLease,
     ]
 ]:
     schema = f"autoquant_test_{uuid4().hex}"
@@ -121,17 +147,24 @@ async def reducer_fixture() -> AsyncIterator[
     ledger = PostgresQmtCanaryOrderLedger(engine=engine, schema=schema)
     inbox = PostgresQmtCallbackInbox(engine=engine, schema=schema)
     reducer = PostgresQmtCallbackStateReducer(engine=engine, schema=schema)
+    controls = PostgresExecutionControlRepository(
+        engine=engine,
+        schema=schema,
+    )
     migration = "\n".join(
         Path(path).read_text(encoding="utf-8")
         for path in (
             "migrations/postgres/001_phase1.sql",
+            "migrations/postgres/009_execution_controls.sql",
             "migrations/postgres/012_qmt_session_leases.sql",
+            "migrations/postgres/017_qmt_readonly_acceptance.sql",
             "migrations/postgres/037_qmt_canary_order_ledger.sql",
             "migrations/postgres/038_qmt_canary_order_staging.sql",
             "migrations/postgres/039_qmt_canary_remark_recovery.sql",
             "migrations/postgres/040_qmt_callback_inbox.sql",
             "migrations/postgres/041_qmt_callback_persistence_receipts.sql",
             "migrations/postgres/042_qmt_callback_state_reduction.sql",
+            "migrations/postgres/043_qmt_callback_reconciliation.sql",
         )
     )
     try:
@@ -142,6 +175,10 @@ async def reducer_fixture() -> AsyncIterator[
             token=LEASE_TOKEN,
             now=datetime.now(UTC) - timedelta(seconds=2),
             ttl=timedelta(minutes=2),
+        )
+        await controls.ensure_fail_closed(
+            account_id=ACCOUNT_ID,
+            now=datetime.now(UTC),
         )
         now = datetime.now(UTC)
         candidate = _candidate(generation=lease.generation, now=now)
@@ -163,7 +200,15 @@ async def reducer_fixture() -> AsyncIterator[
             broker_order_remark=qmt_canary_order_remark(candidate.candidate_hash),
             bound_at=datetime.now(UTC),
         )
-        yield inbox, reducer, engine, schema, lease.generation, candidate
+        yield (
+            inbox,
+            reducer,
+            engine,
+            schema,
+            lease.generation,
+            candidate,
+            lease,
+        )
     finally:
         try:
             await control.drop_test_schema()
@@ -211,6 +256,52 @@ def _trade_payload(
     }
 
 
+def _readonly_baseline(
+    candidate: QmtCanaryOrderCandidate,
+    *,
+    callback_cursor: int,
+) -> QmtReadOnlyBaseline:
+    observed_at = datetime.now(UTC)
+    remark = qmt_canary_order_remark(candidate.candidate_hash)
+    order = normalize_qmt_order(
+        _order_payload(candidate, traded_volume=40, status=55),
+        expected_account_id=BROKER_ACCOUNT,
+        observed_at=observed_at,
+        client_order_ids={88001: candidate.decision.order.client_order_id},
+    )
+    trade = normalize_qmt_trade(
+        _trade_payload(candidate, volume=40),
+        expected_account_id=BROKER_ACCOUNT,
+        observed_at=observed_at,
+    )
+    assert order.raw_status == QmtOrderStatus.PARTIALLY_FILLED
+    assert trade.order_remark == remark
+    return build_qmt_readonly_baseline(
+        baseline_id=f"callback-reconcile-{callback_cursor}",
+        generation=1,
+        logical_account_id=ACCOUNT_ID,
+        query_started_at=observed_at,
+        query_completed_at=observed_at,
+        callback_cursor_before=callback_cursor,
+        callback_cursor_after=callback_cursor,
+        callback_stream_healthy=True,
+        asset=normalize_qmt_asset(
+            {
+                "account_id": BROKER_ACCOUNT,
+                "cash": 1000,
+                "frozen_cash": 0,
+                "market_value": 0,
+                "total_asset": 1000,
+            },
+            expected_account_id=BROKER_ACCOUNT,
+            observed_at=observed_at,
+        ),
+        positions=(),
+        orders=(order,),
+        trades=(trade,),
+    )
+
+
 @pytest.mark.asyncio
 async def test_qmt_reducer_converges_restart_replays_and_fences_trade_conflict(
     reducer_fixture: tuple[
@@ -220,9 +311,10 @@ async def test_qmt_reducer_converges_restart_replays_and_fences_trade_conflict(
         str,
         int,
         QmtCanaryOrderCandidate,
+        QmtSessionLease,
     ],
 ) -> None:
-    inbox, reducer, engine, schema, generation, candidate = reducer_fixture
+    inbox, reducer, engine, schema, generation, candidate, lease = reducer_fixture
     buffer = QmtCallbackBuffer()
     coordinator = QmtCallbackPersistenceCoordinator(
         buffer=buffer,
@@ -275,6 +367,38 @@ async def test_qmt_reducer_converges_restart_replays_and_fences_trade_conflict(
     assert replayed.projections == converged.projections
     assert replayed.broker_state_known is True
 
+    acceptance_store = PostgresQmtReadOnlyAcceptanceRepository(
+        engine=engine,
+        schema=schema,
+    )
+    reconciliation_store = PostgresQmtCallbackReconciliationRepository(
+        engine=engine,
+        schema=schema,
+    )
+    baseline = _readonly_baseline(candidate, callback_cursor=2)
+    acceptance = QmtReadOnlyAcceptanceEvidence.from_baseline(
+        baseline=baseline,
+        package_manifest_hash="9" * 64,
+        lease=lease,
+    )
+    await acceptance_store.append(
+        acceptance,
+        now=datetime.now(UTC),
+    )
+    passed_report = reconcile_qmt_callback_state(
+        baseline=baseline,
+        acceptance=acceptance,
+        reduction=replayed,
+    )
+    assert passed_report.state is QmtCallbackReconciliationState.PASSED
+    assert (
+        await reconciliation_store.append(
+            passed_report,
+            lease_token=LEASE_TOKEN,
+        )
+        == passed_report
+    )
+
     buffer.capture(
         QmtCallbackKind.TRADE,
         _trade_payload(candidate, volume=41),
@@ -289,6 +413,36 @@ async def test_qmt_reducer_converges_restart_replays_and_fences_trade_conflict(
     assert conflicted.fatal_reason == "trade_id_conflict"
     assert conflicted.broker_state_known is False
     assert conflicted.projections[0].convergence is QmtOrderConvergence.UNKNOWN
+
+    rejected_baseline = _readonly_baseline(candidate, callback_cursor=3)
+    rejected_acceptance = QmtReadOnlyAcceptanceEvidence.from_baseline(
+        baseline=rejected_baseline,
+        package_manifest_hash="9" * 64,
+        lease=lease,
+    )
+    await acceptance_store.append(
+        rejected_acceptance,
+        now=datetime.now(UTC),
+    )
+    rejected_report = reconcile_qmt_callback_state(
+        baseline=rejected_baseline,
+        acceptance=rejected_acceptance,
+        reduction=conflicted,
+    )
+    assert rejected_report.state is QmtCallbackReconciliationState.REJECTED
+    with pytest.raises(
+        BrokerStateUnknownError,
+        match="passed QMT reconciliation",
+    ):
+        await reconciliation_store.append(
+            replace(rejected_report, issues=()),
+            lease_token=LEASE_TOKEN,
+        )
+    await reconciliation_store.append(
+        rejected_report,
+        lease_token=LEASE_TOKEN,
+    )
+    assert await reconciliation_store.latest(logical_account_id=ACCOUNT_ID) == rejected_report
 
     async with engine.begin() as connection:
         with pytest.raises(SQLAlchemyError):
@@ -313,3 +467,14 @@ def test_qmt_callback_reducer_migration_is_fenced_and_non_executable() -> None:
     assert "qmt_callback_processing_events_immutable" in sql
     assert "NOT broker_mutation_allowed" in sql
     assert "VALUES ('postgres', 42)" in sql
+
+
+def test_qmt_callback_reconciliation_migration_is_immutable() -> None:
+    sql = Path("migrations/postgres/043_qmt_callback_reconciliation.sql").read_text(
+        encoding="utf-8"
+    )
+
+    assert "qmt_callback_reconciliation_reports" in sql
+    assert "qmt_callback_reconciliation_reports_immutable" in sql
+    assert "NOT broker_mutation_allowed" in sql
+    assert "VALUES ('postgres', 43)" in sql

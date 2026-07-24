@@ -55,6 +55,13 @@ event；TRADE 形成不可变成交事实，ORDER 形成可由事件链重建的
 完全相同重复回调是幂等的；内容冲突、累计数量回退、超量成交、订单身份冲突、断线或错误
 回调会将当前 lease generation 永久标记为 `broker_state_unknown`。后续正常回调不能
 洗白该熔断；必须新建 generation，并通过完整只读基线重新建立可信状态。
+schema v43 将这次“完整只读基线”变成独立、不可变的对账报告。基线必须在最后一个已处理
+回调之后开始，acceptance、holder、session、lease generation 和 callback cursor 必须与
+v42 当前游标一致；每笔受管委托的证券、方向、数量、限价、remark、状态、累计成交和每个
+成交 ID/价格/数量/金额都必须完全一致。券商查询中出现没有 v42 投影的 AutoQuant remark，
+或 v42 中的成交未出现在查询结果，均生成 rejected 报告。落库事务会重新读取当前投影和
+成交哈希，旧报告不能与新状态拼接。passed 与 rejected 报告都固定
+`broker_mutation_allowed=false`，不能作为自动解锁实盘的命令。
 候选外键必须指向同一 holder 的真实 `acquire` 事件；预留事务还会锁定并检查当前租约
 未释放、未过期且 generation 未变化。候选预留、异步券商订单号绑定和重启恢复都必须
 提交当前租约 bearer token；数据库只比较其 SHA-256，并以数据库时钟在持有 lease 行锁

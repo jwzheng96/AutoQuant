@@ -176,6 +176,9 @@ case "${1:-}" in
     "${compose[@]}" exec -T postgres sh -c \
       'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1' \
       < "$project_root/migrations/postgres/042_qmt_callback_state_reduction.sql"
+    "${compose[@]}" exec -T postgres sh -c \
+      'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1' \
+      < "$project_root/migrations/postgres/043_qmt_callback_reconciliation.sql"
     "${compose[@]}" exec -T clickhouse sh -c \
       'clickhouse-client --user "$CLICKHOUSE_USER" --password "$CLICKHOUSE_PASSWORD" --database "$CLICKHOUSE_DB" --multiquery' \
       < "$project_root/migrations/clickhouse/001_phase1.sql"

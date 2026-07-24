@@ -118,6 +118,12 @@ and weighted amount converge. Missing evidence remains pending; quantity regress
 conflict, a conflicting duplicate trade identifier, disconnect or broker error permanently marks
 that lease generation broker-state-unknown. Restart replay is idempotent and cannot erase the
 immutable processing chain.
+Schema v43 requires a separate coherent read-only QMT query before callback-derived state can be
+treated as reconciled. The query acceptance, lease scope, callback cursor, every tracked order
+field and every trade identifier/amount must match the v42 ledger exactly. A query that began
+before the last callback, an untracked AutoQuant remark, stale projection hashes or any
+broker-state-unknown generation produces an immutable rejected report. Passed and rejected
+reports both commit `broker_mutation_allowed=false`; this evidence still does not unlock orders.
 Candidate reservation, asynchronous broker-order binding and restart recovery also require the
 current lease bearer token and recheck the active holder/generation against database time while
 holding the lease row. A released, expired or superseded process therefore cannot append or

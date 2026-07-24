@@ -43,10 +43,75 @@ _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 
 @dataclass(frozen=True, slots=True)
 class QmtCallbackReductionResult:
+    account_id: str
+    gateway_holder_id: str
+    qmt_session_id: int
+    qmt_lease_generation: int
     records: tuple[QmtCallbackProcessingRecord, ...]
     projections: tuple[QmtBrokerOrderProjection, ...]
+    trade_facts: tuple[QmtBrokerTradeFact, ...]
+    last_local_sequence: int
+    last_processing_hash: str
     broker_state_known: bool
     fatal_reason: str | None
+
+    def __post_init__(self) -> None:
+        if not self.account_id or self.account_id != self.account_id.strip():
+            raise ValueError("QMT reduction account_id is invalid")
+        if (
+            not isinstance(self.gateway_holder_id, str)
+            or re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}",
+                self.gateway_holder_id,
+            )
+            is None
+        ):
+            raise ValueError("QMT reduction gateway_holder_id is invalid")
+        for value, name in (
+            (self.qmt_session_id, "qmt_session_id"),
+            (self.qmt_lease_generation, "qmt_lease_generation"),
+        ):
+            if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+                raise ValueError(f"QMT reduction {name} must be positive")
+        if (
+            not isinstance(self.last_local_sequence, int)
+            or isinstance(self.last_local_sequence, bool)
+            or self.last_local_sequence < 0
+        ):
+            raise ValueError("QMT reduction cursor must be nonnegative")
+        if self.last_local_sequence == 0:
+            if self.last_processing_hash != ZERO_HASH:
+                raise ValueError("empty QMT reduction must use the zero hash")
+        else:
+            if self.last_processing_hash == ZERO_HASH or not re.fullmatch(
+                r"[0-9a-f]{64}",
+                self.last_processing_hash,
+            ):
+                raise ValueError("QMT reduction processing hash is invalid")
+        if type(self.broker_state_known) is not bool:
+            raise TypeError("QMT broker_state_known must be a bool")
+        if self.broker_state_known and self.fatal_reason is not None:
+            raise ValueError("known QMT broker state cannot have a fatal reason")
+        if any(not isinstance(item, QmtCallbackProcessingRecord) for item in self.records):
+            raise TypeError("QMT reduction records are invalid")
+        if any(
+            not isinstance(item, QmtBrokerOrderProjection) or item.account_id != self.account_id
+            for item in self.projections
+        ):
+            raise ValueError("QMT reduction projections have another account")
+        if any(
+            not isinstance(item, QmtBrokerTradeFact) or item.account_id != self.account_id
+            for item in self.trade_facts
+        ):
+            raise ValueError("QMT reduction trade facts have another account")
+        if len({item.projection_hash for item in self.projections}) != len(self.projections):
+            raise ValueError("QMT reduction projections are duplicated")
+        if len({item.fact_hash for item in self.trade_facts}) != len(self.trade_facts):
+            raise ValueError("QMT reduction trade facts are duplicated")
+        if self.broker_state_known and any(
+            item.convergence is not QmtOrderConvergence.CONVERGED for item in self.projections
+        ):
+            raise ValueError("known QMT broker state requires converged projections")
 
     @property
     def broker_mutation_allowed(self) -> bool:
@@ -784,7 +849,7 @@ class PostgresQmtCallbackStateReducer:
                 limit_price=identity.limit_price,
                 order_remark=identity.order_remark,
             )
-        projection = _projection_from_row(row)
+        projection = qmt_broker_order_projection_from_row(row)
         if (
             projection.candidate_hash != identity.candidate_hash
             or projection.client_order_id != identity.client_order_id
@@ -976,6 +1041,28 @@ class PostgresQmtCallbackStateReducer:
                 .mappings()
                 .all()
             )
+            trade_rows = (
+                (
+                    await connection.execute(
+                        text(
+                            f"""
+                            SELECT *
+                            FROM {self._schema}.qmt_broker_trade_facts
+                            WHERE account_id = :account_id
+                              AND gateway_holder_id =
+                                  :gateway_holder_id
+                              AND qmt_session_id = :qmt_session_id
+                              AND qmt_lease_generation =
+                                  :qmt_lease_generation
+                            ORDER BY trade_id
+                            """
+                        ),
+                        parameters,
+                    )
+                )
+                .mappings()
+                .all()
+            )
             cursor = (
                 (
                     await connection.execute(
@@ -997,10 +1084,19 @@ class PostgresQmtCallbackStateReducer:
                 .mappings()
                 .one_or_none()
             )
-        projections = tuple(_projection_from_row(row) for row in rows)
+        projections = tuple(qmt_broker_order_projection_from_row(row) for row in rows)
         return QmtCallbackReductionResult(
+            account_id=account_id,
+            gateway_holder_id=gateway_holder_id,
+            qmt_session_id=qmt_session_id,
+            qmt_lease_generation=qmt_lease_generation,
             records=records,
             projections=projections,
+            trade_facts=tuple(qmt_broker_trade_fact_from_row(row) for row in trade_rows),
+            last_local_sequence=(0 if cursor is None else int(cursor["last_local_sequence"])),
+            last_processing_hash=(
+                ZERO_HASH if cursor is None else str(cursor["last_processing_hash"])
+            ),
             broker_state_known=(True if cursor is None else bool(cursor["broker_state_known"])),
             fatal_reason=(
                 None
@@ -1048,7 +1144,9 @@ def _projection_parameters(
     }
 
 
-def _projection_from_row(row: RowMapping) -> QmtBrokerOrderProjection:
+def qmt_broker_order_projection_from_row(
+    row: RowMapping,
+) -> QmtBrokerOrderProjection:
     projection = QmtBrokerOrderProjection(
         account_id=str(row["account_id"]),
         candidate_hash=str(row["candidate_hash"]),
@@ -1091,7 +1189,7 @@ def _projection_from_row(row: RowMapping) -> QmtBrokerOrderProjection:
 
 
 def _same_trade_fact(row: RowMapping, fact: QmtBrokerTradeFact) -> bool:
-    stored = _trade_fact_from_row(row)
+    stored = qmt_broker_trade_fact_from_row(row)
     return bool(
         stored.account_id == fact.account_id
         and stored.candidate_hash == fact.candidate_hash
@@ -1107,7 +1205,7 @@ def _same_trade_fact(row: RowMapping, fact: QmtBrokerTradeFact) -> bool:
     )
 
 
-def _trade_fact_from_row(row: RowMapping) -> QmtBrokerTradeFact:
+def qmt_broker_trade_fact_from_row(row: RowMapping) -> QmtBrokerTradeFact:
     fact = QmtBrokerTradeFact(
         account_id=str(row["account_id"]),
         candidate_hash=str(row["candidate_hash"]),
@@ -1214,4 +1312,6 @@ def _json(payload: dict[str, object]) -> str:
 __all__ = [
     "PostgresQmtCallbackStateReducer",
     "QmtCallbackReductionResult",
+    "qmt_broker_order_projection_from_row",
+    "qmt_broker_trade_fact_from_row",
 ]
