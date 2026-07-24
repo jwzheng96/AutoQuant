@@ -51,7 +51,12 @@ def _observation(
     )
 
 
-def _market(instrument: str, session_date: date) -> MarketState:
+def _market(
+    instrument: str,
+    session_date: date,
+    *,
+    price: Decimal = Decimal("10"),
+) -> MarketState:
     event_time = datetime.combine(
         session_date,
         datetime.min.time(),
@@ -68,11 +73,11 @@ def _market(instrument: str, session_date: date) -> MarketState:
             source_revision="fundamental-strategy-test",
             availability_policy="test-v1",
             evidence_hash="e" * 64,
-            open_price="10",
-            high_price="11",
-            low_price="9",
-            close_price="10",
-            pre_close="10",
+            open_price=str(price),
+            high_price=str(price + 1),
+            low_price=str(price - 1),
+            close_price=str(price),
+            pre_close=str(price),
             volume=1_000_000,
             turnover="10000000",
         ),
@@ -160,3 +165,34 @@ def test_fundamental_policy_stays_in_cash_below_eligibility_gate() -> None:
     )
 
     assert policy(0, first.markets, None) == ()
+
+
+def test_fundamental_policy_skips_stock_when_target_cannot_buy_one_lot() -> None:
+    instruments = tuple(f"{index:06d}.XSHE" for index in range(1, 61))
+    first = _session(instruments, date(2026, 7, 21))
+    first = FundamentalExecutableSession(
+        session_date=first.session_date,
+        snapshot_hash=first.snapshot_hash,
+        active_members=first.active_members,
+        features=first.features,
+        markets=tuple(
+            _market(
+                instrument,
+                first.session_date,
+                price=Decimal("600") if instrument == instruments[-1] else Decimal("10"),
+            )
+            for instrument in instruments
+        ),
+    )
+    second = _session(instruments, date(2026, 7, 22))
+    policy = FundamentalQualityValueOrderPolicy(
+        sessions=(first, second),
+        start_index=0,
+        trade_session_count=2,
+        spec=_spec(),
+    )
+
+    orders = policy(0, first.markets, None)
+
+    assert len(orders) == 19
+    assert instruments[-1] not in {value.instrument for value in orders}

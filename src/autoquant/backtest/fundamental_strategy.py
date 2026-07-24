@@ -394,6 +394,10 @@ def _target_quantity(
         spec.maximum_position_weight,
         spec.gross_allocation / Decimal(spec.selection_count),
     )
+    estimated_price = market.bar.pre_close * (Decimal("1") + spec.slippage_bps / Decimal("10000"))
+    affordable = int((spec.initial_cash * allocation) // estimated_price)
+    if affordable < market.rules.buy_minimum:
+        return 0
     quantity = _baseline_quantity(
         initial_cash=spec.initial_cash,
         allocation=allocation,
