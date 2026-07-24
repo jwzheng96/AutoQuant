@@ -811,6 +811,10 @@ The specification keeps every v4 portfolio, signal, rebalance, cost and risk par
 unchanged. It replaces only the invalid comparison of unequal holding-period totals with
 annualized geometric returns:
 
+The official immutable forward-spec hash is
+`ae3d74b1a35d700efea01310bd80e8fd1264eabe6c569f83d9628670a85e34f0`; its state is
+`frozen_awaiting_forward_data`.
+
 ```text
 annualized_return = exp(252 / sessions * ln(1 + total_return)) - 1
 stability_gap = annualized_training_return - annualized_forward_return

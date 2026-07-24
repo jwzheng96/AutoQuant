@@ -47,6 +47,8 @@ four formal hypotheses have been tried, and permanently forbids retrospective re
 or promotion of the historical v4 result. The next evidence stage starts after 2026-07-22,
 requires at least 126 new trading sessions, and still requires at least 60 paper sessions after
 all forward gates pass. This is a waiting-data contract, not a shortcut to deployment.
+The immutable forward specification is frozen as
+`ae3d74b1a35d700efea01310bd80e8fd1264eabe6c569f83d9628670a85e34f0`.
 
 The repository also contains a deterministic A-share research ledger with versioned board
 rules, T+1 sellability, lot-size validation, conservative daily-open fills, liquidity caps,
