@@ -8,6 +8,13 @@
 号、券商订单号和 `client_order_id` 必须一一对应，未知或冲突映射按券商状态未知处理。
 这些对象只生成可哈希证据，`broker_mutation_allowed` 固定为 `false`，调用执行检查仍会
 抛出发布锁异常；它们不包含也不调用任何 XtQuant 报单/撤单函数。
+schema v37 将候选、异步请求号预留和券商订单号绑定拆成三张不可变追加表，并将关联范围
+绑定到 holder、QMT session 和数据库租约 generation。Windows 进程重启时必须从当前
+generation 的账本恢复关联簿后再解释委托回报；持久化事实缺失、哈希不符或身份重复时
+不得把订单猜测为新单，也不得继续接受新的候选。新的租约 generation 可以安全重用
+XtQuant 重新计数的请求序号，但不能跨 generation 解释回报。
+候选外键必须指向同一 holder 的真实 `acquire` 事件；预留事务还会锁定并检查当前租约
+未释放、未过期且 generation 未变化。仅知道 session id 或历史 generation 不能写入预留。
 
 ## 前提
 

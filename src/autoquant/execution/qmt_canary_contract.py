@@ -30,6 +30,7 @@ class QmtCanaryOrderCandidate:
     strategy_id: str
     gateway_holder_id: str
     qmt_session_id: int
+    qmt_lease_generation: int
     decision: RiskDecision
     promotion_report_hash: str
     compliance_approval_hash: str
@@ -60,6 +61,12 @@ class QmtCanaryOrderCandidate:
             or self.qmt_session_id < 1
         ):
             raise ValueError("qmt_session_id must be a positive integer")
+        if (
+            not isinstance(self.qmt_lease_generation, int)
+            or isinstance(self.qmt_lease_generation, bool)
+            or self.qmt_lease_generation < 1
+        ):
+            raise ValueError("qmt_lease_generation must be a positive integer")
         if not isinstance(self.decision, RiskDecision):
             raise TypeError("decision must be RiskDecision")
         if (
@@ -121,6 +128,7 @@ class QmtCanaryOrderCandidate:
             "order_count_limit": 1,
             "promotion_report_hash": self.promotion_report_hash,
             "qmt_acceptance_hash": self.qmt_acceptance_hash,
+            "qmt_lease_generation": self.qmt_lease_generation,
             "qmt_session_id": self.qmt_session_id,
             "reconciliation_report_hash": self.reconciliation_report_hash,
             "risk_decision_hash": self.decision.decision_hash,
@@ -181,18 +189,19 @@ class QmtOrderCorrelation:
         object.__setattr__(
             self,
             "correlation_hash",
-            _canonical_hash(
-                {
-                    "async_request_id": self.async_request_id,
-                    "bound_at": (None if self.bound_at is None else _datetime_text(self.bound_at)),
-                    "broker_order_id": self.broker_order_id,
-                    "candidate_hash": self.candidate_hash,
-                    "client_order_id": self.client_order_id,
-                    "reserved_at": _datetime_text(self.reserved_at),
-                    "version": "qmt-order-correlation-v1",
-                }
-            ),
+            _canonical_hash(self.payload()),
         )
+
+    def payload(self) -> dict[str, object]:
+        return {
+            "async_request_id": self.async_request_id,
+            "bound_at": (None if self.bound_at is None else _datetime_text(self.bound_at)),
+            "broker_order_id": self.broker_order_id,
+            "candidate_hash": self.candidate_hash,
+            "client_order_id": self.client_order_id,
+            "reserved_at": _datetime_text(self.reserved_at),
+            "version": "qmt-order-correlation-v1",
+        }
 
 
 class QmtOrderCorrelationBook:
@@ -202,6 +211,39 @@ class QmtOrderCorrelationBook:
         self._by_candidate: dict[str, QmtOrderCorrelation] = {}
         self._by_request: dict[int, str] = {}
         self._by_broker_order: dict[str, str] = {}
+
+    @classmethod
+    def restore(
+        cls,
+        correlations: tuple[QmtOrderCorrelation, ...],
+    ) -> QmtOrderCorrelationBook:
+        book = cls()
+        for correlation in sorted(
+            correlations,
+            key=lambda item: (item.reserved_at, item.async_request_id),
+        ):
+            if not isinstance(correlation, QmtOrderCorrelation):
+                raise TypeError("correlations must contain QmtOrderCorrelation values")
+            if (
+                correlation.candidate_hash in book._by_candidate
+                or correlation.async_request_id in book._by_request
+                or any(
+                    item.client_order_id == correlation.client_order_id
+                    for item in book._by_candidate.values()
+                )
+            ):
+                raise BrokerStateUnknownError(
+                    "persisted QMT reservations contain duplicate identities"
+                )
+            book._by_candidate[correlation.candidate_hash] = correlation
+            book._by_request[correlation.async_request_id] = correlation.candidate_hash
+            if correlation.broker_order_id is not None:
+                if correlation.broker_order_id in book._by_broker_order:
+                    raise BrokerStateUnknownError(
+                        "persisted QMT bindings contain duplicate broker orders"
+                    )
+                book._by_broker_order[correlation.broker_order_id] = correlation.candidate_hash
+        return book
 
     def reserve(
         self,

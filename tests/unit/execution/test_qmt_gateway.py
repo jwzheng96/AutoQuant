@@ -1,5 +1,6 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
@@ -7,6 +8,7 @@ from autoquant.backtest.models import OrderSide
 from autoquant.errors import BrokerStateUnknownError, LiveTradingLockedError
 from autoquant.execution.qmt_canary_contract import (
     QmtCanaryOrderCandidate,
+    QmtOrderCorrelation,
     QmtOrderCorrelationBook,
 )
 from autoquant.execution.qmt_gateway import (
@@ -61,6 +63,7 @@ def _candidate(
         strategy_id="low-volatility-v5",
         gateway_holder_id="windows-qmt-canary-01",
         qmt_session_id=20260723,
+        qmt_lease_generation=7,
         decision=decision,
         promotion_report_hash="a" * 64,
         compliance_approval_hash="e" * 64,
@@ -226,3 +229,35 @@ def test_qmt_order_correlation_rejects_unknown_or_reused_identities() -> None:
             broker_order_id="not-an-order",
             bound_at=NOW + timedelta(seconds=2),
         )
+
+
+def test_qmt_order_correlation_book_restores_bound_and_pending_orders() -> None:
+    pending = QmtOrderCorrelation(
+        candidate_hash="2" * 64,
+        client_order_id="canary-order-pending",
+        async_request_id=18,
+        reserved_at=NOW,
+    )
+    bound = QmtOrderCorrelation(
+        candidate_hash="3" * 64,
+        client_order_id="canary-order-bound",
+        async_request_id=19,
+        reserved_at=NOW + timedelta(seconds=1),
+        broker_order_id="88003",
+        bound_at=NOW + timedelta(seconds=2),
+    )
+
+    restored = QmtOrderCorrelationBook.restore((bound, pending))
+
+    assert restored.broker_mapping() == {88003: "canary-order-bound"}
+    with pytest.raises(BrokerStateUnknownError, match="duplicate"):
+        QmtOrderCorrelationBook.restore((pending, pending))
+
+
+def test_qmt_canary_ledger_migration_is_append_only_and_locked() -> None:
+    sql = Path("migrations/postgres/037_qmt_canary_order_ledger.sql").read_text(encoding="utf-8")
+
+    assert sql.count("CREATE TABLE IF NOT EXISTS") == 3
+    assert sql.count("autoquant_reject_immutable_change()") == 3
+    assert "NOT broker_mutation_allowed" in sql
+    assert "VALUES ('postgres', 37)" in sql

@@ -54,6 +54,7 @@ Apply `migrations/postgres/001_phase1.sql`,
 `migrations/postgres/034_low_volatility_forward_evidence.sql`, then
 `migrations/postgres/035_low_volatility_forward_sessions.sql`, then
 `migrations/postgres/036_paper_compliance_approvals.sql`, then
+`migrations/postgres/037_qmt_canary_order_ledger.sql`, then
 `migrations/clickhouse/001_phase1.sql` and
 `migrations/clickhouse/002_tushare_daily.sql` and
 `migrations/clickhouse/003_daily_coverage.sql` and

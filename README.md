@@ -67,6 +67,13 @@ PostgreSQL schema v36 adds an append-only, revocable compliance-approval artifac
 active paper registration and exact promotion policy. No approval is created automatically,
 and even a valid artifact can only satisfy an evidence gate while the code-level live release
 lock remains engaged.
+PostgreSQL schema v37 persists the future QMT canary candidate, asynchronous request reservation
+and broker-order binding as three append-only ledgers. A Windows gateway can reconstruct exact
+client/request/broker identity after restart, while unknown or conflicting callbacks fail closed.
+Request and broker identifiers are scoped by QMT session-lease generation, so vendor counters may
+restart without ever joining a new process callback to an old process order.
+The ledger contains no XtQuant mutation call and every stored candidate still commits
+`broker_mutation_allowed=false`.
 
 The repository also contains a deterministic A-share research ledger with versioned board
 rules, T+1 sellability, lot-size validation, conservative daily-open fills, liquidity caps,
