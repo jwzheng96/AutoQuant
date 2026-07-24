@@ -9,15 +9,25 @@ from typing import Any, cast
 import pytest
 
 from autoquant.backtest.low_volatility_forward import (
+    LOW_VOLATILITY_FORWARD_SESSION_VERSION,
     LOW_VOLATILITY_FORWARD_SPEC_VERSION,
     LowVolatilityForwardEvidenceSpec,
+    LowVolatilityForwardSessionBinding,
     annualized_geometric_return,
     annualized_stability_gap,
 )
 from autoquant.errors import PersistenceUnavailableError
+from autoquant.web.low_volatility_forward_session_store import (
+    LowVolatilityForwardSessionRecord,
+)
+from autoquant.web.low_volatility_forward_session_store import (
+    _record as forward_session_record,
+)
 from autoquant.web.low_volatility_forward_store import (
     LowVolatilityForwardEvidenceSpecRecord,
-    _record,
+)
+from autoquant.web.low_volatility_forward_store import (
+    _record as forward_spec_record,
 )
 
 
@@ -29,6 +39,22 @@ def _spec() -> LowVolatilityForwardEvidenceSpec:
         source_dataset_manifest_hash="d" * 64,
         forward_start_date=date(2026, 7, 23),
         maximum_annualized_stability_gap=Decimal("0.15"),
+    )
+
+
+def _binding() -> LowVolatilityForwardSessionBinding:
+    return LowVolatilityForwardSessionBinding(
+        forward_spec_hash="a" * 64,
+        dataset_manifest_hash="b" * 64,
+        policy_hash="c" * 64,
+        session_date=date(2026, 7, 23),
+        snapshot_hash="d" * 64,
+        snapshot_reference_date=date(2026, 7, 22),
+        calendar_content_hash="e" * 64,
+        instruments=(
+            "000001.XSHE",
+            "600000.XSHG",
+        ),
     )
 
 
@@ -128,14 +154,14 @@ def test_forward_store_record_round_trips_and_detects_tampering() -> None:
         "strategy_parameters_unchanged": True,
     }
 
-    assert _record(cast(Any, row)) == expected
+    assert forward_spec_record(cast(Any, row)) == expected
 
     row["historical_result_eligible_for_promotion"] = True
     with pytest.raises(
         PersistenceUnavailableError,
         match="integrity",
     ):
-        _record(cast(Any, row))
+        forward_spec_record(cast(Any, row))
 
 
 def test_forward_evidence_migration_is_immutable() -> None:
@@ -147,3 +173,76 @@ def test_forward_evidence_migration_is_immutable() -> None:
     assert "autoquant_reject_immutable_change()" in sql
     assert "retrospective_reclassification_allowed" in sql
     assert "VALUES ('postgres', 34)" in sql
+
+
+def test_forward_session_binding_is_future_only_and_round_trips() -> None:
+    binding = _binding()
+
+    restored = LowVolatilityForwardSessionBinding.from_payload(binding.payload())
+
+    assert restored == binding
+    assert binding.version == LOW_VOLATILITY_FORWARD_SESSION_VERSION
+    assert binding.snapshot_reference_date < binding.session_date
+
+
+@pytest.mark.parametrize(
+    "snapshot_reference_date",
+    (
+        date(2026, 7, 23),
+        date(2026, 7, 24),
+    ),
+)
+def test_forward_session_binding_rejects_nonprior_snapshot(
+    snapshot_reference_date: date,
+) -> None:
+    with pytest.raises(ValueError, match="binding"):
+        replace(
+            _binding(),
+            snapshot_reference_date=snapshot_reference_date,
+        )
+
+
+def test_forward_session_store_round_trips_and_detects_tampering() -> None:
+    binding = _binding()
+    completed_at = datetime(2026, 7, 24, tzinfo=UTC)
+    expected = LowVolatilityForwardSessionRecord(
+        binding=binding,
+        requested_by="operator",
+        completed_at=completed_at,
+    )
+    row: dict[str, object] = {
+        "binding_hash": binding.binding_hash,
+        "binding_version": binding.version,
+        "calendar_content_hash": binding.calendar_content_hash,
+        "completed_at": completed_at,
+        "dataset_manifest_hash": binding.dataset_manifest_hash,
+        "forward_spec_hash": binding.forward_spec_hash,
+        "instrument_count": len(binding.instruments),
+        "live_trading_locked": True,
+        "payload": binding.payload(),
+        "policy_hash": binding.policy_hash,
+        "requested_by": "operator",
+        "session_date": binding.session_date,
+        "snapshot_hash": binding.snapshot_hash,
+        "snapshot_reference_date": (binding.snapshot_reference_date),
+    }
+
+    assert forward_session_record(cast(Any, row)) == expected
+
+    row["live_trading_locked"] = False
+    with pytest.raises(
+        PersistenceUnavailableError,
+        match="integrity",
+    ):
+        forward_session_record(cast(Any, row))
+
+
+def test_forward_session_migration_is_immutable() -> None:
+    sql = Path("migrations/postgres/035_low_volatility_forward_sessions.sql").read_text(
+        encoding="utf-8"
+    )
+
+    assert ("CREATE TABLE IF NOT EXISTS low_volatility_forward_sessions") in sql
+    assert "snapshot_reference_date < session_date" in sql
+    assert "autoquant_reject_immutable_change()" in sql
+    assert "VALUES ('postgres', 35)" in sql

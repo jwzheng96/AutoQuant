@@ -853,11 +853,7 @@ def test_low_volatility_validation_emits_only_redacted_evidence() -> None:
                 "--requested-by",
                 "operator",
             ],
-            env={
-                "AQ_POSTGRES_DSN": (
-                    "postgresql+asyncpg://sensitive"
-                )
-            },
+            env={"AQ_POSTGRES_DSN": ("postgresql+asyncpg://sensitive")},
         )
 
     assert result.exit_code == 0
@@ -879,17 +875,14 @@ def test_low_volatility_forward_spec_discloses_outcome_observation() -> None:
         "predecessor_result_hash": "a" * 64,
         "retrospective_reclassification_allowed": False,
         "spec_hash": "b" * 64,
-        "stability_method_version": (
-            "annualized-geometric-return-gap-v1"
-        ),
+        "stability_method_version": ("annualized-geometric-return-gap-v1"),
         "status": "frozen_awaiting_forward_data",
         "strategy_parameters_unchanged": True,
         "version": "low-volatility-forward-evidence-spec-v1",
     }
     freeze = AsyncMock(return_value=payload)
     with patch(
-        "autoquant.cli."
-        "freeze_low_volatility_forward_evidence_spec",
+        "autoquant.cli.freeze_low_volatility_forward_evidence_spec",
         new=freeze,
     ):
         result = runner.invoke(
@@ -901,11 +894,7 @@ def test_low_volatility_forward_spec_discloses_outcome_observation() -> None:
                 "--requested-by",
                 "operator",
             ],
-            env={
-                "AQ_POSTGRES_DSN": (
-                    "postgresql+asyncpg://sensitive"
-                )
-            },
+            env={"AQ_POSTGRES_DSN": ("postgresql+asyncpg://sensitive")},
         )
 
     assert result.exit_code == 0
@@ -928,8 +917,7 @@ def test_low_volatility_forward_session_create_is_redacted() -> None:
     }
     creation = AsyncMock(return_value=payload)
     with patch(
-        "autoquant.cli."
-        "create_low_volatility_forward_session_campaign",
+        "autoquant.cli.create_low_volatility_forward_session_campaign",
         new=creation,
     ):
         result = runner.invoke(
@@ -943,17 +931,53 @@ def test_low_volatility_forward_session_create_is_redacted() -> None:
                 "--requested-by",
                 "operator",
             ],
-            env={
-                "AQ_POSTGRES_DSN": (
-                    "postgresql+asyncpg://sensitive"
-                )
-            },
+            env={"AQ_POSTGRES_DSN": ("postgresql+asyncpg://sensitive")},
         )
 
     assert result.exit_code == 0
     assert json.loads(result.stdout) == payload
     assert "sensitive" not in result.stdout
     creation.assert_awaited_once()
+
+
+def test_low_volatility_forward_session_finalize_is_redacted() -> None:
+    payload = {
+        "binding_hash": "a" * 64,
+        "calendar_as_of": "2026-07-24T01:00:00+00:00",
+        "completed_at": "2026-07-24T02:00:00+00:00",
+        "dataset_manifest_hash": "b" * 64,
+        "forward_spec_hash": "c" * 64,
+        "instrument_count": 300,
+        "live_trading_locked": True,
+        "session_date": "2026-07-23",
+        "snapshot_hash": "d" * 64,
+        "snapshot_reference_date": "2026-07-22",
+        "status": "frozen",
+        "version": "low-volatility-forward-session-binding-v1",
+    }
+    finalization = AsyncMock(return_value=payload)
+    with patch(
+        "autoquant.cli.finalize_low_volatility_forward_session",
+        new=finalization,
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "low-volatility-forward-session-finalize",
+                "--forward-spec-hash",
+                "c" * 64,
+                "--dataset-manifest-hash",
+                "b" * 64,
+                "--requested-by",
+                "operator",
+            ],
+            env={"AQ_POSTGRES_DSN": ("postgresql+asyncpg://sensitive")},
+        )
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == payload
+    assert "sensitive" not in result.stdout
+    finalization.assert_awaited_once()
 
 
 def test_research_input_plan_compilation_stays_live_locked_and_redacted() -> None:

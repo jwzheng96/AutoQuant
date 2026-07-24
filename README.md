@@ -49,6 +49,11 @@ requires at least 126 new trading sessions, and still requires at least 60 paper
 all forward gates pass. This is a waiting-data contract, not a shortcut to deployment.
 The immutable forward specification is frozen as
 `ae3d74b1a35d700efea01310bd80e8fd1264eabe6c569f83d9628670a85e34f0`.
+Schema v35 adds one immutable binding per completed forward trading session. It independently
+verifies every production-complete data shard, the exact session calendar evidence, the frozen
+universe policy and a universe snapshot strictly earlier than the session. These bindings
+accumulate evidence toward the 126-session gate but never enable paper or live trading by
+themselves.
 
 The repository also contains a deterministic A-share research ledger with versioned board
 rules, T+1 sellability, lot-size validation, conservative daily-open fills, liquidity caps,

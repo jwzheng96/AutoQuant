@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal, localcontext
@@ -16,10 +17,12 @@ from autoquant.data.models import (
 LOW_VOLATILITY_FORWARD_SPEC_VERSION = "low-volatility-forward-evidence-spec-v1"
 LOW_VOLATILITY_STABILITY_METHOD_VERSION = "annualized-geometric-return-gap-v1"
 LOW_VOLATILITY_FORWARD_BLOCK_VERSION = "nonoverlapping-21-session-blocks-v1"
+LOW_VOLATILITY_FORWARD_SESSION_VERSION = "low-volatility-forward-session-binding-v1"
 LOW_VOLATILITY_FORWARD_SOURCE_URLS = (
     "https://doi.org/10.1057/s41260-021-00218-0",
     "https://papers.ssrn.com/sol3/papers.cfm?abstract_id=2326253",
 )
+_INSTRUMENT = re.compile(r"[0-9]{6}\.(?:XSHG|XSHE)\Z")
 
 
 @dataclass(frozen=True, slots=True)
@@ -191,6 +194,90 @@ class LowVolatilityForwardEvidenceSpec:
         )
         if value.payload() != payload:
             raise ValueError("forward evidence spec payload is not canonical")
+        return value
+
+
+@dataclass(frozen=True, slots=True)
+class LowVolatilityForwardSessionBinding:
+    forward_spec_hash: str
+    dataset_manifest_hash: str
+    policy_hash: str
+    session_date: date
+    snapshot_hash: str
+    snapshot_reference_date: date
+    calendar_content_hash: str
+    instruments: tuple[str, ...]
+    version: str = LOW_VOLATILITY_FORWARD_SESSION_VERSION
+    binding_hash: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        for value, name in (
+            (self.forward_spec_hash, "forward session spec hash"),
+            (
+                self.dataset_manifest_hash,
+                "forward session dataset manifest hash",
+            ),
+            (self.policy_hash, "forward session policy hash"),
+            (self.snapshot_hash, "forward session snapshot hash"),
+            (
+                self.calendar_content_hash,
+                "forward session calendar content hash",
+            ),
+        ):
+            _require_lowercase_sha256(value, name=name)
+        instruments = tuple(self.instruments)
+        if (
+            self.snapshot_reference_date >= self.session_date
+            or not instruments
+            or instruments != tuple(sorted(instruments))
+            or len(set(instruments)) != len(instruments)
+            or any(_INSTRUMENT.fullmatch(value) is None for value in instruments)
+            or self.version != LOW_VOLATILITY_FORWARD_SESSION_VERSION
+        ):
+            raise ValueError("low-volatility forward session binding is invalid")
+        object.__setattr__(self, "instruments", instruments)
+        object.__setattr__(
+            self,
+            "binding_hash",
+            _canonical_hash(self.payload()),
+        )
+
+    def payload(self) -> dict[str, object]:
+        return {
+            "calendar_content_hash": self.calendar_content_hash,
+            "dataset_manifest_hash": self.dataset_manifest_hash,
+            "forward_spec_hash": self.forward_spec_hash,
+            "instruments": list(self.instruments),
+            "policy_hash": self.policy_hash,
+            "session_date": self.session_date.isoformat(),
+            "snapshot_hash": self.snapshot_hash,
+            "snapshot_reference_date": (self.snapshot_reference_date.isoformat()),
+            "version": self.version,
+        }
+
+    @classmethod
+    def from_payload(
+        cls,
+        payload: dict[str, object],
+    ) -> LowVolatilityForwardSessionBinding:
+        raw_instruments = payload["instruments"]
+        if not isinstance(raw_instruments, list) or any(
+            not isinstance(value, str) for value in raw_instruments
+        ):
+            raise TypeError("forward session instruments are invalid")
+        value = cls(
+            forward_spec_hash=str(payload["forward_spec_hash"]),
+            dataset_manifest_hash=str(payload["dataset_manifest_hash"]),
+            policy_hash=str(payload["policy_hash"]),
+            session_date=date.fromisoformat(str(payload["session_date"])),
+            snapshot_hash=str(payload["snapshot_hash"]),
+            snapshot_reference_date=date.fromisoformat(str(payload["snapshot_reference_date"])),
+            calendar_content_hash=str(payload["calendar_content_hash"]),
+            instruments=tuple(raw_instruments),
+            version=str(payload["version"]),
+        )
+        if value.payload() != payload:
+            raise ValueError("forward session payload is not canonical")
         return value
 
 

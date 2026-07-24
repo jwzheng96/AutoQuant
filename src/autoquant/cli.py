@@ -39,6 +39,7 @@ from autoquant.operations import (
     create_research_data_campaign,
     create_research_universe_snapshot,
     create_validation_campaign,
+    finalize_low_volatility_forward_session,
     freeze_dynamic_regime_research_spec,
     freeze_dynamic_research_spec,
     freeze_fundamental_research_spec,
@@ -1161,6 +1162,37 @@ def low_volatility_forward_session_create(
         )
     except (AutoQuantError, LookupError, ValueError):
         _fail("low-volatility forward session create failed")
+    _emit(payload)
+
+
+@app.command("low-volatility-forward-session-finalize")
+def low_volatility_forward_session_finalize(
+    forward_spec_hash: Annotated[
+        str,
+        typer.Option("--forward-spec-hash"),
+    ],
+    dataset_manifest_hash: Annotated[
+        str,
+        typer.Option("--dataset-manifest-hash"),
+    ],
+    requested_by: Annotated[
+        str,
+        typer.Option("--requested-by"),
+    ],
+) -> None:
+    """Verify and freeze one completed forward-session dataset."""
+
+    try:
+        payload = asyncio.run(
+            finalize_low_volatility_forward_session(
+                _settings(),
+                forward_spec_hash=forward_spec_hash,
+                dataset_manifest_hash=(dataset_manifest_hash),
+                requested_by=requested_by,
+            )
+        )
+    except (AutoQuantError, LookupError, ValueError):
+        _fail("low-volatility forward session finalization failed")
     _emit(payload)
 
 

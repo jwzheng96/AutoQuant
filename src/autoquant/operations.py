@@ -44,6 +44,7 @@ from autoquant.backtest.fundamental_validation import (
 )
 from autoquant.backtest.low_volatility_forward import (
     LowVolatilityForwardEvidenceSpec,
+    LowVolatilityForwardSessionBinding,
 )
 from autoquant.backtest.low_volatility_portfolio import (
     LowVolatilityResearchSpec,
@@ -181,6 +182,9 @@ from autoquant.web.fundamental_research_store import (
 from autoquant.web.fundamental_validation_store import (
     FundamentalValidationRecord,
     PostgresFundamentalValidationRepository,
+)
+from autoquant.web.low_volatility_forward_session_store import (
+    PostgresLowVolatilityForwardSessionRepository,
 )
 from autoquant.web.low_volatility_forward_store import (
     PostgresLowVolatilityForwardEvidenceSpecRepository,
@@ -1456,6 +1460,136 @@ async def create_low_volatility_forward_session_campaign(
         await control.close()
         await campaigns.close()
         await universes.close()
+        await source_specs.close()
+        await forward_specs.close()
+
+
+async def finalize_low_volatility_forward_session(
+    settings: AppSettings,
+    *,
+    forward_spec_hash: str,
+    dataset_manifest_hash: str,
+    requested_by: str,
+) -> dict[str, object]:
+    """Verify and immutably bind one completed forward-session dataset."""
+
+    if settings.live_trading_enabled:
+        raise MissingCapabilityError("forward session finalization requires live trading locked")
+    if not requested_by.strip() or requested_by != requested_by.strip() or len(requested_by) > 128:
+        raise ValueError("requested_by must contain 1-128 trimmed characters")
+    postgres_dsn = configured_dsn(
+        settings.postgres_dsn,
+        capability="PostgreSQL",
+    )
+    forward_specs = PostgresLowVolatilityForwardEvidenceSpecRepository.connect(dsn=postgres_dsn)
+    source_specs = PostgresLowVolatilityResearchSpecRepository.connect(dsn=postgres_dsn)
+    sessions = PostgresLowVolatilityForwardSessionRepository.connect(dsn=postgres_dsn)
+    campaigns = PostgresResearchDataCampaignRepository.connect(dsn=postgres_dsn)
+    universes = PostgresResearchUniverseRepository.connect(dsn=postgres_dsn)
+    control = PostgresControlRepository.connect(dsn=postgres_dsn)
+    market: ClickHouseDailyRepository | None = None
+    try:
+        forward = (await forward_specs.read(forward_spec_hash)).spec
+        source = (await source_specs.read(forward.source_spec_hash)).spec
+        dataset = await campaigns.read_manifest(dataset_manifest_hash)
+        if (
+            dataset.source != "tushare"
+            or dataset.start_date != dataset.end_date
+            or dataset.start_date < forward.forward_start_date
+            or dataset.policy_hash != source.policy_hash
+            or len(dataset.snapshot_hashes) != 1
+        ):
+            raise ValueError("forward dataset does not match the frozen evidence spec")
+        session_date = dataset.start_date
+        snapshot_hash = dataset.snapshot_hashes[0]
+        snapshot = await universes.detail(snapshot_hash)
+        instruments = tuple(sorted(member.instrument for member in snapshot.members))
+        if (
+            snapshot.snapshot.snapshot_hash != snapshot_hash
+            or snapshot.snapshot.policy_hash != source.policy_hash
+            or snapshot.snapshot.reference_date >= session_date
+            or instruments != dataset.instruments
+        ):
+            raise ValueError("forward universe snapshot does not precede and match the session")
+        shard_cutoffs: list[datetime] = []
+        for shard in dataset.shards:
+            manifest = await control.read_manifest(shard.manifest_hash)
+            if (
+                manifest.source != "tushare"
+                or not manifest.production_complete
+                or manifest.instruments != (shard.instrument,)
+                or to_shanghai(manifest.start_time).date() != session_date
+                or to_shanghai(manifest.end_time).date() != session_date
+            ):
+                raise ValueError("forward dataset shard failed exact-session verification")
+            shard_cutoffs.append(manifest.as_of)
+        calendar_as_of = min(shard_cutoffs)
+        market = await ClickHouseDailyRepository.connect(
+            dsn=configured_dsn(
+                settings.clickhouse_dsn,
+                capability="ClickHouse",
+            ),
+            source="tushare",
+        )
+        calendar = await market.query_sessions_as_of(
+            session_date,
+            session_date,
+            calendar_as_of,
+        )
+        if (
+            len(calendar) != 1
+            or calendar[0].session_date != session_date
+            or not calendar[0].is_open
+        ):
+            raise ValueError("forward dataset session is not proven open as of collection")
+        binding = LowVolatilityForwardSessionBinding(
+            forward_spec_hash=forward.spec_hash,
+            dataset_manifest_hash=dataset.manifest_hash,
+            policy_hash=source.policy_hash,
+            session_date=session_date,
+            snapshot_hash=snapshot_hash,
+            snapshot_reference_date=(snapshot.snapshot.reference_date),
+            calendar_content_hash=calendar[0].content_hash,
+            instruments=instruments,
+        )
+        completed_at = datetime.now(UTC)
+        record = await sessions.freeze(
+            binding,
+            requested_by=requested_by,
+            completed_at=completed_at,
+        )
+        payload: dict[str, object] = {
+            "binding_hash": record.binding.binding_hash,
+            "calendar_as_of": calendar_as_of.isoformat(),
+            "completed_at": record.completed_at.isoformat(),
+            "dataset_manifest_hash": (record.binding.dataset_manifest_hash),
+            "forward_spec_hash": (record.binding.forward_spec_hash),
+            "instrument_count": len(record.binding.instruments),
+            "live_trading_locked": True,
+            "session_date": (record.binding.session_date.isoformat()),
+            "snapshot_hash": record.binding.snapshot_hash,
+            "snapshot_reference_date": (record.binding.snapshot_reference_date.isoformat()),
+            "status": "frozen",
+            "version": record.binding.version,
+        }
+        await control.append_audit_event(
+            "research.low_volatility.forward_session.frozen",
+            completed_at,
+            {
+                **payload,
+                "calendar_content_hash": (record.binding.calendar_content_hash),
+                "policy_hash": record.binding.policy_hash,
+                "requested_by": requested_by,
+            },
+        )
+        return payload
+    finally:
+        if market is not None:
+            await market.client.close()
+        await control.close()
+        await universes.close()
+        await campaigns.close()
+        await sessions.close()
         await source_specs.close()
         await forward_specs.close()
 

@@ -52,6 +52,7 @@ Apply `migrations/postgres/001_phase1.sql`,
 `migrations/postgres/032_low_volatility_research.sql`, then
 `migrations/postgres/033_low_volatility_validation.sql`, then
 `migrations/postgres/034_low_volatility_forward_evidence.sql`, then
+`migrations/postgres/035_low_volatility_forward_sessions.sql`, then
 `migrations/clickhouse/001_phase1.sql` and
 `migrations/clickhouse/002_tushare_daily.sql` and
 `migrations/clickhouse/003_daily_coverage.sql` and
@@ -821,6 +822,24 @@ Repeat until `research-data-campaign-status` reports `completed`. Each instrumen
 own production-complete manifest and retry budget, so a vendor or network failure does not
 discard other completed shards. Never create a queue for the current Shanghai trading date or
 use a universe snapshot dated on or after the target session.
+
+After completion, freeze the aggregate manifest into the forward evidence ledger:
+
+```bash
+uv run autoquant low-volatility-forward-session-finalize \
+  --forward-spec-hash \
+  ae3d74b1a35d700efea01310bd80e8fd1264eabe6c569f83d9628670a85e34f0 \
+  --dataset-manifest-hash <completed-dataset-manifest-hash> \
+  --requested-by operator
+```
+
+Schema v35 independently re-reads all shard manifests, proves exact single-session coverage,
+uses the earliest shard cutoff to verify that the date was already known to be an open trading
+session, and binds the aggregate manifest to the strictly earlier universe snapshot. The
+binding is immutable and idempotent by forward specification and session date. Any later
+snapshot, incomplete shard, wrong policy, changed instrument set, or different second manifest
+for the same session is rejected. This evidence collection does not unlock paper or live
+execution.
 
 ## Future-only low-volatility evidence correction
 
