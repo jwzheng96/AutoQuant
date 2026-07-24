@@ -73,6 +73,12 @@ lock remains engaged.
 PostgreSQL schema v37 persists the future QMT canary candidate, asynchronous request reservation
 and broker-order binding as three append-only ledgers. A Windows gateway can reconstruct exact
 client/request/broker identity after restart, while unknown or conflicting callbacks fail closed.
+Schema v38 makes candidate persistence a mandatory pre-mutation stage. It commits a globally
+unique 24-character ASCII `order_remark` derived from the full candidate hash before any future
+broker call; only a staged candidate may later reserve the XtQuant asynchronous request sequence.
+The active lease owner can inventory staged candidates that lack a request reservation across
+prior process generations. Any such record is an explicit ambiguous-submit blocker, not
+permission to retry or create another order.
 Request and broker identifiers are scoped by QMT session-lease generation, so vendor counters may
 restart without ever joining a new process callback to an old process order.
 Candidate reservation, asynchronous broker-order binding and restart recovery also require the
@@ -197,7 +203,8 @@ The QMT trading-side read-only core now normalizes the documented `XtAsset`, `Xt
 `XtOrder` and `XtTrade` fields through a Windows shim contract. A trusted baseline requires all
 four queries to complete without an intervening callback; `None` never means an empty account.
 Assets must balance to positions, order cumulative fills must converge with unique daily trades,
-and unknown/inconsistent order states fail closed. A bounded callback cursor permits only normal
+the documented 24-byte order remark is retained in both order and trade evidence, and
+unknown/inconsistent order states fail closed. A bounded callback cursor permits only normal
 account-status heartbeats to retain the baseline; disconnects, gaps, order/trade changes or error
 callbacks require a complete re-query. The resulting broker snapshot uses a logical account alias
 and can feed the existing persisted reconciliation supervisor without storing the broker account

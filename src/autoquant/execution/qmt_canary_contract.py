@@ -18,6 +18,7 @@ from autoquant.execution.qmt_models import to_qmt_instrument
 from autoquant.risk.models import ExecutionMode, RiskDecision, RiskDecisionState
 
 QMT_CANARY_CANDIDATE_VERSION: Final = "qmt-canary-order-candidate-v1"
+QMT_CANARY_STAGE_VERSION: Final = "qmt-canary-order-stage-v1"
 MAXIMUM_CANDIDATE_LIFETIME: Final = timedelta(seconds=30)
 MAXIMUM_DECISION_AGE: Final = timedelta(seconds=5)
 
@@ -148,6 +149,123 @@ class QmtCanaryOrderCandidate:
         raise LiveTradingLockedError(
             "QMT canary candidate is evidence only; broker mutation is hard-locked"
         )
+
+
+def qmt_canary_order_remark(candidate_hash: str) -> str:
+    """Derive the exact 24-character ASCII recovery tag accepted by XtQuant."""
+
+    _require_lowercase_sha256(candidate_hash, name="QMT candidate hash")
+    return f"AQ{candidate_hash[:22]}"
+
+
+@dataclass(frozen=True, slots=True)
+class QmtCanaryOrderStage:
+    """Durable pre-mutation identity for one candidate and its broker remark."""
+
+    candidate_hash: str
+    account_id: str
+    client_order_id: str
+    gateway_holder_id: str
+    qmt_session_id: int
+    qmt_lease_generation: int
+    candidate_created_at: datetime
+    candidate_valid_until: datetime
+    staged_at: datetime
+    broker_order_remark: str
+    version: str = QMT_CANARY_STAGE_VERSION
+    stage_hash: str = field(init=False)
+
+    @classmethod
+    def from_candidate(
+        cls,
+        candidate: QmtCanaryOrderCandidate,
+        *,
+        staged_at: datetime,
+    ) -> QmtCanaryOrderStage:
+        if not isinstance(candidate, QmtCanaryOrderCandidate):
+            raise TypeError("candidate must be QmtCanaryOrderCandidate")
+        candidate.require_current(now=staged_at)
+        return cls(
+            candidate_hash=candidate.candidate_hash,
+            account_id=candidate.account_id,
+            client_order_id=candidate.decision.order.client_order_id,
+            gateway_holder_id=candidate.gateway_holder_id,
+            qmt_session_id=candidate.qmt_session_id,
+            qmt_lease_generation=candidate.qmt_lease_generation,
+            candidate_created_at=candidate.created_at,
+            candidate_valid_until=candidate.valid_until,
+            staged_at=staged_at,
+            broker_order_remark=qmt_canary_order_remark(candidate.candidate_hash),
+        )
+
+    @property
+    def broker_mutation_allowed(self) -> bool:
+        return False
+
+    def __post_init__(self) -> None:
+        _require_lowercase_sha256(self.candidate_hash, name="QMT candidate hash")
+        for value, name in (
+            (self.account_id, "QMT stage account_id"),
+            (self.client_order_id, "QMT stage client_order_id"),
+            (self.gateway_holder_id, "QMT stage gateway_holder_id"),
+        ):
+            _require_nonblank(value, name=name)
+            if value != value.strip() or len(value) > 128:
+                raise ValueError(f"{name} must be trimmed and at most 128 characters")
+        for integer, name in (
+            (self.qmt_session_id, "qmt_session_id"),
+            (self.qmt_lease_generation, "qmt_lease_generation"),
+        ):
+            if (
+                not isinstance(integer, int)
+                or isinstance(integer, bool)
+                or integer < 1
+            ):
+                raise ValueError(f"{name} must be positive")
+        expected_remark = qmt_canary_order_remark(self.candidate_hash)
+        if (
+            self.broker_order_remark != expected_remark
+            or len(self.broker_order_remark) != 24
+            or not self.broker_order_remark.isascii()
+        ):
+            raise ValueError("QMT broker order remark must match its 24-character recovery tag")
+        created_at = to_utc(
+            self.candidate_created_at,
+            name="QMT staged candidate creation time",
+        )
+        valid_until = to_utc(
+            self.candidate_valid_until,
+            name="QMT staged candidate expiry",
+        )
+        staged_at = to_utc(self.staged_at, name="QMT candidate stage time")
+        if (
+            valid_until <= created_at
+            or valid_until - created_at > MAXIMUM_CANDIDATE_LIFETIME
+            or staged_at < created_at
+            or staged_at >= valid_until
+            or self.version != QMT_CANARY_STAGE_VERSION
+        ):
+            raise ValueError("QMT candidate stage timing or version is unsupported")
+        object.__setattr__(self, "candidate_created_at", created_at)
+        object.__setattr__(self, "candidate_valid_until", valid_until)
+        object.__setattr__(self, "staged_at", staged_at)
+        object.__setattr__(self, "stage_hash", _canonical_hash(self.payload()))
+
+    def payload(self) -> dict[str, object]:
+        return {
+            "account_id": self.account_id,
+            "broker_mutation_allowed": False,
+            "broker_order_remark": self.broker_order_remark,
+            "candidate_created_at": _datetime_text(self.candidate_created_at),
+            "candidate_hash": self.candidate_hash,
+            "candidate_valid_until": _datetime_text(self.candidate_valid_until),
+            "client_order_id": self.client_order_id,
+            "gateway_holder_id": self.gateway_holder_id,
+            "qmt_lease_generation": self.qmt_lease_generation,
+            "qmt_session_id": self.qmt_session_id,
+            "staged_at": _datetime_text(self.staged_at),
+            "version": self.version,
+        }
 
 
 @dataclass(frozen=True, slots=True)

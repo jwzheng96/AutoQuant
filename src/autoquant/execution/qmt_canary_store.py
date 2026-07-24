@@ -17,6 +17,7 @@ from autoquant.errors import (
 )
 from autoquant.execution.qmt_canary_contract import (
     QmtCanaryOrderCandidate,
+    QmtCanaryOrderStage,
     QmtOrderCorrelation,
     QmtOrderCorrelationBook,
 )
@@ -84,8 +85,153 @@ class PostgresQmtCanaryOrderLedger:
                 )
         except Exception:
             raise PersistenceUnavailableError("QMT canary ledger schema check failed") from None
-        if set(map(str, rows)) != required or not isinstance(version, int) or version < 37:
-            raise PersistenceUnavailableError("QMT canary ledger schema v37 is unavailable")
+        if set(map(str, rows)) != required or not isinstance(version, int) or version < 38:
+            raise PersistenceUnavailableError("QMT canary ledger schema v38 is unavailable")
+
+    async def stage(
+        self,
+        candidate: QmtCanaryOrderCandidate,
+        *,
+        lease_token: SecretStr,
+        staged_at: datetime,
+    ) -> QmtCanaryOrderStage:
+        if not isinstance(candidate, QmtCanaryOrderCandidate):
+            raise TypeError("candidate must be QmtCanaryOrderCandidate")
+        token_hash = _lease_token_hash(lease_token)
+        proposed = QmtCanaryOrderStage.from_candidate(
+            candidate,
+            staged_at=staged_at,
+        )
+        try:
+            async with self._engine.begin() as connection:
+                await connection.execute(
+                    text("SELECT pg_advisory_xact_lock(hashtext(:identity))"),
+                    {
+                        "identity": (
+                            f"qmt-canary:{candidate.account_id}:"
+                            f"{candidate.gateway_holder_id}:{candidate.qmt_session_id}:"
+                            f"{candidate.qmt_lease_generation}"
+                        )
+                    },
+                )
+                lease_row = (
+                    (
+                        await connection.execute(
+                            text(
+                                f"""
+                                SELECT *, clock_timestamp() AS observed_at
+                                FROM {self._schema}.qmt_session_leases
+                                WHERE session_id = :qmt_session_id
+                                FOR SHARE
+                                """
+                            ),
+                            _candidate_parameters(candidate),
+                        )
+                    )
+                    .mappings()
+                    .one_or_none()
+                )
+                if not _active_lease_matches(
+                    lease_row,
+                    candidate=candidate,
+                    token_hash=token_hash,
+                ):
+                    raise QmtSessionLeaseLostError(
+                        "QMT candidate stage requires its matching active bearer lease"
+                    )
+                assert lease_row is not None
+                candidate.require_current(now=lease_row["observed_at"])
+                candidate_rows = (
+                    (
+                        await connection.execute(
+                            text(
+                                f"""
+                                SELECT *
+                                FROM {self._schema}.qmt_canary_order_candidates
+                                WHERE candidate_hash = :candidate_hash
+                                   OR client_order_id = :client_order_id
+                                   OR risk_decision_hash = :risk_decision_hash
+                                   OR stage_hash = :stage_hash
+                                   OR broker_order_remark = :broker_order_remark
+                                """
+                            ),
+                            _stage_parameters(candidate, proposed),
+                        )
+                    )
+                    .mappings()
+                    .all()
+                )
+                if any(
+                    not _candidate_row_matches(row, candidate)
+                    or not _stage_row_matches(row, proposed)
+                    for row in candidate_rows
+                ):
+                    raise ValueError("QMT canary candidate stage identity conflicts")
+                await connection.execute(
+                    text(
+                        f"""
+                        INSERT INTO {self._schema}.qmt_canary_order_candidates
+                            (candidate_hash, account_id, strategy_id,
+                             gateway_holder_id, qmt_session_id,
+                             qmt_lease_generation,
+                             client_order_id, risk_decision_hash,
+                             created_at, valid_until,
+                             broker_mutation_allowed,
+                             candidate_version, payload,
+                             stage_hash, broker_order_remark,
+                             staged_at, stage_version, stage_payload)
+                        VALUES
+                            (:candidate_hash, :account_id, :strategy_id,
+                             :gateway_holder_id, :qmt_session_id,
+                             :qmt_lease_generation,
+                             :client_order_id, :risk_decision_hash,
+                             :created_at, :valid_until, false,
+                             :candidate_version, CAST(:payload AS jsonb),
+                             :stage_hash, :broker_order_remark,
+                             :staged_at, :stage_version,
+                             CAST(:stage_payload AS jsonb))
+                        ON CONFLICT (candidate_hash) DO NOTHING
+                        """
+                    ),
+                    _stage_parameters(candidate, proposed),
+                )
+                stored_row = (
+                    (
+                        await connection.execute(
+                            text(
+                                f"""
+                                SELECT *
+                                FROM {self._schema}.qmt_canary_order_candidates
+                                WHERE candidate_hash = :candidate_hash
+                                """
+                            ),
+                            {"candidate_hash": candidate.candidate_hash},
+                        )
+                    )
+                    .mappings()
+                    .one()
+                )
+            if (
+                not _candidate_row_matches(stored_row, candidate)
+                or not _stage_row_matches(stored_row, proposed)
+            ):
+                raise PersistenceUnavailableError(
+                    "stored QMT canary candidate stage failed integrity verification"
+                )
+            return proposed
+        except (
+            TypeError,
+            ValueError,
+            BrokerStateUnknownError,
+            QmtSessionLeaseLostError,
+        ):
+            raise
+        except PersistenceUnavailableError:
+            raise
+        except Exception:
+            raise PersistenceUnavailableError(
+                "QMT candidate stage persistence failed"
+            ) from None
 
     async def reserve(
         self,
@@ -164,29 +310,18 @@ class PostgresQmtCanaryOrderLedger:
                 )
                 if any(not _candidate_row_matches(row, candidate) for row in candidate_rows):
                     raise ValueError("QMT canary candidate identity conflicts")
-                await connection.execute(
-                    text(
-                        f"""
-                        INSERT INTO {self._schema}.qmt_canary_order_candidates
-                            (candidate_hash, account_id, strategy_id,
-                             gateway_holder_id, qmt_session_id,
-                             qmt_lease_generation,
-                             client_order_id, risk_decision_hash,
-                             created_at, valid_until,
-                             broker_mutation_allowed,
-                             candidate_version, payload)
-                        VALUES
-                            (:candidate_hash, :account_id, :strategy_id,
-                             :gateway_holder_id, :qmt_session_id,
-                             :qmt_lease_generation,
-                             :client_order_id, :risk_decision_hash,
-                             :created_at, :valid_until, false,
-                             :candidate_version, CAST(:payload AS jsonb))
-                        ON CONFLICT (candidate_hash) DO NOTHING
-                        """
-                    ),
-                    _candidate_parameters(candidate),
+                if not candidate_rows:
+                    raise BrokerStateUnknownError(
+                        "QMT candidate must be durably staged before request reservation"
+                    )
+                staged = QmtCanaryOrderStage.from_candidate(
+                    candidate,
+                    staged_at=candidate_rows[0]["staged_at"],
                 )
+                if not _stage_row_matches(candidate_rows[0], staged):
+                    raise BrokerStateUnknownError(
+                        "QMT candidate stage failed integrity verification"
+                    )
                 reservation_rows = (
                     (
                         await connection.execute(
@@ -268,9 +403,12 @@ class PostgresQmtCanaryOrderLedger:
                     .mappings()
                     .one()
                 )
-            if not _candidate_row_matches(stored_candidate, candidate):
+            if (
+                not _candidate_row_matches(stored_candidate, candidate)
+                or not _stage_row_matches(stored_candidate, staged)
+            ):
                 raise PersistenceUnavailableError(
-                    "stored QMT canary candidate failed integrity verification"
+                    "stored QMT canary candidate stage failed integrity verification"
                 )
             stored = _reservation_from_row(stored_reservation)
             if stored != proposed:
@@ -592,6 +730,92 @@ class PostgresQmtCanaryOrderLedger:
         except Exception:
             raise PersistenceUnavailableError("QMT order correlation recovery failed") from None
 
+    async def unresolved_stages(
+        self,
+        *,
+        account_id: str,
+        gateway_holder_id: str,
+        qmt_session_id: int,
+        qmt_lease_generation: int,
+        lease_token: SecretStr,
+    ) -> tuple[QmtCanaryOrderStage, ...]:
+        """List pre-mutation identities lacking a durable async request reservation."""
+
+        _require_nonblank(account_id, name="QMT canary account_id")
+        _require_scope(
+            gateway_holder_id=gateway_holder_id,
+            qmt_session_id=qmt_session_id,
+            qmt_lease_generation=qmt_lease_generation,
+        )
+        token_hash = _lease_token_hash(lease_token)
+        try:
+            async with self._engine.begin() as connection:
+                lease_row = (
+                    (
+                        await connection.execute(
+                            text(
+                                f"""
+                                SELECT *, clock_timestamp() AS observed_at
+                                FROM {self._schema}.qmt_session_leases
+                                WHERE session_id = :qmt_session_id
+                                FOR SHARE
+                                """
+                            ),
+                            {"qmt_session_id": qmt_session_id},
+                        )
+                    )
+                    .mappings()
+                    .one_or_none()
+                )
+                if not _active_scope_lease_matches(
+                    lease_row,
+                    gateway_holder_id=gateway_holder_id,
+                    qmt_lease_generation=qmt_lease_generation,
+                    token_hash=token_hash,
+                ):
+                    raise QmtSessionLeaseLostError(
+                        "QMT stage recovery requires its matching active bearer lease"
+                    )
+                rows = (
+                    (
+                        await connection.execute(
+                            text(
+                                f"""
+                                SELECT c.*
+                                FROM {self._schema}.qmt_canary_order_candidates c
+                                LEFT JOIN
+                                    {self._schema}.qmt_order_correlation_reservations r
+                                  ON r.candidate_hash = c.candidate_hash
+                                WHERE c.account_id = :account_id
+                                  AND c.qmt_session_id = :qmt_session_id
+                                  AND r.candidate_hash IS NULL
+                                ORDER BY c.staged_at, c.candidate_hash
+                                """
+                            ),
+                            {
+                                "account_id": account_id,
+                                "qmt_session_id": qmt_session_id,
+                            },
+                        )
+                    )
+                    .mappings()
+                    .all()
+                )
+            return tuple(_stage_from_row(row) for row in rows)
+        except (
+            TypeError,
+            ValueError,
+            BrokerStateUnknownError,
+            QmtSessionLeaseLostError,
+        ):
+            raise
+        except PersistenceUnavailableError:
+            raise
+        except Exception:
+            raise PersistenceUnavailableError(
+                "QMT unresolved stage recovery failed"
+            ) from None
+
 
 def _candidate_parameters(candidate: QmtCanaryOrderCandidate) -> dict[str, object]:
     payload = candidate.payload()
@@ -608,6 +832,20 @@ def _candidate_parameters(candidate: QmtCanaryOrderCandidate) -> dict[str, objec
         "risk_decision_hash": candidate.decision.decision_hash,
         "strategy_id": candidate.strategy_id,
         "valid_until": candidate.valid_until,
+    }
+
+
+def _stage_parameters(
+    candidate: QmtCanaryOrderCandidate,
+    stage: QmtCanaryOrderStage,
+) -> dict[str, object]:
+    return {
+        **_candidate_parameters(candidate),
+        "broker_order_remark": stage.broker_order_remark,
+        "stage_hash": stage.stage_hash,
+        "stage_payload": _json(stage.payload()),
+        "stage_version": stage.version,
+        "staged_at": stage.staged_at,
     }
 
 
@@ -631,6 +869,60 @@ def _candidate_row_matches(
         and str(row["candidate_version"]) == candidate.version
         and dict(row["payload"]) == candidate.payload()
     )
+
+
+def _stage_row_matches(
+    row: RowMapping,
+    stage: QmtCanaryOrderStage,
+) -> bool:
+    return (
+        str(row["stage_hash"]) == stage.stage_hash
+        and str(row["candidate_hash"]) == stage.candidate_hash
+        and str(row["account_id"]) == stage.account_id
+        and str(row["client_order_id"]) == stage.client_order_id
+        and str(row["gateway_holder_id"]) == stage.gateway_holder_id
+        and int(row["qmt_session_id"]) == stage.qmt_session_id
+        and int(row["qmt_lease_generation"]) == stage.qmt_lease_generation
+        and row["created_at"] == stage.candidate_created_at
+        and row["valid_until"] == stage.candidate_valid_until
+        and row["staged_at"] == stage.staged_at
+        and str(row["broker_order_remark"]) == stage.broker_order_remark
+        and str(row["stage_version"]) == stage.version
+        and dict(row["stage_payload"]) == stage.payload()
+    )
+
+
+def _stage_from_row(row: RowMapping) -> QmtCanaryOrderStage:
+    candidate_payload = dict(row["payload"])
+    if (
+        _canonical_hash(candidate_payload) != str(row["candidate_hash"])
+        or row["broker_mutation_allowed"] is not False
+        or candidate_payload.get("broker_mutation_allowed") is not False
+    ):
+        raise PersistenceUnavailableError(
+            "restored QMT staged candidate failed integrity verification"
+        )
+    stage = QmtCanaryOrderStage(
+        candidate_hash=str(row["candidate_hash"]),
+        account_id=str(row["account_id"]),
+        client_order_id=str(row["client_order_id"]),
+        gateway_holder_id=str(row["gateway_holder_id"]),
+        qmt_session_id=int(row["qmt_session_id"]),
+        qmt_lease_generation=int(row["qmt_lease_generation"]),
+        candidate_created_at=row["created_at"],
+        candidate_valid_until=row["valid_until"],
+        staged_at=row["staged_at"],
+        broker_order_remark=str(row["broker_order_remark"]),
+        version=str(row["stage_version"]),
+    )
+    if (
+        str(row["stage_hash"]) != stage.stage_hash
+        or dict(row["stage_payload"]) != stage.payload()
+    ):
+        raise PersistenceUnavailableError(
+            "restored QMT candidate stage failed integrity verification"
+        )
+    return stage
 
 
 def _active_lease_matches(

@@ -516,6 +516,11 @@ def _order_payload(
         "traded_volume": _int_attr(value, "traded_volume"),
         "traded_price": _float_attr(value, "traded_price"),
         "order_status": _int_attr(value, "order_status"),
+        "order_remark": _string_attr(
+            value,
+            "order_remark",
+            allow_blank=True,
+        ),
         "status_msg": _string_attr(
             value,
             "status_msg",
@@ -537,6 +542,11 @@ def _trade_payload(
         "traded_price": _float_attr(value, "traded_price"),
         "traded_volume": _int_attr(value, "traded_volume"),
         "traded_amount": _float_attr(value, "traded_amount"),
+        "order_remark": _string_attr(
+            value,
+            "order_remark",
+            allow_blank=True,
+        ),
     }
 
 

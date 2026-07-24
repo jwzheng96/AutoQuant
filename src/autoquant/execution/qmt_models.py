@@ -182,6 +182,7 @@ class QmtOrderObservation:
     raw_status: int
     status_message: str
     observed_at: datetime
+    order_remark: str = ""
 
     def __post_init__(self) -> None:
         for name, value in (
@@ -191,6 +192,11 @@ class QmtOrderObservation:
             ("status_message", self.status_message),
         ):
             _require_nonblank(value, name=name)
+        if not isinstance(self.order_remark, str):
+            raise TypeError("order_remark must be a string")
+        order_remark = self.order_remark.strip()
+        if len(order_remark.encode("utf-8")) > 24:
+            raise ValueError("QMT order_remark must fit the documented 24-byte limit")
         to_qmt_instrument(self.instrument)
         if not isinstance(self.side, OrderSide):
             raise TypeError("side must be OrderSide")
@@ -216,6 +222,7 @@ class QmtOrderObservation:
             if self.average_traded_price == 0:
                 raise ValueError("average_traded_price must be positive")
         object.__setattr__(self, "observed_at", to_utc(self.observed_at, name="observed_at"))
+        object.__setattr__(self, "order_remark", order_remark)
 
     @property
     def state(self) -> PaperOrderState:

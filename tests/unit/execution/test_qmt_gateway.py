@@ -8,8 +8,10 @@ from autoquant.backtest.models import OrderSide
 from autoquant.errors import BrokerStateUnknownError, LiveTradingLockedError
 from autoquant.execution.qmt_canary_contract import (
     QmtCanaryOrderCandidate,
+    QmtCanaryOrderStage,
     QmtOrderCorrelation,
     QmtOrderCorrelationBook,
+    qmt_canary_order_remark,
 )
 from autoquant.execution.qmt_gateway import (
     LockedQmtGateway,
@@ -144,6 +146,34 @@ def test_canary_candidate_binds_exact_evidence_but_stays_non_executable() -> Non
         candidate.require_broker_mutation(now=NOW + timedelta(seconds=1))
 
 
+def test_canary_stage_freezes_exact_xtquant_recovery_remark_before_mutation() -> None:
+    candidate = _candidate()
+    stage = QmtCanaryOrderStage.from_candidate(
+        candidate,
+        staged_at=NOW + timedelta(seconds=1),
+    )
+
+    assert stage.broker_order_remark == qmt_canary_order_remark(candidate.candidate_hash)
+    assert len(stage.broker_order_remark) == 24
+    assert stage.broker_order_remark.isascii()
+    assert stage.payload()["broker_mutation_allowed"] is False
+    assert len(stage.stage_hash) == 64
+
+    with pytest.raises(ValueError, match="recovery tag"):
+        QmtCanaryOrderStage(
+            candidate_hash=candidate.candidate_hash,
+            account_id=candidate.account_id,
+            client_order_id=candidate.decision.order.client_order_id,
+            gateway_holder_id=candidate.gateway_holder_id,
+            qmt_session_id=candidate.qmt_session_id,
+            qmt_lease_generation=candidate.qmt_lease_generation,
+            candidate_created_at=candidate.created_at,
+            candidate_valid_until=candidate.valid_until,
+            staged_at=NOW + timedelta(seconds=1),
+            broker_order_remark="AQwrong",
+        )
+
+
 @pytest.mark.parametrize(
     "overrides",
     [
@@ -256,8 +286,16 @@ def test_qmt_order_correlation_book_restores_bound_and_pending_orders() -> None:
 
 def test_qmt_canary_ledger_migration_is_append_only_and_locked() -> None:
     sql = Path("migrations/postgres/037_qmt_canary_order_ledger.sql").read_text(encoding="utf-8")
+    staging = Path("migrations/postgres/038_qmt_canary_order_staging.sql").read_text(
+        encoding="utf-8"
+    )
 
     assert sql.count("CREATE TABLE IF NOT EXISTS") == 3
     assert sql.count("autoquant_reject_immutable_change()") == 3
     assert "NOT broker_mutation_allowed" in sql
     assert "VALUES ('postgres', 37)" in sql
+    assert "schema v38 requires" in staging
+    assert "broker_order_remark ~ '^AQ[0-9a-f]{22}$'" in staging
+    assert "stage_payload ? 'broker_mutation_allowed'" in staging
+    assert "stage_payload->>'broker_mutation_allowed' = 'false'" in staging
+    assert "VALUES ('postgres', 38)" in staging

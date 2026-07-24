@@ -77,6 +77,7 @@ def test_qmt_observation_converts_cumulative_fill_to_internal_update() -> None:
         raw_status=QmtOrderStatus.PARTIALLY_FILLED,
         status_message="partial fill",
         observed_at=NOW,
+        order_remark="AQ1234567890abcdef123456",
     )
 
     update = observation.to_broker_update(broker_sequence=7)
@@ -85,6 +86,7 @@ def test_qmt_observation_converts_cumulative_fill_to_internal_update() -> None:
     assert update.cumulative_filled_quantity == 100
     assert update.average_fill_price == Decimal("10.25")
     assert update.broker_sequence == 7
+    assert observation.order_remark == "AQ1234567890abcdef123456"
 
 
 def test_none_query_result_is_unknown_not_an_empty_account() -> None:

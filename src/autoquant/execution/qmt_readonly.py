@@ -194,6 +194,11 @@ def normalize_qmt_order(
         name="status_msg",
         allow_blank=True,
     )
+    order_remark = _text(
+        _raw(payload, "order_remark"),
+        name="order_remark",
+        allow_blank=True,
+    )
     return QmtOrderObservation(
         account_id=_account_id(payload, expected_account_id=expected_account_id),
         client_order_id=client_order_id,
@@ -208,6 +213,7 @@ def normalize_qmt_order(
         raw_status=_integer(_raw(payload, "order_status"), name="order_status"),
         status_message=status_message or "qmt_no_status_message",
         observed_at=observed_at,
+        order_remark=order_remark,
     )
 
 
@@ -222,6 +228,7 @@ class QmtTradeObservation:
     volume: int
     amount: Decimal
     observed_at: datetime
+    order_remark: str = ""
     trade_hash: str = field(init=False)
 
     def __post_init__(self) -> None:
@@ -234,6 +241,11 @@ class QmtTradeObservation:
             _require_nonblank(value, name=name)
         if not isinstance(self.side, OrderSide):
             raise TypeError("side must be OrderSide")
+        if not isinstance(self.order_remark, str):
+            raise TypeError("trade order_remark must be a string")
+        order_remark = self.order_remark.strip()
+        if len(order_remark.encode("utf-8")) > 24:
+            raise ValueError("QMT trade order_remark must fit the documented 24-byte limit")
         if not isinstance(self.volume, int) or isinstance(self.volume, bool) or self.volume < 1:
             raise ValueError("trade volume must be a positive integer")
         for name, money in (("price", self.price), ("amount", self.amount)):
@@ -243,6 +255,7 @@ class QmtTradeObservation:
             raise ValueError("QMT trade amount does not reconcile to price times volume")
         observed_at = to_utc(self.observed_at, name="QMT trade observed_at")
         object.__setattr__(self, "observed_at", observed_at)
+        object.__setattr__(self, "order_remark", order_remark)
         object.__setattr__(
             self,
             "trade_hash",
@@ -253,6 +266,7 @@ class QmtTradeObservation:
                     "broker_order_id": self.broker_order_id,
                     "instrument": self.instrument,
                     "observed_at": observed_at.isoformat(timespec="microseconds"),
+                    "order_remark": order_remark,
                     "price": _decimal_text(self.price),
                     "side": self.side.value,
                     "trade_id": self.trade_id,
@@ -294,6 +308,11 @@ def normalize_qmt_trade(
             positive=True,
         ),
         observed_at=observed_at,
+        order_remark=_text(
+            _raw(payload, "order_remark"),
+            name="order_remark",
+            allow_blank=True,
+        ),
     )
 
 
@@ -488,6 +507,7 @@ class QmtReadOnlyBaseline:
                     "client_order_id": item.client_order_id,
                     "instrument": item.instrument,
                     "order_volume": item.order_volume,
+                    "order_remark": item.order_remark,
                     "raw_status": item.raw_status,
                     "side": item.side.value,
                     "state": item.state.value,

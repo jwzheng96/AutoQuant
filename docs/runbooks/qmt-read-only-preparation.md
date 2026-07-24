@@ -13,11 +13,23 @@ schema v37 将候选、异步请求号预留和券商订单号绑定拆成三张
 generation 的账本恢复关联簿后再解释委托回报；持久化事实缺失、哈希不符或身份重复时
 不得把订单猜测为新单，也不得继续接受新的候选。新的租约 generation 可以安全重用
 XtQuant 重新计数的请求序号，但不能跨 generation 解释回报。
+schema v38 在候选行上增加强制预提交阶段。未来网关必须先持久化完整候选、`stage_hash`
+和由候选哈希派生的 24 字符 ASCII `order_remark`，成功后才可把该 remark 传给
+`order_stock_async`；取得正整数 `seq` 后才能追加请求号预留。请求号预留不再隐式创建
+候选。当前租约 owner 可以跨历史 generation 读取“已预提交但没有请求号”的候选清单，
+但不能自动重试：它代表进程可能恰好在券商调用后、请求号落库前崩溃，必须保持停机并用
+完整券商委托查询和 remark 做后续恢复。当前版本尚未实现该恢复绑定，也没有券商 mutation
+调用，所以任何未决预提交记录都只是阻断证据。
 候选外键必须指向同一 holder 的真实 `acquire` 事件；预留事务还会锁定并检查当前租约
 未释放、未过期且 generation 未变化。候选预留、异步券商订单号绑定和重启恢复都必须
 提交当前租约 bearer token；数据库只比较其 SHA-256，并以数据库时钟在持有 lease 行锁
 期间重新验证 holder、generation 和有效期。仅知道 session id、holder 或历史 generation
 不能写入或恢复映射，旧进程在租约释放、超时或被接管后也不能处理迟到回报。
+
+迅投原生交易文档说明，异步委托先返回请求序号 `seq`，之后
+`on_order_stock_async_response` 才提供 `order_id`；`order_remark` 会进入委托、成交和
+错误回报，长度最多 24 个英文字符。AutoQuant 的预提交顺序和恢复标签严格按这一边界
+设计，参见 [XtQuant XtTrader 官方文档](https://dict.thinktrader.net/nativeApi/xttrader.html)。
 
 ## 前提
 
@@ -177,7 +189,8 @@ Windows 装配层建立连接并成功订阅账户后，按以下顺序构建只
    `query_stock_trades`；
 3. 再次记录 cursor；前后不同则丢弃全部查询结果并重试，不能拼接新旧快照；
 4. 只复制官方字段到普通标量字典；股票 `order_type` 通过当前 XtQuant 包的
-   `xtconstant.STOCK_BUY` / `STOCK_SELL` 映射为 `buy` / `sell`；
+   `xtconstant.STOCK_BUY` / `STOCK_SELL` 映射为 `buy` / `sell`；委托和成交中的
+   `order_remark` 必须逐笔复制、验证 24 字节上限并纳入基线哈希；
 5. 使用配置中的真实账号验证每条返回记录，但把内部 `AQ_PAPER_ACCOUNT_ID` 作为 logical
    account 交给持久化对账；
 6. 四项任一返回 `None`、状态未知、资产不平、委托/成交不收敛，都激活停机开关；
