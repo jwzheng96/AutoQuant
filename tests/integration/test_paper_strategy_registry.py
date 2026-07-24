@@ -21,6 +21,12 @@ from autoquant.backtest.rules import AshareRuleBook, SecurityStatus
 from autoquant.backtest.validation import SmaParameters
 from autoquant.data.models import DatasetManifest
 from autoquant.data.quality import QualityReport
+from autoquant.execution.compliance_approval import (
+    ComplianceApproval,
+    ComplianceRevocation,
+    ComplianceRevocationReason,
+    PostgresComplianceApprovalRepository,
+)
 from autoquant.execution.control import KillSwitchReason
 from autoquant.execution.control_store import (
     PostgresExecutionControlRepository,
@@ -42,6 +48,7 @@ from autoquant.execution.portfolio_validation import (
 )
 from autoquant.execution.promotion_audit import (
     PaperPromotionAuditor,
+    PaperPromotionPolicy,
     PostgresPaperPromotionFactRepository,
     PromotionGateCode,
 )
@@ -142,6 +149,7 @@ async def registry_fixture() -> AsyncIterator[
             "migrations/postgres/022_portfolio_validation.sql",
             "migrations/postgres/023_research_universes.sql",
             "migrations/postgres/024_research_data_campaigns.sql",
+            "migrations/postgres/036_paper_compliance_approvals.sql",
         )
     )
     report = QualityReport(
@@ -182,9 +190,7 @@ async def registry_fixture() -> AsyncIterator[
             now=AS_OF,
         )
         async with engine.begin() as connection:
-            await connection.exec_driver_sql(
-                f'SET LOCAL search_path TO "{schema}"'
-            )
+            await connection.exec_driver_sql(f'SET LOCAL search_path TO "{schema}"')
             await connection.execute(
                 text(
                     """
@@ -297,9 +303,7 @@ async def test_registry_replays_immutable_approval_and_revocation_chain(
     assert first == repeated == active
 
     with pytest.raises(ValueError, match="revoked before replacement"):
-        await registry.approve(
-            replace(registration, strategy_version="replacement-v2")
-        )
+        await registry.approve(replace(registration, strategy_version="replacement-v2"))
 
     await registry.revoke(
         account_id=registration.account_id,
@@ -332,9 +336,7 @@ async def test_registry_tables_reject_mutation(
 
     with pytest.raises(SQLAlchemyError):
         async with engine.begin() as connection:
-            await connection.exec_driver_sql(
-                f'SET LOCAL search_path TO "{schema}"'
-            )
+            await connection.exec_driver_sql(f'SET LOCAL search_path TO "{schema}"')
             await connection.execute(
                 text(
                     """
@@ -414,9 +416,7 @@ async def test_validation_campaign_atomically_queues_aligned_requests(
     assert listed == (first,)
     assert first.status == "queued"
     assert len(first.components) == 3
-    assert {
-        value.instrument for value in first.components
-    } == set(instruments)
+    assert {value.instrument for value in first.components} == set(instruments)
     with pytest.raises(ValueError, match="another specification"):
         await campaigns.create(
             replace(spec, slippage_bps=Decimal("6")),
@@ -424,9 +424,7 @@ async def test_validation_campaign_atomically_queues_aligned_requests(
         )
     with pytest.raises(SQLAlchemyError):
         async with engine.begin() as connection:
-            await connection.exec_driver_sql(
-                f'SET LOCAL search_path TO "{schema}"'
-            )
+            await connection.exec_driver_sql(f'SET LOCAL search_path TO "{schema}"')
             await connection.execute(
                 text(
                     """
@@ -508,20 +506,14 @@ async def test_portfolio_registry_activates_only_independent_components(
                 slippage_bps=Decimal("5"),
                 train_sessions=60,
                 test_sessions=20,
-                candidates=(
-                    {"fast_sessions": 5, "slow_sessions": 20},
-                ),
-                idempotency_key=(
-                    f"paper-portfolio-integration-000{index}"
-                ),
+                candidates=({"fast_sessions": 5, "slow_sessions": 20},),
+                idempotency_key=(f"paper-portfolio-integration-000{index}"),
             ),
             requested_by="researcher",
             now=AS_OF,
         )
         async with engine.begin() as connection:
-            await connection.exec_driver_sql(
-                f'SET LOCAL search_path TO "{schema}"'
-            )
+            await connection.exec_driver_sql(f'SET LOCAL search_path TO "{schema}"')
             await connection.execute(
                 text(
                     """
@@ -564,9 +556,7 @@ async def test_portfolio_registry_activates_only_independent_components(
                     {
                         "experiment_id": experiment.experiment_id,
                         "sequence": sequence,
-                        "fold_hash": (
-                            f"{index * 10 + sequence:064x}"
-                        ),
+                        "fold_hash": (f"{index * 10 + sequence:064x}"),
                     },
                 )
         rules = AshareRuleBook().resolve(
@@ -623,9 +613,7 @@ async def test_portfolio_registry_activates_only_independent_components(
         tuple(
             PortfolioOosComponentEvidence(
                 experiment_id=component.experiment_id,
-                validation_result_hash=(
-                    component.validation_result_hash
-                ),
+                validation_result_hash=(component.validation_result_hash),
                 instrument=component.instrument,
                 allocation=component.allocation,
                 folds=tuple(
@@ -702,9 +690,7 @@ async def test_portfolio_registry_activates_only_independent_components(
         await single_registry.approve(components[0])
     with pytest.raises(SQLAlchemyError):
         async with engine.begin() as connection:
-            await connection.exec_driver_sql(
-                f'SET LOCAL search_path TO "{schema}"'
-            )
+            await connection.exec_driver_sql(f'SET LOCAL search_path TO "{schema}"')
             await connection.execute(
                 text(
                     """
@@ -911,9 +897,7 @@ async def test_qmt_readonly_acceptance_persists_only_redacted_fenced_evidence(
     )
 
     assert stored == evidence
-    assert (
-        await acceptances.latest(logical_account_id="paper-main")
-    ) == evidence
+    assert (await acceptances.latest(logical_account_id="paper-main")) == evidence
     async with engine.connect() as connection:
         payload = await connection.scalar(
             text(
@@ -982,21 +966,99 @@ async def test_promotion_facts_are_read_from_one_fail_closed_snapshot(
         strategy_id=registration.strategy_id,
         now=APPROVED_AT + timedelta(hours=1),
         lookback_days=180,
+        policy_hash=PaperPromotionPolicy().policy_hash,
     )
     report = PaperPromotionAuditor().evaluate(facts)
 
     assert facts.kill_switch_active is True
     assert facts.control_state_hash == state.state_hash
-    assert (
-        facts.active_registration_hash
-        == registration.registration_hash
-    )
+    assert facts.active_registration_hash == registration.registration_hash
     assert facts.sessions == ()
     assert facts.scheduler_sessions == ()
     assert facts.filled_order_count == 0
     assert report.live_trading_ready is False
     assert PromotionGateCode.PAPER_SESSION_COUNT in report.blockers
     assert PromotionGateCode.QMT_ACCEPTANCE_FRESH in report.blockers
+
+
+@pytest.mark.asyncio
+async def test_compliance_approval_is_scope_bound_revocable_and_immutable(
+    registry_fixture: tuple[
+        PostgresPaperStrategyRegistry,
+        ValidatedSmaRegistration,
+        AsyncEngine,
+        str,
+    ],
+) -> None:
+    registry, registration, engine, schema = registry_fixture
+    await registry.approve(registration)
+    policy = PaperPromotionPolicy()
+    repository = PostgresComplianceApprovalRepository(
+        engine=engine,
+        schema=schema,
+    )
+    approval = ComplianceApproval(
+        account_id=registration.account_id,
+        strategy_id=registration.strategy_id,
+        registration_hash=registration.registration_hash,
+        policy_hash=policy.policy_hash,
+        external_artifact_hash="9" * 64,
+        approval_reference="GRC/AQ/2026-0001",
+        approved_by="independent-compliance",
+        approved_at=APPROVED_AT + timedelta(minutes=10),
+        valid_until=APPROVED_AT + timedelta(days=7),
+    )
+
+    assert await repository.approve(approval) == approval
+    assert await repository.approve(approval) == approval
+    with pytest.raises(ValueError, match="identity"):
+        await repository.approve(
+            replace(
+                approval,
+                external_artifact_hash="8" * 64,
+            )
+        )
+    facts_repository = PostgresPaperPromotionFactRepository(
+        engine=engine,
+        schema=schema,
+    )
+    active = await facts_repository.read(
+        account_id=registration.account_id,
+        strategy_id=registration.strategy_id,
+        now=APPROVED_AT + timedelta(hours=1),
+        lookback_days=180,
+        policy_hash=policy.policy_hash,
+    )
+    assert active.compliance_approval_hash == approval.approval_hash
+
+    revocation = ComplianceRevocation(
+        approval_hash=approval.approval_hash,
+        revoked_by="risk-operator",
+        revoked_at=APPROVED_AT + timedelta(hours=2),
+        reason=ComplianceRevocationReason.RISK_CHANGED,
+    )
+    assert await repository.revoke(revocation) == revocation
+    revoked = await facts_repository.read(
+        account_id=registration.account_id,
+        strategy_id=registration.strategy_id,
+        now=APPROVED_AT + timedelta(hours=3),
+        lookback_days=180,
+        policy_hash=policy.policy_hash,
+    )
+    assert revoked.compliance_approval_hash is None
+
+    with pytest.raises(SQLAlchemyError):
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    f"""
+                    UPDATE {schema}.paper_compliance_approvals
+                    SET approved_by = approved_by
+                    WHERE approval_hash = :approval_hash
+                    """
+                ),
+                {"approval_hash": approval.approval_hash},
+            )
 
 
 @pytest.mark.asyncio

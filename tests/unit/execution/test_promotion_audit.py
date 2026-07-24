@@ -74,9 +74,7 @@ def _fills() -> tuple[FilledOrderPromotionEvidence, ...]:
     fills: list[FilledOrderPromotionEvidence] = []
     for offset in range(30):
         instrument = instruments[offset % len(instruments)]
-        buy_time = datetime(2026, 5, 1, 2, tzinfo=UTC) + timedelta(
-            days=offset * 2
-        )
+        buy_time = datetime(2026, 5, 1, 2, tzinfo=UTC) + timedelta(days=offset * 2)
         fills.extend(
             (
                 FilledOrderPromotionEvidence(
@@ -119,6 +117,8 @@ def _facts(
         active_registration_hash="b" * 64,
         qmt_evidence_hash="c" * 64,
         qmt_observed_at=CAPTURED_AT - timedelta(hours=1),
+        compliance_approval_hash=None,
+        compliance_valid_until=None,
         sessions=sessions,
         scheduler_sessions=scheduler,
         fills=fill_evidence,
@@ -199,6 +199,38 @@ def test_both_qmt_recovery_drills_remove_the_windows_blocker() -> None:
     assert report.live_trading_ready is False
 
 
+def test_active_compliance_artifact_can_pass_only_evidence_gate() -> None:
+    sessions = _sessions()
+    facts = replace(
+        _facts(sessions=sessions, scheduler=_scheduler(sessions)),
+        qmt_recovery_drill_kinds=tuple(QmtRecoveryDrillKind),
+        compliance_approval_hash="d" * 64,
+        compliance_valid_until=CAPTURED_AT + timedelta(days=7),
+    )
+
+    report = PaperPromotionAuditor().evaluate(facts)
+
+    assert report.blockers == ()
+    assert report.evidence_gates_passed is True
+    assert report.live_trading_ready is False
+
+
+def test_expired_compliance_artifact_fails_closed() -> None:
+    facts = replace(
+        _facts(),
+        compliance_approval_hash="d" * 64,
+        compliance_valid_until=CAPTURED_AT - timedelta(seconds=1),
+    )
+
+    gate = _gate(
+        facts,
+        PromotionGateCode.COMPLIANCE_APPROVAL,
+    )
+
+    assert gate.passed is False
+    assert gate.actual == "missing_or_expired"
+
+
 def test_qmt_time_and_scheduler_failures_are_fail_closed() -> None:
     sessions = _sessions()
     scheduler = _scheduler(sessions, failure_offset=10)
@@ -265,17 +297,11 @@ def test_instrument_and_month_concentration_are_independent_gates() -> None:
         replace(
             session,
             end_equity=session.day_start_equity
-            * (
-                Decimal("1.01")
-                if session.session_date.month == 5
-                else Decimal("0.999")
-            ),
+            * (Decimal("1.01") if session.session_date.month == 5 else Decimal("0.999")),
         )
         for session in _sessions()
     )
-    one_instrument_fills = tuple(
-        replace(fill, instrument="600000.XSHG") for fill in _fills()
-    )
+    one_instrument_fills = tuple(replace(fill, instrument="600000.XSHG") for fill in _fills())
     facts = _facts(
         sessions=sessions,
         scheduler=_scheduler(sessions),
@@ -307,12 +333,8 @@ def test_fact_hash_is_independent_of_evidence_input_order() -> None:
         sessions=tuple(reversed(sessions)),
         scheduler_sessions=tuple(reversed(scheduler)),
         fills=tuple(reversed(ordered.fills)),
-        reconciled_session_dates=tuple(
-            reversed(ordered.reconciled_session_dates)
-        ),
-        kill_switch_drill_dates=tuple(
-            reversed(ordered.kill_switch_drill_dates)
-        ),
+        reconciled_session_dates=tuple(reversed(ordered.reconciled_session_dates)),
+        kill_switch_drill_dates=tuple(reversed(ordered.kill_switch_drill_dates)),
     )
 
     assert ordered.fact_hash == reversed_facts.fact_hash
@@ -326,16 +348,10 @@ def test_fact_hash_is_independent_of_evidence_input_order() -> None:
     "factory",
     (
         lambda: PaperPromotionPolicy(minimum_paper_sessions=0),
-        lambda: PaperPromotionPolicy(
-            minimum_healthy_minutes_per_session=241
-        ),
-        lambda: PaperPromotionPolicy(
-            minimum_profitable_session_rate=Decimal("0")
-        ),
+        lambda: PaperPromotionPolicy(minimum_healthy_minutes_per_session=241),
+        lambda: PaperPromotionPolicy(minimum_profitable_session_rate=Decimal("0")),
         lambda: PaperPromotionPolicy(maximum_drawdown=Decimal("1")),
-        lambda: PaperPromotionPolicy(
-            maximum_qmt_acceptance_age=timedelta(0)
-        ),
+        lambda: PaperPromotionPolicy(maximum_qmt_acceptance_age=timedelta(0)),
     ),
 )
 def test_policy_rejects_unsafe_thresholds(

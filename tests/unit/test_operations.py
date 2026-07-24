@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any, cast
@@ -22,6 +22,7 @@ from autoquant.operations import (
     _RecyclingDailyDatasetReader,
     _validate_campaign_dataset,
     approve_paper_sma_strategy,
+    create_compliance_approval,
     revoke_paper_strategy,
 )
 
@@ -169,6 +170,59 @@ def _settings() -> AppSettings:
         postgres_dsn="postgresql+asyncpg://configured",
         clickhouse_dsn="clickhouse://configured",
     )
+
+
+@pytest.mark.asyncio
+async def test_compliance_approval_enforces_separation_before_write() -> None:
+    registry = MagicMock()
+    registry.active = AsyncMock(
+        return_value=MagicMock(
+            approved_by="strategy-operator",
+            registration_hash="a" * 64,
+        )
+    )
+    registry.close = AsyncMock()
+    execution_controls = MagicMock()
+    execution_controls.replay = AsyncMock()
+    execution_controls.close = AsyncMock()
+    approvals = MagicMock()
+    approvals.approve = AsyncMock()
+    approvals.close = AsyncMock()
+    control = MagicMock()
+    control.close = AsyncMock()
+    with (
+        patch(
+            "autoquant.operations.PostgresPaperDeploymentRegistry.connect",
+            return_value=registry,
+        ),
+        patch(
+            "autoquant.operations.PostgresExecutionControlRepository.connect",
+            return_value=execution_controls,
+        ),
+        patch(
+            "autoquant.operations.PostgresComplianceApprovalRepository.connect",
+            return_value=approvals,
+        ),
+        patch(
+            "autoquant.operations.PostgresControlRepository.connect",
+            return_value=control,
+        ),
+    ):
+        with pytest.raises(ValueError, match="must differ"):
+            await create_compliance_approval(
+                _settings(),
+                external_artifact_hash="b" * 64,
+                approval_reference="GRC/AQ/2026-0001",
+                approved_by="strategy-operator",
+                valid_until=NOW + timedelta(days=7),
+            )
+
+    execution_controls.replay.assert_not_awaited()
+    approvals.approve.assert_not_awaited()
+    control.close.assert_awaited_once()
+    approvals.close.assert_awaited_once()
+    execution_controls.close.assert_awaited_once()
+    registry.close.assert_awaited_once()
 
 
 @pytest.mark.asyncio

@@ -87,9 +87,39 @@ uv run autoquant promotion-check
 7. 最后接入独立合规批准和撤销流程。
 
 `windows_recovery_drills` 只有在 schema v18 中分别完成断网和 MiniQMT 重启挑战后才通过；
-具体步骤见 [QMT 只读接入准备手册](qmt-read-only-preparation.md)。当前
-`compliance_approval` 仍显示 `not_persisted`，因为项目尚未实现独立合规批准工件。该项
-不能用人工口头确认、截图或数据库补值绕过。
+具体步骤见 [QMT 只读接入准备手册](qmt-read-only-preparation.md)。
+schema v36 和晋级政策 v2 提供独立的合规批准与撤销追加账本。它不会生成批准；只有在策略
+已经获得模拟盘批准、持久化停机开关仍为 active、独立合规角色不同于策略批准人，并且
+存在外部签署工件的 SHA-256 时，才允许显式记录：
+
+```bash
+uv run autoquant compliance-approve \
+  --external-artifact-hash <signed-artifact-sha256> \
+  --approval-reference GRC/AQ/2026-0001 \
+  --approved-by independent-compliance \
+  --valid-until 2026-08-01T00:00:00Z \
+  --confirm-independent-compliance
+```
+
+批准严格绑定当前模拟盘 `registration_hash` 和当前晋级 `policy_hash`，最长有效 31 天。
+策略重新批准、政策改变、过期或追加撤销后，`promotion-check` 都会重新阻断。命令输出和
+数据库工件继续声明 `live_trading_locked=true`，即使全部证据门禁通过，
+`live_trading_ready` 仍为 false。
+
+任何安全角色都可追加撤销；撤销比批准更宽松，不要求停机开关当前可用：
+
+```bash
+uv run autoquant compliance-revoke \
+  --approval-hash <approval-hash> \
+  --revoked-by risk-operator \
+  --reason operator_safety_action \
+  --confirm-revocation
+```
+
+允许的撤销原因只有 `scope_changed`、`risk_changed`、
+`external_approval_withdrawn` 和 `operator_safety_action`。批准和撤销表都拒绝
+UPDATE/DELETE；不得用人工口头确认、未签名截图或数据库补值绕过。当前仓库和数据库不会
+自动创建任何合规批准。
 
 ## 晋级原则
 

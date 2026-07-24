@@ -173,6 +173,84 @@ def test_promotion_check_emits_redacted_blockers_and_exits_nonzero() -> None:
     assert "token" not in result.stdout.lower()
 
 
+def test_compliance_approval_requires_confirmation_and_is_redacted() -> None:
+    command = [
+        "compliance-approve",
+        "--external-artifact-hash",
+        "a" * 64,
+        "--approval-reference",
+        "GRC/AQ/2026-0001",
+        "--approved-by",
+        "independent-compliance",
+        "--valid-until",
+        "2026-08-01T00:00:00Z",
+    ]
+
+    denied = runner.invoke(app, command)
+
+    assert denied.exit_code == 2
+    approval = AsyncMock(
+        return_value={
+            "approval_hash": "b" * 64,
+            "live_trading_locked": True,
+            "status": ("approved_for_promotion_audit_only"),
+        }
+    )
+    with patch(
+        "autoquant.cli.create_compliance_approval",
+        new=approval,
+    ):
+        accepted = runner.invoke(
+            app,
+            [
+                *command,
+                "--confirm-independent-compliance",
+            ],
+            env={"AQ_POSTGRES_DSN": ("postgresql+asyncpg://sensitive")},
+        )
+
+    assert accepted.exit_code == 0
+    assert json.loads(accepted.stdout)["live_trading_locked"] is True
+    assert "sensitive" not in accepted.stdout
+    approval.assert_awaited_once()
+
+
+def test_compliance_revocation_requires_confirmation() -> None:
+    command = [
+        "compliance-revoke",
+        "--approval-hash",
+        "a" * 64,
+        "--revoked-by",
+        "risk-operator",
+        "--reason",
+        "operator_safety_action",
+    ]
+
+    denied = runner.invoke(app, command)
+
+    assert denied.exit_code == 2
+    revocation = AsyncMock(
+        return_value={
+            "approval_hash": "a" * 64,
+            "live_trading_locked": True,
+            "revocation_hash": "b" * 64,
+            "status": "revoked",
+        }
+    )
+    with patch(
+        "autoquant.cli.revoke_compliance_approval",
+        new=revocation,
+    ):
+        accepted = runner.invoke(
+            app,
+            [*command, "--confirm-revocation"],
+        )
+
+    assert accepted.exit_code == 0
+    assert json.loads(accepted.stdout)["status"] == "revoked"
+    revocation.assert_awaited_once()
+
+
 def test_run_paper_refuses_non_windows_before_database_or_quote_connection() -> None:
     secret = "paper-runtime-lease-secret-value-0001"
     result = runner.invoke(

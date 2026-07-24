@@ -22,6 +22,9 @@ from autoquant.data.availability import HistoricalMinutePolicy
 from autoquant.data.ingestion import IngestionRequest, IngestionService
 from autoquant.data.quality import MinuteBarQualityGate
 from autoquant.errors import AutoQuantError, MissingCapabilityError
+from autoquant.execution.compliance_approval import (
+    ComplianceRevocationReason,
+)
 from autoquant.execution.control_store import PostgresExecutionControlRepository
 from autoquant.execution.qmt_preflight import inspect_qmt_readiness
 from autoquant.execution.qmt_recovery_drill import QmtRecoveryDrillKind
@@ -34,6 +37,7 @@ from autoquant.operations import (
     compile_fundamental_research_panel,
     compile_research_input,
     complete_qmt_recovery_drill,
+    create_compliance_approval,
     create_low_volatility_forward_session_campaign,
     create_portfolio_validation,
     create_research_data_campaign,
@@ -54,6 +58,7 @@ from autoquant.operations import (
     inspect_research_input_shard,
     inspect_validation_campaign,
     retry_research_data_campaign_item,
+    revoke_compliance_approval,
     revoke_paper_strategy,
     run_daily_ingestion,
     run_dynamic_validation,
@@ -486,6 +491,92 @@ def promotion_check() -> None:
     _emit(payload)
     if payload["status"] != "ok":
         raise typer.Exit(code=2)
+
+
+@app.command("compliance-approve")
+def compliance_approve(
+    external_artifact_hash: Annotated[
+        str,
+        typer.Option("--external-artifact-hash"),
+    ],
+    approval_reference: Annotated[
+        str,
+        typer.Option("--approval-reference"),
+    ],
+    approved_by: Annotated[
+        str,
+        typer.Option("--approved-by"),
+    ],
+    valid_until: Annotated[
+        str,
+        typer.Option("--valid-until"),
+    ],
+    confirm_independent_compliance: Annotated[
+        bool,
+        typer.Option("--confirm-independent-compliance"),
+    ] = False,
+) -> None:
+    """Record external compliance scope; never unlock trading."""
+
+    if not confirm_independent_compliance:
+        _fail("independent compliance confirmation is required")
+    try:
+        payload = asyncio.run(
+            create_compliance_approval(
+                _settings(),
+                external_artifact_hash=external_artifact_hash,
+                approval_reference=approval_reference,
+                approved_by=approved_by,
+                valid_until=_parse_instant(
+                    valid_until,
+                    name="valid-until",
+                ),
+            )
+        )
+    except MissingCapabilityError as error:
+        _fail(str(error))
+    except (AutoQuantError, LookupError, ValueError):
+        _fail("compliance approval failed closed")
+    _emit(payload)
+
+
+@app.command("compliance-revoke")
+def compliance_revoke(
+    approval_hash: Annotated[
+        str,
+        typer.Option("--approval-hash"),
+    ],
+    revoked_by: Annotated[
+        str,
+        typer.Option("--revoked-by"),
+    ],
+    reason: Annotated[
+        ComplianceRevocationReason,
+        typer.Option("--reason"),
+    ],
+    confirm_revocation: Annotated[
+        bool,
+        typer.Option("--confirm-revocation"),
+    ] = False,
+) -> None:
+    """Append a compliance revocation while trading stays locked."""
+
+    if not confirm_revocation:
+        _fail("compliance revocation confirmation is required")
+    try:
+        payload = asyncio.run(
+            revoke_compliance_approval(
+                _settings(),
+                approval_hash=approval_hash,
+                revoked_by=revoked_by,
+                reason=reason,
+            )
+        )
+    except MissingCapabilityError as error:
+        _fail(str(error))
+    except (AutoQuantError, LookupError, ValueError):
+        _fail("compliance revocation failed closed")
+    _emit(payload)
 
 
 async def _run_resident_paper(settings: AppSettings) -> None:

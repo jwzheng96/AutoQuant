@@ -102,6 +102,12 @@ from autoquant.errors import (
     VendorRateLimitError,
     VendorResponseError,
 )
+from autoquant.execution.compliance_approval import (
+    ComplianceApproval,
+    ComplianceRevocation,
+    ComplianceRevocationReason,
+    PostgresComplianceApprovalRepository,
+)
 from autoquant.execution.control import KillSwitchReason
 from autoquant.execution.control_store import PostgresExecutionControlRepository
 from autoquant.execution.paper_deployment import (
@@ -3306,6 +3312,7 @@ async def inspect_paper_promotion(
             strategy_id=settings.paper_strategy_id,
             now=datetime.now(UTC),
             lookback_days=policy.evidence_lookback_days,
+            policy_hash=policy.policy_hash,
         )
         report = PaperPromotionAuditor(policy=policy).evaluate(facts)
         return {
@@ -3328,6 +3335,139 @@ async def inspect_paper_promotion(
         }
     finally:
         await repository.close()
+
+
+async def create_compliance_approval(
+    settings: AppSettings,
+    *,
+    external_artifact_hash: str,
+    approval_reference: str,
+    approved_by: str,
+    valid_until: datetime,
+) -> dict[str, object]:
+    """Persist separately attested paper-promotion compliance scope."""
+
+    if settings.environment is not RuntimeEnvironment.PAPER:
+        raise MissingCapabilityError("paper environment is not configured")
+    if settings.live_trading_enabled:
+        raise MissingCapabilityError("compliance approval requires live trading locked")
+    postgres_dsn = configured_dsn(
+        settings.postgres_dsn,
+        capability="PostgreSQL",
+    )
+    registry = PostgresPaperDeploymentRegistry.connect(dsn=postgres_dsn)
+    execution_controls = PostgresExecutionControlRepository.connect(dsn=postgres_dsn)
+    approvals = PostgresComplianceApprovalRepository.connect(dsn=postgres_dsn)
+    control = PostgresControlRepository.connect(dsn=postgres_dsn)
+    try:
+        registration = await registry.active(
+            account_id=settings.paper_account_id,
+            strategy_id=settings.paper_strategy_id,
+        )
+        if registration is None:
+            raise ValueError("compliance approval requires an active paper registration")
+        if approved_by.strip().casefold() == registration.approved_by.strip().casefold():
+            raise ValueError("compliance actor must differ from strategy approver")
+        execution_control = await execution_controls.replay(account_id=settings.paper_account_id)
+        if not execution_control.active:
+            raise MissingCapabilityError("compliance approval requires the kill switch active")
+        policy = PaperPromotionPolicy()
+        approval = ComplianceApproval(
+            account_id=settings.paper_account_id,
+            strategy_id=settings.paper_strategy_id,
+            registration_hash=(registration.registration_hash),
+            policy_hash=policy.policy_hash,
+            external_artifact_hash=external_artifact_hash,
+            approval_reference=approval_reference,
+            approved_by=approved_by,
+            approved_at=datetime.now(UTC),
+            valid_until=valid_until,
+        )
+        stored = await approvals.approve(approval)
+        payload: dict[str, object] = {
+            "account_scope": "configured_paper_account",
+            "approval_hash": stored.approval_hash,
+            "approval_reference": (stored.approval_reference),
+            "approved_at": stored.approved_at.isoformat(),
+            "external_artifact_hash": (stored.external_artifact_hash),
+            "live_trading_locked": True,
+            "policy_hash": stored.policy_hash,
+            "registration_hash": stored.registration_hash,
+            "status": "approved_for_promotion_audit_only",
+            "strategy_id": stored.strategy_id,
+            "valid_until": stored.valid_until.isoformat(),
+            "version": stored.version,
+        }
+        await control.append_audit_event(
+            "compliance.paper_promotion.approved",
+            stored.approved_at,
+            {
+                **payload,
+                "approved_by": stored.approved_by,
+            },
+        )
+        return payload
+    finally:
+        await control.close()
+        await approvals.close()
+        await execution_controls.close()
+        await registry.close()
+
+
+async def revoke_compliance_approval(
+    settings: AppSettings,
+    *,
+    approval_hash: str,
+    revoked_by: str,
+    reason: ComplianceRevocationReason,
+) -> dict[str, object]:
+    """Append a safety revocation without changing any trading control."""
+
+    if settings.environment is not RuntimeEnvironment.PAPER:
+        raise MissingCapabilityError("paper environment is not configured")
+    if settings.live_trading_enabled:
+        raise MissingCapabilityError("compliance revocation requires live trading locked")
+    postgres_dsn = configured_dsn(
+        settings.postgres_dsn,
+        capability="PostgreSQL",
+    )
+    approvals = PostgresComplianceApprovalRepository.connect(dsn=postgres_dsn)
+    control = PostgresControlRepository.connect(dsn=postgres_dsn)
+    try:
+        approval = await approvals.read(approval_hash)
+        if (
+            approval.account_id != settings.paper_account_id
+            or approval.strategy_id != settings.paper_strategy_id
+        ):
+            raise ValueError("compliance approval is outside configured scope")
+        revocation = ComplianceRevocation(
+            approval_hash=approval.approval_hash,
+            revoked_by=revoked_by,
+            revoked_at=datetime.now(UTC),
+            reason=reason,
+        )
+        stored = await approvals.revoke(revocation)
+        payload: dict[str, object] = {
+            "approval_hash": stored.approval_hash,
+            "live_trading_locked": True,
+            "reason": stored.reason.value,
+            "revocation_hash": stored.revocation_hash,
+            "revoked_at": stored.revoked_at.isoformat(),
+            "status": "revoked",
+            "version": stored.version,
+        }
+        await control.append_audit_event(
+            "compliance.paper_promotion.revoked",
+            stored.revoked_at,
+            {
+                **payload,
+                "revoked_by": stored.revoked_by,
+            },
+        )
+        return payload
+    finally:
+        await control.close()
+        await approvals.close()
 
 
 async def start_qmt_recovery_drill(

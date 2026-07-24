@@ -1211,6 +1211,7 @@ class ConsoleService:
             strategy_id=self._settings.paper_strategy_id,
             now=self._now(),
             lookback_days=policy.evidence_lookback_days,
+            policy_hash=policy.policy_hash,
         )
         report = PaperPromotionAuditor(policy=policy).evaluate(facts)
         return PaperPromotionStatus(

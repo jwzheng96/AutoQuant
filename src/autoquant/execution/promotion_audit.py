@@ -93,28 +93,18 @@ class PaperPromotionPolicy:
             ),
             ("evidence_lookback_days", self.evidence_lookback_days),
         ):
-            if (
-                not isinstance(count_value, int)
-                or isinstance(count_value, bool)
-                or count_value < 1
-            ):
+            if not isinstance(count_value, int) or isinstance(count_value, bool) or count_value < 1:
                 raise ValueError(f"{count_name} must be positive")
         if self.minimum_healthy_minutes_per_session > 240:
-            raise ValueError(
-                "minimum healthy minutes cannot exceed the A-share session"
-            )
-        if (
-            not Decimal("0") < self.minimum_profitable_session_rate <= 1
-        ):
-            raise ValueError(
-                "minimum profitable session rate must be in (0, 1]"
-            )
+            raise ValueError("minimum healthy minutes cannot exceed the A-share session")
+        if not Decimal("0") < self.minimum_profitable_session_rate <= 1:
+            raise ValueError("minimum profitable session rate must be in (0, 1]")
         if not Decimal("0") < self.maximum_drawdown < 1:
             raise ValueError("maximum drawdown must be in (0, 1)")
-        if (
-            not Decimal("0") < self.minimum_effective_trade_samples
-            or self.minimum_effective_trade_samples
-            > Decimal(self.minimum_closed_trades)
+        if not Decimal(
+            "0"
+        ) < self.minimum_effective_trade_samples or self.minimum_effective_trade_samples > Decimal(
+            self.minimum_closed_trades
         ):
             raise ValueError(
                 "minimum effective trade samples must be positive and "
@@ -123,13 +113,9 @@ class PaperPromotionPolicy:
         if not Decimal("0") <= self.maximum_rejection_rate < 1:
             raise ValueError("maximum rejection rate must be in [0, 1)")
         if not Decimal("0") < self.maximum_monthly_profit_contribution <= 1:
-            raise ValueError(
-                "maximum monthly profit contribution must be in (0, 1]"
-            )
+            raise ValueError("maximum monthly profit contribution must be in (0, 1]")
         if self.maximum_qmt_acceptance_age <= timedelta(0):
-            raise ValueError(
-                "maximum QMT acceptance age must be positive"
-            )
+            raise ValueError("maximum QMT acceptance age must be positive")
         object.__setattr__(
             self,
             "policy_hash",
@@ -143,32 +129,20 @@ class PaperPromotionPolicy:
             "maximum_monthly_profit_contribution": _decimal_text(
                 self.maximum_monthly_profit_contribution
             ),
-            "maximum_rejection_rate": _decimal_text(
-                self.maximum_rejection_rate
-            ),
+            "maximum_rejection_rate": _decimal_text(self.maximum_rejection_rate),
             "maximum_qmt_acceptance_age_seconds": int(
                 self.maximum_qmt_acceptance_age.total_seconds()
             ),
             "minimum_filled_orders": self.minimum_filled_orders,
             "minimum_closed_trades": self.minimum_closed_trades,
-            "minimum_effective_trade_samples": _decimal_text(
-                self.minimum_effective_trade_samples
-            ),
-            "minimum_filled_instruments": (
-                self.minimum_filled_instruments
-            ),
-            "minimum_healthy_minutes_per_session": (
-                self.minimum_healthy_minutes_per_session
-            ),
-            "minimum_kill_switch_drills": (
-                self.minimum_kill_switch_drills
-            ),
+            "minimum_effective_trade_samples": _decimal_text(self.minimum_effective_trade_samples),
+            "minimum_filled_instruments": (self.minimum_filled_instruments),
+            "minimum_healthy_minutes_per_session": (self.minimum_healthy_minutes_per_session),
+            "minimum_kill_switch_drills": (self.minimum_kill_switch_drills),
             "minimum_profitable_months": self.minimum_profitable_months,
             "minimum_paper_sessions": self.minimum_paper_sessions,
-            "minimum_profitable_session_rate": _decimal_text(
-                self.minimum_profitable_session_rate
-            ),
-            "version": "paper-live-promotion-policy-v1",
+            "minimum_profitable_session_rate": _decimal_text(self.minimum_profitable_session_rate),
+            "version": "paper-live-promotion-policy-v2",
         }
 
 
@@ -186,28 +160,19 @@ class PaperSessionPromotionEvidence:
             name="paper session promotion observed_at",
         )
         if observed_at.astimezone(_SHANGHAI).date() != self.session_date:
-            raise ValueError(
-                "paper promotion session observation belongs to another date"
-            )
+            raise ValueError("paper promotion session observation belongs to another date")
         for name, value in (
             ("day_start_equity", self.day_start_equity),
             ("end_equity", self.end_equity),
         ):
-            if (
-                not isinstance(value, Decimal)
-                or not value.is_finite()
-                or value <= 0
-            ):
+            if not isinstance(value, Decimal) or not value.is_finite() or value <= 0:
                 raise ValueError(f"{name} must be positive and finite")
         _require_lowercase_sha256(self.state_hash, name="state_hash")
         object.__setattr__(self, "observed_at", observed_at)
 
     @property
     def closed(self) -> bool:
-        return (
-            self.observed_at.astimezone(_SHANGHAI).time()
-            >= _CLOSE_EVIDENCE_TIME
-        )
+        return self.observed_at.astimezone(_SHANGHAI).time() >= _CLOSE_EVIDENCE_TIME
 
     @property
     def session_return(self) -> Decimal:
@@ -236,20 +201,14 @@ class SchedulerPromotionEvidence:
             ("healthy_minute_count", self.healthy_minute_count),
             ("failure_count", self.failure_count),
         ):
-            if (
-                not isinstance(count_value, int)
-                or isinstance(count_value, bool)
-                or count_value < 0
-            ):
+            if not isinstance(count_value, int) or isinstance(count_value, bool) or count_value < 0:
                 raise ValueError(f"{count_name} must be nonnegative")
         latest = to_utc(
             self.latest_evaluated_at,
             name="scheduler promotion time",
         )
         if latest.astimezone(_SHANGHAI).date() != self.session_date:
-            raise ValueError(
-                "scheduler promotion evidence belongs to another date"
-            )
+            raise ValueError("scheduler promotion evidence belongs to another date")
         _require_lowercase_sha256(
             self.latest_event_hash,
             name="latest_event_hash",
@@ -260,9 +219,7 @@ class SchedulerPromotionEvidence:
         return {
             "failure_count": self.failure_count,
             "healthy_minute_count": self.healthy_minute_count,
-            "latest_evaluated_at": _datetime_text(
-                self.latest_evaluated_at
-            ),
+            "latest_evaluated_at": _datetime_text(self.latest_evaluated_at),
             "latest_event_hash": self.latest_event_hash,
             "session_date": self.session_date.isoformat(),
         }
@@ -292,11 +249,7 @@ class FilledOrderPromotionEvidence:
             ("fill_price", self.fill_price),
             ("estimated_price", self.estimated_price),
         ):
-            if (
-                not isinstance(value, Decimal)
-                or not value.is_finite()
-                or value <= 0
-            ):
+            if not isinstance(value, Decimal) or not value.is_finite() or value <= 0:
                 raise ValueError(f"{name} must be positive and finite")
         object.__setattr__(
             self,
@@ -336,6 +289,8 @@ class PaperPromotionFacts:
     active_registration_hash: str | None
     qmt_evidence_hash: str | None
     qmt_observed_at: datetime | None
+    compliance_approval_hash: str | None
+    compliance_valid_until: datetime | None
     sessions: tuple[PaperSessionPromotionEvidence, ...]
     scheduler_sessions: tuple[SchedulerPromotionEvidence, ...]
     fills: tuple[FilledOrderPromotionEvidence, ...]
@@ -371,6 +326,10 @@ class PaperPromotionFacts:
                 self.active_registration_hash,
             ),
             ("qmt_evidence_hash", self.qmt_evidence_hash),
+            (
+                "compliance_approval_hash",
+                self.compliance_approval_hash,
+            ),
         ):
             if value is not None:
                 _require_lowercase_sha256(value, name=name)
@@ -385,6 +344,21 @@ class PaperPromotionFacts:
         if (self.qmt_evidence_hash is None) != (qmt_time is None):
             raise ValueError("QMT promotion evidence is incomplete")
         object.__setattr__(self, "qmt_observed_at", qmt_time)
+        compliance_time = (
+            None
+            if self.compliance_valid_until is None
+            else to_utc(
+                self.compliance_valid_until,
+                name="compliance approval expiry",
+            )
+        )
+        if (self.compliance_approval_hash is None) != (compliance_time is None):
+            raise ValueError("compliance approval evidence is incomplete")
+        object.__setattr__(
+            self,
+            "compliance_valid_until",
+            compliance_time,
+        )
         sessions = tuple(sorted(self.sessions, key=lambda item: item.session_date))
         scheduler = tuple(
             sorted(
@@ -410,10 +384,7 @@ class PaperPromotionFacts:
                 key=lambda value: value.value,
             )
         )
-        if any(
-            not isinstance(value, QmtRecoveryDrillKind)
-            for value in qmt_drills
-        ):
+        if any(not isinstance(value, QmtRecoveryDrillKind) for value in qmt_drills):
             raise TypeError("QMT recovery drill evidence is invalid")
         if len({item.session_date for item in sessions}) != len(sessions):
             raise ValueError("paper promotion sessions must be unique")
@@ -434,9 +405,7 @@ class PaperPromotionFacts:
             or not self.approved_slippage_bps.is_finite()
             or self.approved_slippage_bps < 0
         ):
-            raise ValueError(
-                "approved_slippage_bps must be nonnegative and finite"
-            )
+            raise ValueError("approved_slippage_bps must be nonnegative and finite")
         for count_name, count_value in (
             (
                 "failed_reconciliation_count",
@@ -448,11 +417,7 @@ class PaperPromotionFacts:
             ("unknown_order_count", self.unknown_order_count),
             ("risk_decision_count", self.risk_decision_count),
         ):
-            if (
-                not isinstance(count_value, int)
-                or isinstance(count_value, bool)
-                or count_value < 0
-            ):
+            if not isinstance(count_value, int) or isinstance(count_value, bool) or count_value < 0:
                 raise ValueError(f"{count_name} must be nonnegative")
         if (
             self.filled_order_count != len(fills)
@@ -472,9 +437,13 @@ class PaperPromotionFacts:
             "active_registration_hash": self.active_registration_hash,
             "captured_at": _datetime_text(self.captured_at),
             "control_state_hash": self.control_state_hash,
-            "failed_reconciliation_count": (
-                self.failed_reconciliation_count
+            "compliance_approval_hash": (self.compliance_approval_hash),
+            "compliance_valid_until": (
+                None
+                if self.compliance_valid_until is None
+                else _datetime_text(self.compliance_valid_until)
             ),
+            "failed_reconciliation_count": (self.failed_reconciliation_count),
             "filled_order_count": self.filled_order_count,
             "fills": [item.payload() for item in self.fills],
             "kill_switch_active": self.kill_switch_active,
@@ -482,17 +451,12 @@ class PaperPromotionFacts:
                 value.isoformat() for value in self.kill_switch_drill_dates
             ],
             "qmt_evidence_hash": self.qmt_evidence_hash,
-            "qmt_recovery_drill_kinds": [
-                value.value for value in self.qmt_recovery_drill_kinds
-            ],
+            "qmt_recovery_drill_kinds": [value.value for value in self.qmt_recovery_drill_kinds],
             "qmt_observed_at": (
-                None
-                if self.qmt_observed_at is None
-                else _datetime_text(self.qmt_observed_at)
+                None if self.qmt_observed_at is None else _datetime_text(self.qmt_observed_at)
             ),
             "reconciled_session_dates": [
-                value.isoformat()
-                for value in self.reconciled_session_dates
+                value.isoformat() for value in self.reconciled_session_dates
             ],
             "risk_decision_count": self.risk_decision_count,
             "approved_slippage_bps": (
@@ -501,14 +465,12 @@ class PaperPromotionFacts:
                 else _decimal_text(self.approved_slippage_bps)
             ),
             "rejected_order_count": self.rejected_order_count,
-            "scheduler_sessions": [
-                item.payload() for item in self.scheduler_sessions
-            ],
+            "scheduler_sessions": [item.payload() for item in self.scheduler_sessions],
             "sessions": [item.payload() for item in self.sessions],
             "strategy_id": self.strategy_id,
             "total_order_count": self.total_order_count,
             "unknown_order_count": self.unknown_order_count,
-            "version": "paper-promotion-facts-v1",
+            "version": "paper-promotion-facts-v2",
         }
 
 
@@ -580,7 +542,7 @@ class PaperPromotionAudit:
             "gates": [gate.payload() for gate in self.gates],
             "live_trading_ready": False,
             "policy_hash": self.policy_hash,
-            "version": "paper-live-promotion-audit-v1",
+            "version": "paper-live-promotion-audit-v2",
         }
 
 
@@ -601,9 +563,7 @@ class PaperPromotionAuditor:
         closed = tuple(item for item in facts.sessions if item.closed)
         window = closed[-policy.minimum_paper_sessions :]
         window_dates = {item.session_date for item in window}
-        scheduler = {
-            item.session_date: item for item in facts.scheduler_sessions
-        }
+        scheduler = {item.session_date: item for item in facts.scheduler_sessions}
         scheduler_covered = sum(
             1
             for session_date in window_dates
@@ -616,25 +576,16 @@ class PaperPromotionAuditor:
             for session_date in window_dates
             if session_date in scheduler
         )
-        reconciled = len(
-            window_dates.intersection(facts.reconciled_session_dates)
-        )
+        reconciled = len(window_dates.intersection(facts.reconciled_session_dates))
         total_return, max_drawdown, profitable_rate = _performance(window)
         trade_returns = _closed_trade_returns(facts.fills)
-        expected_return_lcb, effective_trade_samples = (
-            _one_sided_return_lcb(trade_returns)
-        )
-        filled_instruments = len(
-            {fill.instrument for fill in facts.fills}
-        )
+        expected_return_lcb, effective_trade_samples = _one_sided_return_lcb(trade_returns)
+        filled_instruments = len({fill.instrument for fill in facts.fills})
         mean_slippage = (
             None
             if not facts.fills
             else sum(
-                (
-                    fill.adverse_slippage_bps
-                    for fill in facts.fills
-                ),
+                (fill.adverse_slippage_bps for fill in facts.fills),
                 Decimal("0"),
             )
             / Decimal(len(facts.fills))
@@ -642,8 +593,7 @@ class PaperPromotionAuditor:
         rejection_rate = (
             None
             if facts.total_order_count == 0
-            else Decimal(facts.rejected_order_count)
-            / Decimal(facts.total_order_count)
+            else Decimal(facts.rejected_order_count) / Decimal(facts.total_order_count)
         )
         (
             observed_months,
@@ -651,13 +601,15 @@ class PaperPromotionAuditor:
             maximum_monthly_contribution,
         ) = _monthly_concentration(window)
         qmt_age = (
-            None
-            if facts.qmt_observed_at is None
-            else facts.captured_at - facts.qmt_observed_at
+            None if facts.qmt_observed_at is None else facts.captured_at - facts.qmt_observed_at
         )
         qmt_fresh = (
-            qmt_age is not None
-            and timedelta(0) <= qmt_age <= policy.maximum_qmt_acceptance_age
+            qmt_age is not None and timedelta(0) <= qmt_age <= policy.maximum_qmt_acceptance_age
+        )
+        compliance_active = (
+            facts.compliance_approval_hash is not None
+            and facts.compliance_valid_until is not None
+            and facts.captured_at <= facts.compliance_valid_until
         )
         gates = (
             PromotionGate(
@@ -675,24 +627,14 @@ class PaperPromotionAuditor:
             PromotionGate(
                 PromotionGateCode.STRATEGY_APPROVED,
                 facts.active_registration_hash is not None,
-                (
-                    "approved"
-                    if facts.active_registration_hash is not None
-                    else "inactive"
-                ),
+                ("approved" if facts.active_registration_hash is not None else "inactive"),
                 "approved",
             ),
             PromotionGate(
                 PromotionGateCode.QMT_ACCEPTANCE_FRESH,
                 qmt_fresh,
-                (
-                    "missing"
-                    if qmt_age is None
-                    else f"{int(qmt_age.total_seconds())}s"
-                ),
-                (
-                    f"<={int(policy.maximum_qmt_acceptance_age.total_seconds())}s"
-                ),
+                ("missing" if qmt_age is None else f"{int(qmt_age.total_seconds())}s"),
+                (f"<={int(policy.maximum_qmt_acceptance_age.total_seconds())}s"),
             ),
             PromotionGate(
                 PromotionGateCode.PAPER_SESSION_COUNT,
@@ -702,8 +644,7 @@ class PaperPromotionAuditor:
             ),
             PromotionGate(
                 PromotionGateCode.SCHEDULER_COVERAGE,
-                len(window) == policy.minimum_paper_sessions
-                and scheduler_covered == len(window),
+                len(window) == policy.minimum_paper_sessions and scheduler_covered == len(window),
                 f"{scheduler_covered}/{len(window)}",
                 (
                     f"{policy.minimum_paper_sessions} sessions with "
@@ -712,8 +653,7 @@ class PaperPromotionAuditor:
             ),
             PromotionGate(
                 PromotionGateCode.SCHEDULER_FAILURE_FREE,
-                len(window) == policy.minimum_paper_sessions
-                and scheduler_failures == 0,
+                len(window) == policy.minimum_paper_sessions and scheduler_failures == 0,
                 str(scheduler_failures),
                 "0",
             ),
@@ -722,10 +662,7 @@ class PaperPromotionAuditor:
                 len(window) == policy.minimum_paper_sessions
                 and reconciled == len(window)
                 and facts.failed_reconciliation_count == 0,
-                (
-                    f"{reconciled}/{len(window)} passing, "
-                    f"{facts.failed_reconciliation_count} failed"
-                ),
+                (f"{reconciled}/{len(window)} passing, {facts.failed_reconciliation_count} failed"),
                 (
                     f"{policy.minimum_paper_sessions}/"
                     f"{policy.minimum_paper_sessions} passing, 0 failed"
@@ -746,21 +683,17 @@ class PaperPromotionAuditor:
             PromotionGate(
                 PromotionGateCode.EFFECTIVE_TRADE_SAMPLE_SIZE,
                 effective_trade_samples is not None
-                and effective_trade_samples
-                >= policy.minimum_effective_trade_samples,
+                and effective_trade_samples >= policy.minimum_effective_trade_samples,
                 (
                     "unavailable"
                     if effective_trade_samples is None
                     else _decimal_text(effective_trade_samples)
                 ),
-                (
-                    f">={_decimal_text(policy.minimum_effective_trade_samples)}"
-                ),
+                (f">={_decimal_text(policy.minimum_effective_trade_samples)}"),
             ),
             PromotionGate(
                 PromotionGateCode.EXPECTED_TRADE_RETURN_LCB,
-                expected_return_lcb is not None
-                and expected_return_lcb > 0,
+                expected_return_lcb is not None and expected_return_lcb > 0,
                 (
                     "unavailable"
                     if expected_return_lcb is None
@@ -770,8 +703,7 @@ class PaperPromotionAuditor:
             ),
             PromotionGate(
                 PromotionGateCode.FILLED_INSTRUMENT_COUNT,
-                filled_instruments
-                >= policy.minimum_filled_instruments,
+                filled_instruments >= policy.minimum_filled_instruments,
                 str(filled_instruments),
                 f">={policy.minimum_filled_instruments}",
             ),
@@ -780,28 +712,17 @@ class PaperPromotionAuditor:
                 mean_slippage is not None
                 and facts.approved_slippage_bps is not None
                 and mean_slippage <= facts.approved_slippage_bps,
-                (
-                    "unavailable"
-                    if mean_slippage is None
-                    else f"{_decimal_text(mean_slippage)}bps"
-                ),
+                ("unavailable" if mean_slippage is None else f"{_decimal_text(mean_slippage)}bps"),
                 (
                     "approved_strategy_threshold"
                     if facts.approved_slippage_bps is None
-                    else (
-                        f"<={_decimal_text(facts.approved_slippage_bps)}bps"
-                    )
+                    else (f"<={_decimal_text(facts.approved_slippage_bps)}bps")
                 ),
             ),
             PromotionGate(
                 PromotionGateCode.REJECTION_RATE,
-                rejection_rate is not None
-                and rejection_rate <= policy.maximum_rejection_rate,
-                (
-                    "unavailable"
-                    if rejection_rate is None
-                    else _decimal_text(rejection_rate)
-                ),
+                rejection_rate is not None and rejection_rate <= policy.maximum_rejection_rate,
+                ("unavailable" if rejection_rate is None else _decimal_text(rejection_rate)),
                 f"<={_decimal_text(policy.maximum_rejection_rate)}",
             ),
             PromotionGate(
@@ -813,55 +734,34 @@ class PaperPromotionAuditor:
             PromotionGate(
                 PromotionGateCode.PAPER_TOTAL_RETURN,
                 total_return is not None and total_return > 0,
-                (
-                    "unavailable"
-                    if total_return is None
-                    else _decimal_text(total_return)
-                ),
+                ("unavailable" if total_return is None else _decimal_text(total_return)),
                 ">0",
             ),
             PromotionGate(
                 PromotionGateCode.PAPER_MAX_DRAWDOWN,
-                max_drawdown is not None
-                and max_drawdown <= policy.maximum_drawdown,
-                (
-                    "unavailable"
-                    if max_drawdown is None
-                    else _decimal_text(max_drawdown)
-                ),
+                max_drawdown is not None and max_drawdown <= policy.maximum_drawdown,
+                ("unavailable" if max_drawdown is None else _decimal_text(max_drawdown)),
                 f"<={_decimal_text(policy.maximum_drawdown)}",
             ),
             PromotionGate(
                 PromotionGateCode.PROFITABLE_SESSION_RATE,
                 profitable_rate is not None
-                and profitable_rate
-                >= policy.minimum_profitable_session_rate,
-                (
-                    "unavailable"
-                    if profitable_rate is None
-                    else _decimal_text(profitable_rate)
-                ),
-                (
-                    f">={_decimal_text(policy.minimum_profitable_session_rate)}"
-                ),
+                and profitable_rate >= policy.minimum_profitable_session_rate,
+                ("unavailable" if profitable_rate is None else _decimal_text(profitable_rate)),
+                (f">={_decimal_text(policy.minimum_profitable_session_rate)}"),
             ),
             PromotionGate(
                 PromotionGateCode.MONTHLY_RETURN_CONCENTRATION,
                 observed_months >= policy.minimum_profitable_months
-                and profitable_months
-                >= policy.minimum_profitable_months
+                and profitable_months >= policy.minimum_profitable_months
                 and maximum_monthly_contribution is not None
-                and maximum_monthly_contribution
-                <= policy.maximum_monthly_profit_contribution,
+                and maximum_monthly_contribution <= policy.maximum_monthly_profit_contribution,
                 (
                     f"{profitable_months}/{observed_months} profitable, "
                     + (
                         "contribution unavailable"
                         if maximum_monthly_contribution is None
-                        else (
-                            "max contribution "
-                            f"{_decimal_text(maximum_monthly_contribution)}"
-                        )
+                        else (f"max contribution {_decimal_text(maximum_monthly_contribution)}")
                     )
                 ),
                 (
@@ -872,32 +772,25 @@ class PaperPromotionAuditor:
             ),
             PromotionGate(
                 PromotionGateCode.KILL_SWITCH_DRILLS,
-                len(facts.kill_switch_drill_dates)
-                >= policy.minimum_kill_switch_drills,
+                len(facts.kill_switch_drill_dates) >= policy.minimum_kill_switch_drills,
                 str(len(facts.kill_switch_drill_dates)),
                 f">={policy.minimum_kill_switch_drills}",
             ),
             PromotionGate(
                 PromotionGateCode.WINDOWS_RECOVERY_DRILLS,
-                set(facts.qmt_recovery_drill_kinds)
-                == set(QmtRecoveryDrillKind),
+                set(facts.qmt_recovery_drill_kinds) == set(QmtRecoveryDrillKind),
                 (
                     "none"
                     if not facts.qmt_recovery_drill_kinds
-                    else ",".join(
-                        value.value
-                        for value in facts.qmt_recovery_drill_kinds
-                    )
+                    else ",".join(value.value for value in facts.qmt_recovery_drill_kinds)
                 ),
-                ",".join(
-                    value.value for value in QmtRecoveryDrillKind
-                ),
+                ",".join(value.value for value in QmtRecoveryDrillKind),
             ),
             PromotionGate(
                 PromotionGateCode.COMPLIANCE_APPROVAL,
-                False,
-                "not_persisted",
-                "explicit_approved_artifact",
+                compliance_active,
+                ("active" if compliance_active else "missing_or_expired"),
+                ("active_artifact_bound_to_registration_and_policy"),
             ),
         )
         return PaperPromotionAudit(
@@ -918,9 +811,7 @@ class PostgresPaperPromotionFactRepository:
         schema: str = "public",
     ) -> None:
         if _IDENTIFIER.fullmatch(schema) is None:
-            raise ValueError(
-                "schema must be a safe PostgreSQL identifier"
-            )
+            raise ValueError("schema must be a safe PostgreSQL identifier")
         self._engine = engine
         self._schema = schema
 
@@ -951,9 +842,14 @@ class PostgresPaperPromotionFactRepository:
         strategy_id: str,
         now: datetime,
         lookback_days: int,
+        policy_hash: str,
     ) -> PaperPromotionFacts:
         _require_nonblank(account_id, name="account_id")
         _require_nonblank(strategy_id, name="strategy_id")
+        _require_lowercase_sha256(
+            policy_hash,
+            name="promotion policy hash",
+        )
         instant = to_utc(now, name="promotion fact time")
         if (
             not isinstance(lookback_days, int)
@@ -1041,14 +937,8 @@ class PostgresPaperPromotionFactRepository:
                     .all()
                 )
                 if len(registrations) > 1:
-                    raise PersistenceUnavailableError(
-                        "multiple paper deployment kinds are active"
-                    )
-                registration = (
-                    None
-                    if not registrations
-                    else registrations[0]
-                )
+                    raise PersistenceUnavailableError("multiple paper deployment kinds are active")
+                registration = None if not registrations else registrations[0]
                 qmt = (
                     (
                         await connection.execute(
@@ -1066,6 +956,51 @@ class PostgresPaperPromotionFactRepository:
                     )
                     .mappings()
                     .one_or_none()
+                )
+                compliance = (
+                    None
+                    if registration is None
+                    else (
+                        (
+                            await connection.execute(
+                                text(
+                                    f"""
+                                    SELECT a.approval_hash,
+                                           a.valid_until
+                                    FROM
+                                        {self._schema}.paper_compliance_approvals a
+                                    WHERE a.account_id = :account_id
+                                      AND a.strategy_id = :strategy_id
+                                      AND a.registration_hash =
+                                          :registration_hash
+                                      AND a.policy_hash = :policy_hash
+                                      AND a.approved_at <= :instant
+                                      AND a.valid_until >= :instant
+                                      AND NOT EXISTS (
+                                          SELECT 1
+                                          FROM
+                                              {self._schema}.paper_compliance_revocations r
+                                          WHERE r.approval_hash =
+                                                a.approval_hash
+                                            AND r.revoked_at <= :instant
+                                      )
+                                    ORDER BY a.approved_at DESC,
+                                             a.approval_hash DESC
+                                    LIMIT 1
+                                    """
+                                ),
+                                {
+                                    "account_id": account_id,
+                                    "instant": instant,
+                                    "policy_hash": policy_hash,
+                                    "registration_hash": str(registration["registration_hash"]),
+                                    "strategy_id": strategy_id,
+                                },
+                            )
+                        )
+                        .mappings()
+                        .one_or_none()
+                    )
                 )
                 session_rows = (
                     (
@@ -1086,9 +1021,7 @@ class PostgresPaperPromotionFactRepository:
                             ),
                             {
                                 "account_id": account_id,
-                                "cutoff_date": cutoff.astimezone(
-                                    _SHANGHAI
-                                ).date(),
+                                "cutoff_date": cutoff.astimezone(_SHANGHAI).date(),
                             },
                         )
                     )
@@ -1293,16 +1226,12 @@ class PostgresPaperPromotionFactRepository:
         except (LookupError, ValueError, PersistenceUnavailableError):
             raise
         except Exception:
-            raise PersistenceUnavailableError(
-                "Promotion audit fact snapshot failed"
-            ) from None
+            raise PersistenceUnavailableError("Promotion audit fact snapshot failed") from None
         return PaperPromotionFacts(
             account_id=account_id,
             strategy_id=strategy_id,
             captured_at=instant,
-            kill_switch_active=(
-                False if control is None else bool(control["active"])
-            ),
+            kill_switch_active=(False if control is None else bool(control["active"])),
             control_state_hash=(
                 _canonical_hash(
                     {
@@ -1315,34 +1244,25 @@ class PostgresPaperPromotionFactRepository:
                 else str(control["state_hash"])
             ),
             active_registration_hash=(
-                None
-                if registration is None
-                else str(registration["registration_hash"])
+                None if registration is None else str(registration["registration_hash"])
             ),
-            qmt_evidence_hash=(
-                None if qmt is None else str(qmt["evidence_hash"])
+            qmt_evidence_hash=(None if qmt is None else str(qmt["evidence_hash"])),
+            qmt_observed_at=(None if qmt is None else qmt["observed_at"]),
+            compliance_approval_hash=(
+                None if compliance is None else str(compliance["approval_hash"])
             ),
-            qmt_observed_at=(
-                None if qmt is None else qmt["observed_at"]
-            ),
+            compliance_valid_until=(None if compliance is None else compliance["valid_until"]),
             sessions=tuple(_session_from_row(row) for row in session_rows),
-            scheduler_sessions=tuple(
-                _scheduler_from_row(row) for row in scheduler_rows
-            ),
+            scheduler_sessions=tuple(_scheduler_from_row(row) for row in scheduler_rows),
             fills=tuple(_fill_from_row(row) for row in fill_rows),
             approved_slippage_bps=(
-                None
-                if registration is None
-                else Decimal(str(registration["slippage_bps"]))
+                None if registration is None else Decimal(str(registration["slippage_bps"]))
             ),
             reconciled_session_dates=tuple(
-                row["session_date"]
-                for row in reconciliation_rows
-                if bool(row["has_passing"])
+                row["session_date"] for row in reconciliation_rows if bool(row["has_passing"])
             ),
             failed_reconciliation_count=sum(
-                int(row["failure_count"])
-                for row in reconciliation_rows
+                int(row["failure_count"]) for row in reconciliation_rows
             ),
             filled_order_count=int(order_counts["filled_count"]),
             rejected_order_count=int(order_counts["rejected_count"]),
@@ -1351,8 +1271,7 @@ class PostgresPaperPromotionFactRepository:
             risk_decision_count=int(risk_count or 0),
             kill_switch_drill_dates=tuple(drill_dates),
             qmt_recovery_drill_kinds=tuple(
-                QmtRecoveryDrillKind(str(value))
-                for value in qmt_drill_kinds
+                QmtRecoveryDrillKind(str(value)) for value in qmt_drill_kinds
             ),
         )
 
@@ -1367,9 +1286,7 @@ def _session_from_row(row: RowMapping) -> PaperSessionPromotionEvidence:
             state_hash=str(row["state_hash"]),
         )
     except (KeyError, TypeError, ValueError):
-        raise PersistenceUnavailableError(
-            "Paper promotion session evidence is invalid"
-        ) from None
+        raise PersistenceUnavailableError("Paper promotion session evidence is invalid") from None
 
 
 def _scheduler_from_row(row: RowMapping) -> SchedulerPromotionEvidence:
@@ -1382,9 +1299,7 @@ def _scheduler_from_row(row: RowMapping) -> SchedulerPromotionEvidence:
             latest_event_hash=str(row["latest_event_hash"]),
         )
     except (KeyError, TypeError, ValueError):
-        raise PersistenceUnavailableError(
-            "Paper promotion scheduler evidence is invalid"
-        ) from None
+        raise PersistenceUnavailableError("Paper promotion scheduler evidence is invalid") from None
 
 
 def _fill_from_row(row: RowMapping) -> FilledOrderPromotionEvidence:
@@ -1399,9 +1314,7 @@ def _fill_from_row(row: RowMapping) -> FilledOrderPromotionEvidence:
             order_hash=str(row["order_hash"]),
         )
     except (KeyError, TypeError, ValueError):
-        raise PersistenceUnavailableError(
-            "Paper promotion fill evidence is invalid"
-        ) from None
+        raise PersistenceUnavailableError("Paper promotion fill evidence is invalid") from None
 
 
 def _performance(
@@ -1483,10 +1396,7 @@ def _one_sided_return_lcb(
         inflation = Decimal("1")
         for lag in range(1, min(10, count // 4) + 1):
             covariance = sum(
-                (
-                    centered[index] * centered[index + lag]
-                    for index in range(count - lag)
-                ),
+                (centered[index] * centered[index + lag] for index in range(count - lag)),
                 Decimal("0"),
             )
             correlation = covariance / squared
@@ -1501,10 +1411,7 @@ def _one_sided_return_lcb(
         return None, effective
     sample_deviation = (squared / Decimal(count - 1)).sqrt()
     standard_error = sample_deviation / effective.sqrt()
-    lower_bound = (
-        mean
-        - Decimal("1.6448536269514722") * standard_error
-    )
+    lower_bound = mean - Decimal("1.6448536269514722") * standard_error
     return lower_bound, effective
 
 
@@ -1518,9 +1425,7 @@ def _monthly_concentration(
             key,
             Decimal("1"),
         ) * (Decimal("1") + session.session_return)
-    monthly_returns = tuple(
-        wealth - Decimal("1") for wealth in monthly_wealth.values()
-    )
+    monthly_returns = tuple(wealth - Decimal("1") for wealth in monthly_wealth.values())
     positive = tuple(value for value in monthly_returns if value > 0)
     if not positive:
         return len(monthly_returns), 0, None
