@@ -813,6 +813,59 @@ def test_low_volatility_spec_freeze_emits_only_redacted_metadata() -> None:
     freeze.assert_awaited_once()
 
 
+def test_low_volatility_validation_emits_only_redacted_evidence() -> None:
+    payload = {
+        "assessment_hash": "a" * 64,
+        "benchmark_compounded_oos_return": "0.01",
+        "benchmark_rejected_order_count": 0,
+        "benchmark_unresolved_position_count": 2,
+        "compounded_oos_return": "0.02",
+        "evidence_status": "research_candidate",
+        "excess_oos_return": "0.01",
+        "fold_count": 12,
+        "gate_failures": [],
+        "live_trading_locked": True,
+        "market_panel_hash": "b" * 64,
+        "oos_sessions": 756,
+        "panel_hash": "c" * 64,
+        "profitable_fold_rate": "0.75",
+        "requested_by": "operator",
+        "result_hash": "d" * 64,
+        "spec_hash": "e" * 64,
+        "status": "completed",
+        "strategy_rejected_order_count": 0,
+        "strategy_unresolved_position_count": 0,
+        "train_test_gap": "0.01",
+        "version": "low-volatility-fixed-walk-forward-v1",
+        "worst_oos_drawdown": "0.08",
+    }
+    validation = AsyncMock(return_value=payload)
+    with patch(
+        "autoquant.cli.run_low_volatility_validation",
+        new=validation,
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "low-volatility-validation-run",
+                "--spec-hash",
+                "e" * 64,
+                "--requested-by",
+                "operator",
+            ],
+            env={
+                "AQ_POSTGRES_DSN": (
+                    "postgresql+asyncpg://sensitive"
+                )
+            },
+        )
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == payload
+    assert "sensitive" not in result.stdout
+    validation.assert_awaited_once()
+
+
 def test_research_input_plan_compilation_stays_live_locked_and_redacted() -> None:
     payload = {
         "activation_rule": "session_date>snapshot.reference_date",

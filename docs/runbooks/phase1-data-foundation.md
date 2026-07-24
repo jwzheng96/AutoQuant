@@ -50,6 +50,7 @@ Apply `migrations/postgres/001_phase1.sql`,
 `migrations/postgres/030_fundamental_panels.sql`, then
 `migrations/postgres/031_fundamental_validation.sql`, then
 `migrations/postgres/032_low_volatility_research.sql`, then
+`migrations/postgres/033_low_volatility_validation.sql`, then
 `migrations/clickhouse/001_phase1.sql` and
 `migrations/clickhouse/002_tushare_daily.sql` and
 `migrations/clickhouse/003_daily_coverage.sql` and
@@ -758,3 +759,22 @@ the existing 10 bp slippage, order-notional and 5% volume-participation limits, 
 parameter search, fundamental factor, momentum overlay, or permission to inspect returns while
 the implementation is being built. Schema v32 freezes only this design; it does not make v4 a
 candidate, start paper trading, or unlock live execution.
+
+After schema v33 is applied and the fixed implementation is committed, run the official v4
+validation once:
+
+```bash
+uv run autoquant low-volatility-validation-run \
+  --spec-hash \
+  1a53d81f60c6443bebcb4583b1ef559484bdf866063acf0f6ee0ee091eb2a4c7 \
+  --requested-by operator
+```
+
+The compiler loads the exact immutable daily manifests and permits a signal only when an
+instrument has all 253 consecutive market observations ending on the previous session. It
+ranks the resulting 252 daily returns without filling gaps. The validator uses the frozen
+504/5/63 walk-forward schedule and quarterly point-in-time equal-weight benchmark. Schema v33
+stores full training, test, and benchmark ledgers plus hash-verified folds. Strategy order
+rejections and unresolved positions are evidence gates; benchmark liquidation anomalies remain
+visible diagnostics but cannot falsely reject the strategy. A passing result remains live
+locked and can only seed a separately controlled paper-trading stage.

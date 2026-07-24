@@ -57,6 +57,7 @@ from autoquant.operations import (
     run_fundamental_data_backfill,
     run_fundamental_ingestion,
     run_fundamental_validation,
+    run_low_volatility_validation,
     run_qmt_readonly_acceptance,
     run_research_data_campaign,
     run_session_reference_refresh,
@@ -1174,6 +1175,26 @@ def fundamental_validation_run(
         )
     except (AutoQuantError, LookupError, ValueError):
         _fail("fundamental validation failed")
+    _emit(payload)
+
+
+@app.command("low-volatility-validation-run")
+def low_volatility_validation_run(
+    spec_hash: Annotated[str, typer.Option("--spec-hash")],
+    requested_by: Annotated[str, typer.Option("--requested-by")],
+) -> None:
+    """Run fixed v4 OOS validation; live trading remains locked."""
+
+    try:
+        payload = asyncio.run(
+            run_low_volatility_validation(
+                _settings(),
+                spec_hash=spec_hash,
+                requested_by=requested_by,
+            )
+        )
+    except (AutoQuantError, LookupError, ValueError):
+        _fail("low-volatility validation failed")
     _emit(payload)
 
 

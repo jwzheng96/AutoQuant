@@ -45,6 +45,13 @@ from autoquant.backtest.fundamental_validation import (
 from autoquant.backtest.low_volatility_portfolio import (
     LowVolatilityResearchSpec,
 )
+from autoquant.backtest.low_volatility_strategy import (
+    compile_low_volatility_executable_panel,
+)
+from autoquant.backtest.low_volatility_validation import (
+    LowVolatilityWalkForwardValidator,
+    assess_low_volatility_validation,
+)
 from autoquant.backtest.runner import ManifestMarketCompiler
 from autoquant.backtest.validation import (
     SmaParameters,
@@ -174,6 +181,10 @@ from autoquant.web.fundamental_validation_store import (
 )
 from autoquant.web.low_volatility_research_store import (
     PostgresLowVolatilityResearchSpecRepository,
+)
+from autoquant.web.low_volatility_validation_store import (
+    LowVolatilityValidationRecord,
+    PostgresLowVolatilityValidationRepository,
 )
 from autoquant.web.models import (
     PortfolioValidationExperiment,
@@ -1749,6 +1760,110 @@ async def run_fundamental_validation(
         await specifications.close()
 
 
+async def run_low_volatility_validation(
+    settings: AppSettings,
+    *,
+    spec_hash: str,
+    requested_by: str,
+) -> dict[str, object]:
+    """Run the pre-registered v4 validation with live trading locked."""
+
+    if settings.live_trading_enabled:
+        raise MissingCapabilityError("low-volatility validation requires live trading locked")
+    if not requested_by.strip() or requested_by != requested_by.strip() or len(requested_by) > 128:
+        raise ValueError("requested_by must contain 1-128 trimmed characters")
+    dsn = configured_dsn(
+        settings.postgres_dsn,
+        capability="PostgreSQL",
+    )
+    specifications = PostgresLowVolatilityResearchSpecRepository.connect(dsn=dsn)
+    campaigns = PostgresResearchDataCampaignRepository.connect(dsn=dsn)
+    universes = PostgresResearchUniverseRepository.connect(dsn=dsn)
+    validations = PostgresLowVolatilityValidationRepository.connect(dsn=dsn)
+    control = PostgresControlRepository.connect(dsn=dsn)
+    daily_market: ClickHouseDailyRepository | None = None
+    try:
+        spec_record = await specifications.read(spec_hash)
+        spec = spec_record.spec
+        existing = await validations.read_for_spec(spec.spec_hash)
+        if existing is not None:
+            return _low_volatility_validation_payload(
+                existing,
+                status="stored",
+            )
+        plan = await _load_research_input_plan(
+            campaigns=campaigns,
+            universes=universes,
+            manifest_hash=spec.dataset_manifest_hash,
+        )
+        if (
+            plan.plan_hash != spec.plan_hash
+            or plan.policy_hash != spec.policy_hash
+            or plan.start_date != spec.start_date
+            or plan.end_date != spec.end_date
+        ):
+            raise ValueError("low-volatility spec research plan binding differs")
+        daily_market = await ClickHouseDailyRepository.connect(
+            dsn=configured_dsn(
+                settings.clickhouse_dsn,
+                capability="ClickHouse",
+            ),
+            source="tushare",
+        )
+        market_panel = await DynamicMarketPanelCompiler(
+            shard_reader=ExactManifestResearchDatasetReader(
+                plan=plan,
+                control_reader=control,
+                record_reader=daily_market,
+                batch_size=4,
+            )
+        ).compile_bound(
+            plan=plan,
+            dataset_manifest_hash=spec.dataset_manifest_hash,
+            policy_hash=spec.policy_hash,
+            start_date=spec.start_date,
+            end_date=spec.end_date,
+            spec_hash=spec.spec_hash,
+        )
+        executable = compile_low_volatility_executable_panel(
+            spec=spec,
+            markets=market_panel,
+        )
+        result = LowVolatilityWalkForwardValidator().run(
+            panel=executable,
+            spec=spec,
+        )
+        evidence = assess_low_volatility_validation(
+            result,
+            spec=spec,
+        )
+        completed_at = datetime.now(UTC)
+        record = await validations.save(
+            result,
+            evidence,
+            requested_by=requested_by,
+            completed_at=completed_at,
+        )
+        payload = _low_volatility_validation_payload(
+            record,
+            status="completed",
+        )
+        await control.append_audit_event(
+            "research.low_volatility.validation.completed",
+            completed_at,
+            payload,
+        )
+        return payload
+    finally:
+        if daily_market is not None:
+            await daily_market.client.close()
+        await control.close()
+        await validations.close()
+        await universes.close()
+        await campaigns.close()
+        await specifications.close()
+
+
 async def _rebuild_fundamental_feature_panel(
     *,
     spec: FundamentalPortfolioResearchSpec,
@@ -1840,6 +1955,40 @@ def _fundamental_validation_payload(
         "status": status,
         "train_test_gap": str(result.train_test_gap),
         "unresolved_position_count": (result.unresolved_position_count),
+        "version": result.version,
+        "worst_oos_drawdown": str(result.worst_oos_drawdown),
+    }
+
+
+def _low_volatility_validation_payload(
+    record: LowVolatilityValidationRecord,
+    *,
+    status: str,
+) -> dict[str, object]:
+    result = record.result
+    evidence = record.evidence
+    return {
+        "assessment_hash": evidence.assessment_hash,
+        "benchmark_compounded_oos_return": str(result.benchmark_compounded_oos_return),
+        "benchmark_rejected_order_count": (result.benchmark_rejected_order_count),
+        "benchmark_unresolved_position_count": (result.benchmark_unresolved_position_count),
+        "compounded_oos_return": str(result.compounded_oos_return),
+        "evidence_status": evidence.evidence_status,
+        "excess_oos_return": str(result.excess_oos_return),
+        "fold_count": evidence.fold_count,
+        "gate_failures": list(evidence.gate_failures),
+        "live_trading_locked": True,
+        "market_panel_hash": result.market_panel_hash,
+        "oos_sessions": evidence.oos_sessions,
+        "panel_hash": result.panel_hash,
+        "profitable_fold_rate": str(result.profitable_fold_rate),
+        "requested_by": record.requested_by,
+        "result_hash": result.result_hash,
+        "spec_hash": result.spec_hash,
+        "status": status,
+        "strategy_rejected_order_count": (result.strategy_rejected_order_count),
+        "strategy_unresolved_position_count": (result.strategy_unresolved_position_count),
+        "train_test_gap": str(result.train_test_gap),
         "version": result.version,
         "worst_oos_drawdown": str(result.worst_oos_drawdown),
     }
