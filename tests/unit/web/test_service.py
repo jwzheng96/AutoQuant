@@ -8,6 +8,9 @@ import pytest
 from autoquant.config import AppSettings
 from autoquant.errors import PersistenceUnavailableError
 from autoquant.execution.control import KillSwitchReason
+from autoquant.execution.low_volatility_paper_deployment import (
+    LowVolatilityPaperDeploymentBlocker,
+)
 from autoquant.execution.portfolio_validation import (
     PortfolioOosComponentEvidence,
     PortfolioOosFold,
@@ -79,6 +82,9 @@ def _service(
     forward_specs: MagicMock | None = None,
     forward_sessions: MagicMock | None = None,
     forward_evaluations: MagicMock | None = None,
+    compatibility_specs: MagicMock | None = None,
+    compatibility_runs: MagicMock | None = None,
+    low_volatility_deployment: MagicMock | None = None,
     market: MagicMock | None = None,
 ) -> ConsoleService:
     market = MagicMock() if market is None else market
@@ -105,9 +111,10 @@ def _service(
         qmt_session_repository=qmt_sessions,
         low_volatility_forward_spec_repository=(forward_specs),
         low_volatility_forward_session_repository=(forward_sessions),
-        low_volatility_forward_evaluation_repository=(
-            forward_evaluations
-        ),
+        low_volatility_forward_evaluation_repository=(forward_evaluations),
+        low_volatility_compatibility_spec_repository=(compatibility_specs),
+        low_volatility_compatibility_run_repository=(compatibility_runs),
+        low_volatility_deployment_reader=(low_volatility_deployment),
         now=lambda: NOW,
         poll_interval=0.01,
     )
@@ -203,12 +210,27 @@ async def test_forward_progress_exposes_missing_sessions_and_keeps_locks() -> No
             ),
         )
     )
+    compatibility_specs = MagicMock()
+    compatibility_specs.for_forward_spec = AsyncMock(return_value=MagicMock(spec_hash="e" * 64))
+    compatibility_runs = MagicMock()
+    compatibility_runs.for_spec = AsyncMock(side_effect=LookupError)
+    deployment = MagicMock()
+    deployment.inspect = AsyncMock(
+        return_value=MagicMock(
+            candidate_approval_hash=None,
+            daily_signal_hash=None,
+            blockers=(LowVolatilityPaperDeploymentBlocker.CANDIDATE_MISSING,),
+        )
+    )
     service = _service(
         operator=MagicMock(),
         control=MagicMock(),
         runner=AsyncMock(),
         forward_specs=forward_specs,
         forward_sessions=forward_sessions,
+        compatibility_specs=compatibility_specs,
+        compatibility_runs=compatibility_runs,
+        low_volatility_deployment=deployment,
         market=market,
     )
 
@@ -219,15 +241,19 @@ async def test_forward_progress_exposes_missing_sessions_and_keeps_locks() -> No
     assert progress.remaining_required_sessions == 125
     assert progress.missing_session_dates == (date(2025, 1, 2),)
     assert progress.paper_trading_unlocked is False
+    assert progress.compatibility_status == "awaiting_terminal_evaluation"
+    assert progress.compatibility_spec_hash == "e" * 64
+    assert progress.compatibility_run_hash is None
+    assert progress.execution_timing_compatible is False
+    assert progress.deployment_blockers == ("candidate_missing",)
+    assert progress.ready_for_runtime is False
     assert progress.live_trading_locked is True
 
 
 @pytest.mark.asyncio
 async def test_forward_progress_exposes_evaluation_without_deploying() -> None:
     start = date(2025, 1, 1)
-    open_dates = tuple(
-        start + timedelta(days=index) for index in range(126)
-    )
+    open_dates = tuple(start + timedelta(days=index) for index in range(126))
     specification = MagicMock()
     specification.spec = MagicMock(
         spec_hash="a" * 64,
@@ -244,9 +270,7 @@ async def test_forward_progress_exposes_evaluation_without_deploying() -> None:
                 dataset_manifest_hash=f"{index + 1000:064x}",
                 session_date=session_date,
                 snapshot_hash=f"{index + 2000:064x}",
-                snapshot_reference_date=(
-                    session_date - timedelta(days=1)
-                ),
+                snapshot_reference_date=(session_date - timedelta(days=1)),
                 instruments=("000001.XSHE",),
             ),
             completed_at=NOW,
@@ -254,9 +278,7 @@ async def test_forward_progress_exposes_evaluation_without_deploying() -> None:
         for index, session_date in enumerate(open_dates)
     )
     forward_sessions = MagicMock()
-    forward_sessions.list_for_spec = AsyncMock(
-        return_value=records
-    )
+    forward_sessions.list_for_spec = AsyncMock(return_value=records)
     forward_evaluations = MagicMock()
     forward_evaluations.read_for_spec = AsyncMock(
         return_value=MagicMock(
@@ -279,6 +301,29 @@ async def test_forward_progress_exposes_evaluation_without_deploying() -> None:
             for session_date in open_dates
         )
     )
+    compatibility_spec = MagicMock(spec_hash="d" * 64)
+    compatibility_specs = MagicMock()
+    compatibility_specs.for_forward_spec = AsyncMock(return_value=compatibility_spec)
+    compatibility_runs = MagicMock()
+    compatibility_runs.for_spec = AsyncMock(
+        return_value=MagicMock(
+            run_hash="e" * 64,
+            compatibility_status="compatible",
+            gate_failures=(),
+            execution_timing_compatible=True,
+        )
+    )
+    deployment = MagicMock()
+    deployment.inspect = AsyncMock(
+        return_value=MagicMock(
+            candidate_approval_hash="f" * 64,
+            daily_signal_hash="1" * 64,
+            blockers=(
+                LowVolatilityPaperDeploymentBlocker.CANDIDATE_RUNTIME_LOCKED,
+                LowVolatilityPaperDeploymentBlocker.DAILY_SIGNAL_RUNTIME_LOCKED,
+            ),
+        )
+    )
     service = _service(
         operator=MagicMock(),
         control=MagicMock(),
@@ -286,21 +331,31 @@ async def test_forward_progress_exposes_evaluation_without_deploying() -> None:
         forward_specs=forward_specs,
         forward_sessions=forward_sessions,
         forward_evaluations=forward_evaluations,
+        compatibility_specs=compatibility_specs,
+        compatibility_runs=compatibility_runs,
+        low_volatility_deployment=deployment,
         market=market,
     )
 
     progress = await service.low_volatility_forward_progress()
 
-    assert (
-        progress.status
-        == "forward_evaluation_passed_awaiting_paper_approval"
-    )
+    assert progress.status == "forward_evaluation_passed_awaiting_paper_approval"
     assert progress.evaluation_result_hash == "b" * 64
     assert progress.evaluation_assessment_hash == "c" * 64
     assert progress.evaluation_evidence_status == "paper_candidate"
     assert progress.paper_trading_eligible is True
     assert progress.paper_deployment_allowed is False
     assert progress.paper_trading_unlocked is False
+    assert progress.compatibility_status == "compatible"
+    assert progress.compatibility_run_hash == "e" * 64
+    assert progress.execution_timing_compatible is True
+    assert progress.candidate_approval_hash == "f" * 64
+    assert progress.daily_signal_hash == "1" * 64
+    assert progress.deployment_blockers == (
+        "candidate_runtime_locked",
+        "daily_signal_runtime_locked",
+    )
+    assert progress.ready_for_runtime is False
     assert progress.live_trading_locked is True
 
 

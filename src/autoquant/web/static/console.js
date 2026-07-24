@@ -929,6 +929,46 @@ async function loadLowVolatilityForwardProgress() {
         ? `${progress.minimum_paper_sessions} 日（候选，仍未部署）`
         : `${progress.minimum_paper_sessions} 日（未解锁）`,
     );
+    const compatibilityLabels = {
+      not_configured: "服务未配置",
+      not_preregistered: "尚未预注册",
+      awaiting_terminal_evaluation: "等待 126 日终验",
+      compatible: "兼容（仍未授权）",
+      incompatible: "不兼容",
+    };
+    setText(
+      "low-volatility-forward-compatibility",
+      compatibilityLabels[progress.compatibility_status]
+        ?? progress.compatibility_status,
+    );
+    setText(
+      "low-volatility-forward-compatibility-detail",
+      progress.compatibility_gate_failures.length
+        ? `失败门禁：${progress.compatibility_gate_failures.join(", ")}`
+        : progress.compatibility_spec_hash
+          ? `规格 ${progress.compatibility_spec_hash.slice(0, 12)}…`
+          : "没有兼容性规格",
+    );
+    setText(
+      "low-volatility-forward-deployment",
+      progress.ready_for_runtime ? "可启动" : "阻断",
+    );
+    setText(
+      "low-volatility-forward-blockers",
+      progress.deployment_blockers.join(", "),
+    );
+    setText(
+      "low-volatility-forward-signal",
+      progress.daily_signal_hash
+        ? `${progress.daily_signal_hash.slice(0, 12)}…`
+        : "缺失",
+    );
+    setText(
+      "low-volatility-forward-signal-detail",
+      progress.candidate_approval_hash
+        ? `候选 ${progress.candidate_approval_hash.slice(0, 12)}…`
+        : "尚无已批准候选",
+    );
     const table = document.getElementById(
       "low-volatility-forward-sessions-table",
     );

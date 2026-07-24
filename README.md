@@ -112,7 +112,9 @@ The resident paper assembly now reads the active low-volatility candidate, compa
 specification/run, and exact-session daily signal before it opens a quote connection. Any
 candidate found through this path is still rejected because the v46, v47 and v49 artifacts
 carry no runtime authority. `low-volatility-paper-deployment-status` exposes the exact blockers
-read-only and returns a nonzero exit while blocked.
+read-only and returns a nonzero exit while blocked. The authenticated research console exposes
+the same compatibility, exact-session signal and deployment blocker fields alongside the
+126-session ledger; it never renders an activation action.
 PostgreSQL schema v36 adds an append-only, revocable compliance-approval artifact bound to the
 active paper registration and exact promotion policy. No approval is created automatically,
 and even a valid artifact can only satisfy an evidence gate while the code-level live release

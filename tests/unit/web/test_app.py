@@ -679,9 +679,17 @@ def test_low_volatility_forward_progress_is_authenticated_and_locked() -> None:
     assert progress.json()["completed_required_sessions"] == 1
     assert progress.json()["remaining_required_sessions"] == 125
     assert progress.json()["paper_trading_unlocked"] is False
+    assert progress.json()["compatibility_status"] == "not_configured"
+    assert progress.json()["execution_timing_compatible"] is False
+    assert progress.json()["deployment_blockers"] == ["deployment_gate_unavailable"]
+    assert progress.json()["ready_for_runtime"] is False
+    assert progress.json()["runtime_activation_allowed"] is False
     assert progress.json()["live_trading_locked"] is True
     assert "approve" not in progress.text.casefold()
     assert "low-volatility-forward-sessions-table" in research.text
+    assert "low-volatility-forward-compatibility" in research.text
+    assert "low-volatility-forward-deployment" in research.text
+    assert "low-volatility-forward-signal" in research.text
 
 
 def test_trading_endpoint_is_explicitly_unavailable() -> None:

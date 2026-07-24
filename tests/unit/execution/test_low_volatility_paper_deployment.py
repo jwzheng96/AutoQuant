@@ -11,6 +11,7 @@ from autoquant.errors import PersistenceUnavailableError
 from autoquant.execution.low_volatility_paper_deployment import (
     LowVolatilityPaperDeploymentBlocker,
     LowVolatilityPaperDeploymentGate,
+    PostgresLowVolatilityPaperDeploymentReader,
 )
 
 SESSION = date(2026, 7, 27)
@@ -165,3 +166,29 @@ async def test_deployment_gate_fails_closed_on_candidate_identity() -> None:
         match="identity",
     ):
         await gate.inspect(session_date=SESSION)
+
+
+@pytest.mark.asyncio
+async def test_postgres_deployment_reader_owns_and_closes_stores() -> None:
+    candidates = AsyncMock()
+    specs = AsyncMock()
+    runs = AsyncMock()
+    signals = AsyncMock()
+    candidates.active.return_value = None
+    reader = PostgresLowVolatilityPaperDeploymentReader(
+        candidates=cast(Any, candidates),
+        compatibility_specs=cast(Any, specs),
+        compatibility_runs=cast(Any, runs),
+        signals=cast(Any, signals),
+        account_id="paper-main",
+        strategy_id="low-volatility-paper",
+    )
+
+    report = await reader.inspect(session_date=SESSION)
+    await reader.close()
+
+    assert report.blockers == (LowVolatilityPaperDeploymentBlocker.CANDIDATE_MISSING,)
+    signals.close.assert_awaited_once_with()
+    runs.close.assert_awaited_once_with()
+    specs.close.assert_awaited_once_with()
+    candidates.close.assert_awaited_once_with()

@@ -1116,3 +1116,10 @@ evaluation or candidate approval exists. Even after those artifacts exist, the c
 will continue to report `candidate_runtime_locked`,
 `compatibility_runtime_authority_missing`, and `daily_signal_runtime_locked`. Removing those
 blockers requires a future reviewed deployment contract and is not part of this stage.
+
+The authenticated research console reads the same immutable stores through
+`GET /api/v1/low-volatility-forward-progress`. Its decision-time compatibility, paper
+deployment and daily-signal cards are read-only. Confirm that the response continues to show
+`ready_for_runtime=false`, `runtime_activation_allowed=false`, and
+`live_trading_locked=true`; a green compatibility result by itself must still leave the
+deployment card blocked.

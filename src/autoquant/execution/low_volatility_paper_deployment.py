@@ -13,9 +13,19 @@ from autoquant.data.models import _require_lowercase_sha256, _require_nonblank
 from autoquant.errors import PersistenceUnavailableError
 from autoquant.execution.low_volatility_paper_approval_store import (
     LowVolatilityPaperCandidateRecord,
+    PostgresLowVolatilityPaperCandidateRepository,
 )
 from autoquant.execution.low_volatility_paper_signal import (
     LowVolatilityPaperDailySignal,
+)
+from autoquant.execution.low_volatility_paper_signal_store import (
+    PostgresLowVolatilityPaperSignalRepository,
+)
+from autoquant.web.low_volatility_execution_compatibility_run_store import (
+    PostgresLowVolatilityExecutionCompatibilityRunRepository,
+)
+from autoquant.web.low_volatility_execution_compatibility_store import (
+    PostgresLowVolatilityExecutionCompatibilityRepository,
 )
 
 
@@ -259,3 +269,77 @@ class LowVolatilityPaperDeploymentGate:
             daily_signal_hash=signal_hash,
             blockers=blockers,
         )
+
+
+class PostgresLowVolatilityPaperDeploymentReader:
+    """Own the four immutable readers used by the deployment gate."""
+
+    def __init__(
+        self,
+        *,
+        candidates: PostgresLowVolatilityPaperCandidateRepository,
+        compatibility_specs: (PostgresLowVolatilityExecutionCompatibilityRepository),
+        compatibility_runs: (PostgresLowVolatilityExecutionCompatibilityRunRepository),
+        signals: PostgresLowVolatilityPaperSignalRepository,
+        account_id: str,
+        strategy_id: str,
+    ) -> None:
+        self._candidates = candidates
+        self._compatibility_specs = compatibility_specs
+        self._compatibility_runs = compatibility_runs
+        self._signals = signals
+        self._gate = LowVolatilityPaperDeploymentGate(
+            account_id=account_id,
+            strategy_id=strategy_id,
+            candidates=candidates,
+            compatibility_specs=compatibility_specs,
+            compatibility_runs=compatibility_runs,
+            signals=signals,
+        )
+
+    @classmethod
+    def connect(
+        cls,
+        *,
+        dsn: str,
+        account_id: str,
+        strategy_id: str,
+        schema: str = "public",
+    ) -> PostgresLowVolatilityPaperDeploymentReader:
+        candidates = PostgresLowVolatilityPaperCandidateRepository.connect(
+            dsn=dsn,
+            schema=schema,
+        )
+        specs = PostgresLowVolatilityExecutionCompatibilityRepository.connect(
+            dsn=dsn,
+            schema=schema,
+        )
+        runs = PostgresLowVolatilityExecutionCompatibilityRunRepository.connect(
+            dsn=dsn,
+            schema=schema,
+        )
+        signals = PostgresLowVolatilityPaperSignalRepository.connect(
+            dsn=dsn,
+            schema=schema,
+        )
+        return cls(
+            candidates=candidates,
+            compatibility_specs=specs,
+            compatibility_runs=runs,
+            signals=signals,
+            account_id=account_id,
+            strategy_id=strategy_id,
+        )
+
+    async def close(self) -> None:
+        await self._signals.close()
+        await self._compatibility_runs.close()
+        await self._compatibility_specs.close()
+        await self._candidates.close()
+
+    async def inspect(
+        self,
+        *,
+        session_date: date,
+    ) -> LowVolatilityPaperDeploymentReadiness:
+        return await self._gate.inspect(session_date=session_date)

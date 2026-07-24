@@ -29,6 +29,9 @@ from autoquant.config import AppSettings
 from autoquant.errors import AutoQuantError, PersistenceUnavailableError
 from autoquant.execution.control import KillSwitchReason
 from autoquant.execution.control_store import PostgresExecutionControlRepository
+from autoquant.execution.low_volatility_paper_deployment import (
+    PostgresLowVolatilityPaperDeploymentReader,
+)
 from autoquant.execution.paper_deployment import (
     PostgresPaperDeploymentRegistry,
 )
@@ -56,6 +59,12 @@ from autoquant.web.fundamental_validation_store import (
     FundamentalValidationIndexRecord,
     FundamentalValidationRecord,
     PostgresFundamentalValidationRepository,
+)
+from autoquant.web.low_volatility_execution_compatibility_run_store import (
+    PostgresLowVolatilityExecutionCompatibilityRunRepository,
+)
+from autoquant.web.low_volatility_execution_compatibility_store import (
+    PostgresLowVolatilityExecutionCompatibilityRepository,
 )
 from autoquant.web.low_volatility_forward_evaluation_store import (
     PostgresLowVolatilityForwardEvaluationRepository,
@@ -291,6 +300,15 @@ class ConsoleService:
         low_volatility_forward_evaluation_repository: (
             PostgresLowVolatilityForwardEvaluationRepository | None
         ) = None,
+        low_volatility_compatibility_spec_repository: (
+            PostgresLowVolatilityExecutionCompatibilityRepository | None
+        ) = None,
+        low_volatility_compatibility_run_repository: (
+            PostgresLowVolatilityExecutionCompatibilityRunRepository | None
+        ) = None,
+        low_volatility_deployment_reader: (
+            PostgresLowVolatilityPaperDeploymentReader | None
+        ) = None,
         universe_repository: (PostgresResearchUniverseRepository | None) = None,
         risk_repository: PostgresRiskDecisionRepository | None = None,
         execution_repository: PostgresPaperExecutionRepository | None = None,
@@ -335,9 +353,19 @@ class ConsoleService:
             )
         self._low_volatility_forward_specs = low_volatility_forward_spec_repository
         self._low_volatility_forward_sessions = low_volatility_forward_session_repository
-        self._low_volatility_forward_evaluations = (
-            low_volatility_forward_evaluation_repository
+        self._low_volatility_forward_evaluations = low_volatility_forward_evaluation_repository
+        compatibility_dependencies = (
+            low_volatility_compatibility_spec_repository,
+            low_volatility_compatibility_run_repository,
+            low_volatility_deployment_reader,
         )
+        if any(value is not None for value in compatibility_dependencies) and not all(
+            value is not None for value in compatibility_dependencies
+        ):
+            raise ValueError("compatibility and deployment readers must be configured together")
+        self._low_volatility_compatibility_specs = low_volatility_compatibility_spec_repository
+        self._low_volatility_compatibility_runs = low_volatility_compatibility_run_repository
+        self._low_volatility_deployment = low_volatility_deployment_reader
         self._universes = universe_repository
         self._risk = risk_repository
         self._execution = execution_repository
@@ -533,6 +561,12 @@ class ConsoleService:
             await self._low_volatility_forward_evaluations.close()
         if self._low_volatility_forward_specs is not None:
             await self._low_volatility_forward_specs.close()
+        if self._low_volatility_deployment is not None:
+            await self._low_volatility_deployment.close()
+        if self._low_volatility_compatibility_runs is not None:
+            await self._low_volatility_compatibility_runs.close()
+        if self._low_volatility_compatibility_specs is not None:
+            await self._low_volatility_compatibility_specs.close()
         if self._universes is not None:
             await self._universes.close()
         if self._risk is not None:
@@ -884,9 +918,7 @@ class ConsoleService:
         evaluation = (
             None
             if self._low_volatility_forward_evaluations is None
-            else await self._low_volatility_forward_evaluations.read_for_spec(
-                spec.spec_hash
-            )
+            else await self._low_volatility_forward_evaluations.read_for_spec(spec.spec_hash)
         )
         now = self._now()
         safe_cutoff = to_shanghai(now).date() - timedelta(days=1)
@@ -917,12 +949,49 @@ class ConsoleService:
         elif evaluation is not None:
             status = (
                 "forward_evaluation_passed_awaiting_paper_approval"
-                if evaluation.assessment.evidence_status
-                == "paper_candidate"
+                if evaluation.assessment.evidence_status == "paper_candidate"
                 else "forward_evaluation_rejected"
             )
         else:
             status = "session_gate_complete_awaiting_evaluation"
+        compatibility_spec_hash: str | None = None
+        compatibility_run_hash: str | None = None
+        compatibility_status = "not_configured"
+        compatibility_gate_failures: tuple[str, ...] = ()
+        execution_timing_compatible = False
+        candidate_approval_hash: str | None = None
+        daily_signal_hash: str | None = None
+        deployment_blockers: tuple[str, ...] = ("deployment_gate_unavailable",)
+        if (
+            self._low_volatility_compatibility_specs is not None
+            and self._low_volatility_compatibility_runs is not None
+            and self._low_volatility_deployment is not None
+        ):
+            try:
+                compatibility_spec = (
+                    await self._low_volatility_compatibility_specs.for_forward_spec(spec.spec_hash)
+                )
+            except LookupError:
+                compatibility_status = "not_preregistered"
+            else:
+                compatibility_spec_hash = compatibility_spec.spec_hash
+                try:
+                    compatibility_run = await self._low_volatility_compatibility_runs.for_spec(
+                        compatibility_spec.spec_hash
+                    )
+                except LookupError:
+                    compatibility_status = "awaiting_terminal_evaluation"
+                else:
+                    compatibility_run_hash = compatibility_run.run_hash
+                    compatibility_status = compatibility_run.compatibility_status
+                    compatibility_gate_failures = compatibility_run.gate_failures
+                    execution_timing_compatible = compatibility_run.execution_timing_compatible
+            deployment = await self._low_volatility_deployment.inspect(
+                session_date=to_shanghai(now).date(),
+            )
+            candidate_approval_hash = deployment.candidate_approval_hash
+            daily_signal_hash = deployment.daily_signal_hash
+            deployment_blockers = tuple(value.value for value in deployment.blockers)
         return LowVolatilityForwardProgressView(
             spec_hash=spec.spec_hash,
             forward_start_date=spec.forward_start_date,
@@ -941,31 +1010,27 @@ class ConsoleService:
                 else None
             ),
             status=status,
-            evaluation_result_hash=(
-                None
-                if evaluation is None
-                else evaluation.result.result_hash
-            ),
+            evaluation_result_hash=(None if evaluation is None else evaluation.result.result_hash),
             evaluation_assessment_hash=(
-                None
-                if evaluation is None
-                else evaluation.assessment.assessment_hash
+                None if evaluation is None else evaluation.assessment.assessment_hash
             ),
             evaluation_evidence_status=(
-                None
-                if evaluation is None
-                else evaluation.assessment.evidence_status
+                None if evaluation is None else evaluation.assessment.evidence_status
             ),
             evaluation_gate_failures=(
-                ()
-                if evaluation is None
-                else evaluation.assessment.gate_failures
+                () if evaluation is None else evaluation.assessment.gate_failures
             ),
             paper_trading_eligible=(
-                False
-                if evaluation is None
-                else evaluation.assessment.paper_trading_eligible
+                False if evaluation is None else evaluation.assessment.paper_trading_eligible
             ),
+            compatibility_spec_hash=(compatibility_spec_hash),
+            compatibility_run_hash=compatibility_run_hash,
+            compatibility_status=compatibility_status,
+            compatibility_gate_failures=(compatibility_gate_failures),
+            execution_timing_compatible=(execution_timing_compatible),
+            candidate_approval_hash=candidate_approval_hash,
+            daily_signal_hash=daily_signal_hash,
+            deployment_blockers=deployment_blockers,
             sessions=tuple(
                 LowVolatilityForwardSessionView(
                     binding_hash=record.binding.binding_hash,

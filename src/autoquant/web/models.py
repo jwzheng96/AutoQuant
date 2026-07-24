@@ -646,6 +646,28 @@ class LowVolatilityForwardProgressView(BaseModel):
     paper_deployment_allowed: bool = False
     historical_result_eligible_for_promotion: bool = False
     paper_trading_unlocked: bool = False
+    compatibility_spec_hash: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    compatibility_run_hash: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    compatibility_status: str = "not_configured"
+    compatibility_gate_failures: tuple[str, ...] = ()
+    execution_timing_compatible: bool = False
+    candidate_approval_hash: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    daily_signal_hash: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    deployment_blockers: tuple[str, ...] = ("deployment_gate_unavailable",)
+    ready_for_runtime: bool = False
+    runtime_activation_allowed: bool = False
     live_trading_locked: bool = True
 
     @model_validator(mode="after")
@@ -672,17 +694,47 @@ class LowVolatilityForwardProgressView(BaseModel):
                 and self.evaluation_assessment_hash is None
                 and self.evaluation_evidence_status is None
             )
-            or len(set(self.evaluation_gate_failures))
-            != len(self.evaluation_gate_failures)
-            or self.paper_trading_eligible
-            != (
-                self.evaluation_evidence_status
-                == "paper_candidate"
-            )
+            or len(set(self.evaluation_gate_failures)) != len(self.evaluation_gate_failures)
+            or self.paper_trading_eligible != (self.evaluation_evidence_status == "paper_candidate")
             or self.paper_deployment_allowed
             or self.historical_result_eligible_for_promotion
             or self.paper_trading_unlocked
+            or self.ready_for_runtime
+            or self.runtime_activation_allowed
             or not self.live_trading_locked
+            or self.compatibility_status
+            not in {
+                "not_configured",
+                "not_preregistered",
+                "awaiting_terminal_evaluation",
+                "compatible",
+                "incompatible",
+            }
+            or (
+                self.compatibility_spec_hash is None
+                and self.compatibility_status not in {"not_configured", "not_preregistered"}
+            )
+            or (
+                self.compatibility_spec_hash is not None
+                and self.compatibility_status in {"not_configured", "not_preregistered"}
+            )
+            or (
+                self.compatibility_run_hash is None
+                and self.compatibility_status in {"compatible", "incompatible"}
+            )
+            or (
+                self.compatibility_run_hash is not None
+                and self.compatibility_status not in {"compatible", "incompatible"}
+            )
+            or self.execution_timing_compatible != (self.compatibility_status == "compatible")
+            or len(set(self.compatibility_gate_failures)) != len(self.compatibility_gate_failures)
+            or (
+                self.compatibility_status == "incompatible" and not self.compatibility_gate_failures
+            )
+            or (self.compatibility_status != "incompatible" and self.compatibility_gate_failures)
+            or not self.deployment_blockers
+            or len(set(self.deployment_blockers)) != len(self.deployment_blockers)
+            or (self.daily_signal_hash is not None and self.candidate_approval_hash is None)
             or self.status
             not in {
                 "backfill_required",
@@ -692,27 +744,14 @@ class LowVolatilityForwardProgressView(BaseModel):
                 "forward_evaluation_passed_awaiting_paper_approval",
                 "forward_evaluation_rejected",
             }
+            or (self.evaluation_evidence_status not in {None, "paper_candidate", "rejected"})
             or (
-                self.evaluation_evidence_status
-                not in {None, "paper_candidate", "rejected"}
+                (self.status == "forward_evaluation_passed_awaiting_paper_approval")
+                and (self.evaluation_evidence_status != "paper_candidate")
             )
             or (
-                (
-                    self.status
-                    == "forward_evaluation_passed_awaiting_paper_approval"
-                )
-                and (
-                    self.evaluation_evidence_status
-                    != "paper_candidate"
-                )
-            )
-            or (
-                (
-                    self.status == "forward_evaluation_rejected"
-                )
-                and (
-                    self.evaluation_evidence_status != "rejected"
-                )
+                (self.status == "forward_evaluation_rejected")
+                and (self.evaluation_evidence_status != "rejected")
             )
         ):
             raise ValueError("low-volatility forward progress is inconsistent")

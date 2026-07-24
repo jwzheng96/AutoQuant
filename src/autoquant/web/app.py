@@ -39,6 +39,9 @@ from autoquant.config import AppSettings, WebCredentials
 from autoquant.data.daily_ingestion import ValidatedDailyDatasetReader
 from autoquant.errors import AutoQuantError
 from autoquant.execution.control_store import PostgresExecutionControlRepository
+from autoquant.execution.low_volatility_paper_deployment import (
+    PostgresLowVolatilityPaperDeploymentReader,
+)
 from autoquant.execution.paper_deployment import (
     PostgresPaperDeploymentRegistry,
 )
@@ -58,6 +61,12 @@ from autoquant.operations import configured_dsn
 from autoquant.web.backtest_store import PostgresBacktestRepository
 from autoquant.web.fundamental_validation_store import (
     PostgresFundamentalValidationRepository,
+)
+from autoquant.web.low_volatility_execution_compatibility_run_store import (
+    PostgresLowVolatilityExecutionCompatibilityRunRepository,
+)
+from autoquant.web.low_volatility_execution_compatibility_store import (
+    PostgresLowVolatilityExecutionCompatibilityRepository,
 )
 from autoquant.web.low_volatility_forward_evaluation_store import (
     PostgresLowVolatilityForwardEvaluationRepository,
@@ -588,10 +597,19 @@ async def _production_service(settings: AppSettings) -> ConsoleService:
     low_volatility_forward_sessions = PostgresLowVolatilityForwardSessionRepository.connect(
         dsn=postgres_dsn
     )
-    low_volatility_forward_evaluations = (
-        PostgresLowVolatilityForwardEvaluationRepository.connect(
-            dsn=postgres_dsn
-        )
+    low_volatility_forward_evaluations = PostgresLowVolatilityForwardEvaluationRepository.connect(
+        dsn=postgres_dsn
+    )
+    low_volatility_compatibility_specs = (
+        PostgresLowVolatilityExecutionCompatibilityRepository.connect(dsn=postgres_dsn)
+    )
+    low_volatility_compatibility_runs = (
+        PostgresLowVolatilityExecutionCompatibilityRunRepository.connect(dsn=postgres_dsn)
+    )
+    low_volatility_deployment = PostgresLowVolatilityPaperDeploymentReader.connect(
+        dsn=postgres_dsn,
+        account_id=settings.paper_account_id,
+        strategy_id=settings.paper_strategy_id,
     )
     risks = PostgresRiskDecisionRepository.connect(dsn=postgres_dsn)
     executions = PostgresPaperExecutionRepository.connect(dsn=postgres_dsn)
@@ -618,6 +636,9 @@ async def _production_service(settings: AppSettings) -> ConsoleService:
         await low_volatility_forward_sessions.close()
         await low_volatility_forward_evaluations.close()
         await low_volatility_forward_specs.close()
+        await low_volatility_deployment.close()
+        await low_volatility_compatibility_runs.close()
+        await low_volatility_compatibility_specs.close()
         await risks.close()
         await executions.close()
         await execution_controls.close()
@@ -663,9 +684,10 @@ async def _production_service(settings: AppSettings) -> ConsoleService:
         low_volatility_validation_repository=(low_volatility_validations),
         low_volatility_forward_spec_repository=(low_volatility_forward_specs),
         low_volatility_forward_session_repository=(low_volatility_forward_sessions),
-        low_volatility_forward_evaluation_repository=(
-            low_volatility_forward_evaluations
-        ),
+        low_volatility_forward_evaluation_repository=(low_volatility_forward_evaluations),
+        low_volatility_compatibility_spec_repository=(low_volatility_compatibility_specs),
+        low_volatility_compatibility_run_repository=(low_volatility_compatibility_runs),
+        low_volatility_deployment_reader=(low_volatility_deployment),
         risk_repository=risks,
         execution_repository=executions,
         execution_control_repository=execution_controls,
