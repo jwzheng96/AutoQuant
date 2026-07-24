@@ -175,6 +175,17 @@ def test_normalizers_copy_documented_asset_position_order_and_trade_fields() -> 
     assert trades[0].amount == Decimal("1000")
 
 
+def test_live_order_normalization_requires_a_trusted_correlation() -> None:
+    with pytest.raises(BrokerStateUnknownError, match="no trusted"):
+        normalize_qmt_order(
+            _order_payload(),  # type: ignore[arg-type]
+            expected_account_id=ACCOUNT,
+            observed_at=NOW,
+            client_order_ids={},
+            require_client_order_mapping=True,
+        )
+
+
 def test_balanced_query_baseline_builds_hash_committed_account_snapshot() -> None:
     baseline = _baseline(order_payloads=(_order_payload(),))
 

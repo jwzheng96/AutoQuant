@@ -157,7 +157,10 @@ def normalize_qmt_order(
     expected_account_id: str,
     observed_at: datetime,
     client_order_ids: Mapping[int, str] | None = None,
+    require_client_order_mapping: bool = False,
 ) -> QmtOrderObservation:
+    if type(require_client_order_mapping) is not bool:
+        raise TypeError("require_client_order_mapping must be a bool")
     order_id = _integer(_raw(payload, "order_id"), name="order_id", minimum=1)
     order_volume = _integer(
         _raw(payload, "order_volume"),
@@ -177,6 +180,10 @@ def normalize_qmt_order(
     if traded_volume == 0 and _decimal(raw_average, name="traded_price") != 0:
         raise ValueError("QMT unfilled order must have zero traded_price")
     mapped = None if client_order_ids is None else client_order_ids.get(order_id)
+    if mapped is None and require_client_order_mapping:
+        raise BrokerStateUnknownError(
+            "QMT order has no trusted client_order_id correlation"
+        )
     client_order_id = (
         f"qmt-unmapped-{order_id}"
         if mapped is None

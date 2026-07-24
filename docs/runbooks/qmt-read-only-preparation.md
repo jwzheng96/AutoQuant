@@ -2,6 +2,13 @@
 
 本手册只准备只读核验。当前版本不能向券商提交或撤销委托。
 
+代码同时提供 `QmtCanaryOrderCandidate` 和 `QmtOrderCorrelationBook`，用于提前固化未来金丝雀
+网关的输入边界。候选单逐笔绑定已接受的 live 风控决策、晋级报告、合规批准、QMT 只读
+验收、最新对账、Windows 节点和 QMT session；最长有效 30 秒且只覆盖一笔订单。异步请求
+号、券商订单号和 `client_order_id` 必须一一对应，未知或冲突映射按券商状态未知处理。
+这些对象只生成可哈希证据，`broker_mutation_allowed` 固定为 `false`，调用执行检查仍会
+抛出发布锁异常；它们不包含也不调用任何 XtQuant 报单/撤单函数。
+
 ## 前提
 
 1. 准备独立的 64 位 Windows 主机，不在当前 macOS 开发机安装 XtQuant。
