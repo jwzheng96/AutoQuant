@@ -18,10 +18,10 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from autoquant.adapters.postgres import PostgresControlRepository
 from autoquant.backtest.models import OrderSide
 from autoquant.errors import BrokerStateUnknownError, QmtSessionLeaseLostError
-from autoquant.execution.qmt_callback_inbox import (
-    QmtCallbackInboxEvent,
-    sanitize_qmt_callback,
+from autoquant.execution.qmt_callback_coordinator import (
+    QmtCallbackPersistenceCoordinator,
 )
+from autoquant.execution.qmt_callback_inbox import QmtCallbackInboxEvent
 from autoquant.execution.qmt_callback_processor import (
     QmtPersistedAsyncResponseBinder,
 )
@@ -339,7 +339,8 @@ async def test_persisted_async_callback_binds_exact_staged_remark_and_replays(
         async_request_id=41,
         reserved_at=datetime.now(UTC),
     )
-    envelope = QmtCallbackBuffer().capture(
+    buffer = QmtCallbackBuffer()
+    buffer.capture(
         QmtCallbackKind.ASYNC_ORDER_RESPONSE,
         {
             "account_id": "integration-broker-account",
@@ -349,23 +350,40 @@ async def test_persisted_async_callback_binds_exact_staged_remark_and_replays(
         },
         received_at=datetime.now(UTC),
     )
-    callback = sanitize_qmt_callback(
-        envelope,
+    inbox = PostgresQmtCallbackInbox(engine=engine, schema=schema)
+    binder = QmtPersistedAsyncResponseBinder(inbox=inbox, ledger=ledger)
+    coordinator = QmtCallbackPersistenceCoordinator(
+        buffer=buffer,
+        inbox=inbox,
         expected_broker_account_id="integration-broker-account",
         logical_account_id=candidate.account_id,
-    )
-    inbox = PostgresQmtCallbackInbox(engine=engine, schema=schema)
-    durable = await inbox.append(
-        callback,
         gateway_holder_id=candidate.gateway_holder_id,
         qmt_session_id=candidate.qmt_session_id,
         qmt_lease_generation=candidate.qmt_lease_generation,
-        lease_token=lease_token,
+        async_response_binder=binder,
     )
-    binder = QmtPersistedAsyncResponseBinder(inbox=inbox, ledger=ledger)
 
-    bound = await binder.bind(durable, lease_token=lease_token)
-    assert await binder.bind(durable, lease_token=lease_token) == bound
+    result = await coordinator.persist_and_process(lease_token=lease_token)
+    assert len(result.persisted_events) == 1
+    assert len(result.async_bindings) == 1
+    durable = result.persisted_events[0]
+    callback = durable.callback
+    bound = result.async_bindings[0]
+    restarted_buffer = QmtCallbackBuffer()
+    restarted = QmtCallbackPersistenceCoordinator(
+        buffer=restarted_buffer,
+        inbox=inbox,
+        expected_broker_account_id="integration-broker-account",
+        logical_account_id=candidate.account_id,
+        gateway_holder_id=candidate.gateway_holder_id,
+        qmt_session_id=candidate.qmt_session_id,
+        qmt_lease_generation=candidate.qmt_lease_generation,
+        async_response_binder=binder,
+    )
+    assert await restarted.restore_before_capture(
+        lease_token=lease_token,
+    ) == result
+    assert restarted_buffer.cursor == callback.local_sequence
     assert bound.async_request_id == 41
     assert bound.broker_order_id == "99041"
     assert bound.client_order_id == candidate.decision.order.client_order_id

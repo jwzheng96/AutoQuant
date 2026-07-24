@@ -49,6 +49,28 @@ class QmtCallbackEnvelope:
     payload: Mapping[str, QmtCallbackValue]
 
 
+@dataclass(frozen=True, slots=True)
+class QmtCallbackReservation:
+    reservation_id: int
+    events: tuple[QmtCallbackEnvelope, ...]
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.reservation_id, int)
+            or isinstance(self.reservation_id, bool)
+            or self.reservation_id < 1
+        ):
+            raise ValueError("QMT callback reservation_id must be positive")
+        if not self.events:
+            raise ValueError("QMT callback reservation must contain events")
+        if any(
+            not isinstance(event, QmtCallbackEnvelope) for event in self.events
+        ):
+            raise TypeError(
+                "QMT callback reservation must contain callback envelopes"
+            )
+
+
 class QmtCallbackBuffer:
     """Thread-safe callback capture with a single serialized drain boundary.
 
@@ -64,6 +86,9 @@ class QmtCallbackBuffer:
         self._drain_lock = Lock()
         self._sequence = 0
         self._overflowed = False
+        self._reservation_sequence = 0
+        self._active_reservation_id: int | None = None
+        self._pending_events: tuple[QmtCallbackEnvelope, ...] = ()
 
     @property
     def cursor(self) -> int:
@@ -110,24 +135,142 @@ class QmtCallbackBuffer:
         return envelope
 
     def drain(self, *, limit: int = 1000) -> tuple[QmtCallbackEnvelope, ...]:
-        if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
-            raise ValueError("limit must be a positive integer")
-        if not self.healthy:
-            raise BrokerStateUnknownError(
-                "QMT callback buffer overflow requires a full reconnect"
-            )
+        _validate_drain_limit(limit)
         if not self._drain_lock.acquire(blocking=False):
             raise RuntimeError("QMT callback buffer already has an active consumer")
         try:
-            events: list[QmtCallbackEnvelope] = []
-            while len(events) < limit:
-                try:
-                    events.append(self._queue.get_nowait())
-                except Empty:
-                    break
-            return tuple(events)
+            with self._sequence_lock:
+                self._require_healthy()
+                if (
+                    self._active_reservation_id is not None
+                    or self._pending_events
+                ):
+                    raise RuntimeError(
+                        "QMT callback buffer has a durable reservation pending"
+                    )
+                return self._take(limit=limit)
         finally:
             self._drain_lock.release()
+
+    def reserve_durable(
+        self,
+        *,
+        limit: int = 1000,
+    ) -> QmtCallbackReservation | None:
+        """Reserve one ordered batch until durable persistence is acknowledged."""
+
+        _validate_drain_limit(limit)
+        if not self._drain_lock.acquire(blocking=False):
+            raise RuntimeError("QMT callback buffer already has an active consumer")
+        try:
+            with self._sequence_lock:
+                self._require_healthy()
+                if self._active_reservation_id is not None:
+                    raise RuntimeError(
+                        "QMT callback buffer already has a durable reservation"
+                    )
+                if not self._pending_events:
+                    self._pending_events = self._take(limit=limit)
+                if not self._pending_events:
+                    return None
+                self._reservation_sequence += 1
+                self._active_reservation_id = self._reservation_sequence
+                return QmtCallbackReservation(
+                    reservation_id=self._reservation_sequence,
+                    events=self._pending_events,
+                )
+        finally:
+            self._drain_lock.release()
+
+    def acknowledge_durable(self, *, reservation_id: int) -> None:
+        """Remove a batch only after every callback fact is durable."""
+
+        self._complete_reservation(
+            reservation_id=reservation_id,
+            acknowledge=True,
+        )
+
+    def release_durable(self, *, reservation_id: int) -> None:
+        """Make an unacknowledged batch available for an exact retry."""
+
+        self._complete_reservation(
+            reservation_id=reservation_id,
+            acknowledge=False,
+        )
+
+    def restore_cursor(self, *, local_sequence: int) -> None:
+        """Restore a fresh buffer cursor from a verified durable inbox."""
+
+        if (
+            not isinstance(local_sequence, int)
+            or isinstance(local_sequence, bool)
+            or local_sequence < 0
+        ):
+            raise ValueError("local_sequence must be nonnegative")
+        if not self._drain_lock.acquire(blocking=False):
+            raise RuntimeError("QMT callback buffer already has an active consumer")
+        try:
+            with self._sequence_lock:
+                self._require_healthy()
+                if (
+                    self._sequence != 0
+                    or self._active_reservation_id is not None
+                    or self._pending_events
+                    or not self._queue.empty()
+                ):
+                    raise RuntimeError(
+                        "QMT callback cursor can be restored only into a fresh empty buffer"
+                    )
+                self._sequence = local_sequence
+        finally:
+            self._drain_lock.release()
+
+    def _complete_reservation(
+        self,
+        *,
+        reservation_id: int,
+        acknowledge: bool,
+    ) -> None:
+        if (
+            not isinstance(reservation_id, int)
+            or isinstance(reservation_id, bool)
+            or reservation_id < 1
+        ):
+            raise ValueError("reservation_id must be positive")
+        if not self._drain_lock.acquire(blocking=False):
+            raise RuntimeError("QMT callback buffer already has an active consumer")
+        try:
+            with self._sequence_lock:
+                if self._active_reservation_id != reservation_id:
+                    raise RuntimeError(
+                        "QMT callback reservation is not the active batch"
+                    )
+                if acknowledge:
+                    self._require_healthy()
+                    self._pending_events = ()
+                self._active_reservation_id = None
+        finally:
+            self._drain_lock.release()
+
+    def _require_healthy(self) -> None:
+        if self._overflowed:
+            raise BrokerStateUnknownError(
+                "QMT callback buffer overflow requires a full reconnect"
+            )
+
+    def _take(self, *, limit: int) -> tuple[QmtCallbackEnvelope, ...]:
+        events: list[QmtCallbackEnvelope] = []
+        while len(events) < limit:
+            try:
+                events.append(self._queue.get_nowait())
+            except Empty:
+                break
+        return tuple(events)
+
+
+def _validate_drain_limit(limit: int) -> None:
+    if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+        raise ValueError("limit must be a positive integer")
 
 
 class LockedQmtGateway:

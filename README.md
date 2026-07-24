@@ -98,6 +98,11 @@ An asynchronous order response may update the correlation ledger only after the 
 chain proves that exact callback is durable. Its logical account, XtQuant `seq`, broker
 `order_id`, and 24-character `order_remark` must all resolve to the same staged candidate;
 restart replay is idempotent and any mismatch remains broker-state-unknown.
+The Windows-side coordinator reserves one ordered in-memory batch, persists every fact, and only
+then acknowledges its removal from the queue. Partial database writes, lease failures and task
+cancellation retain the exact batch for idempotent retry; stream overflow prevents acknowledgement
+and requires a reconnect. A replacement process must replay the current lease generation into a
+fresh empty buffer, restore the last durable local sequence, and only then register new callbacks.
 Request and broker identifiers are scoped by QMT session-lease generation, so vendor counters may
 restart without ever joining a new process callback to an old process order.
 Candidate reservation, asynchronous broker-order binding and restart recovery also require the

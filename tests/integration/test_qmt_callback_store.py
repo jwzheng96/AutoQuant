@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 from collections.abc import AsyncIterator
 from dataclasses import replace
@@ -16,6 +17,9 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from autoquant.adapters.postgres import PostgresControlRepository
 from autoquant.errors import BrokerStateUnknownError, QmtSessionLeaseLostError
+from autoquant.execution.qmt_callback_coordinator import (
+    QmtCallbackPersistenceCoordinator,
+)
 from autoquant.execution.qmt_callback_inbox import (
     QmtSanitizedCallback,
     sanitize_qmt_callback,
@@ -75,7 +79,7 @@ async def callback_fixture() -> AsyncIterator[
             session_id=SESSION_ID,
             holder_id=HOLDER_ID,
             token=LEASE_TOKEN,
-            now=datetime.now(UTC) - timedelta(seconds=1),
+            now=datetime.now(UTC) - timedelta(seconds=10),
             ttl=timedelta(minutes=2),
         )
         yield inbox, leases, engine, schema, lease.generation
@@ -122,6 +126,176 @@ def _capture_callbacks() -> tuple[QmtSanitizedCallback, QmtSanitizedCallback]:
             logical_account_id=LOGICAL_ACCOUNT,
         ),
     )
+
+
+def _coordinator(
+    *,
+    buffer: QmtCallbackBuffer,
+    inbox: PostgresQmtCallbackInbox,
+    generation: int,
+) -> QmtCallbackPersistenceCoordinator:
+    return QmtCallbackPersistenceCoordinator(
+        buffer=buffer,
+        inbox=inbox,
+        expected_broker_account_id=BROKER_ACCOUNT,
+        logical_account_id=LOGICAL_ACCOUNT,
+        gateway_holder_id=HOLDER_ID,
+        qmt_session_id=SESSION_ID,
+        qmt_lease_generation=generation,
+    )
+
+
+@pytest.mark.asyncio
+async def test_callback_coordinator_retries_same_batch_after_lease_failure(
+    callback_fixture: tuple[
+        PostgresQmtCallbackInbox,
+        PostgresQmtSessionLeaseRepository,
+        AsyncEngine,
+        str,
+        int,
+    ],
+) -> None:
+    inbox, _, _, _, generation = callback_fixture
+    buffer = QmtCallbackBuffer()
+    envelope = buffer.capture(
+        QmtCallbackKind.ACCOUNT_STATUS,
+        {"account_id": BROKER_ACCOUNT, "status": 0},
+        received_at=datetime.now(UTC),
+    )
+    coordinator = _coordinator(
+        buffer=buffer,
+        inbox=inbox,
+        generation=generation,
+    )
+
+    with pytest.raises(QmtSessionLeaseLostError):
+        await coordinator.persist_and_process(lease_token=WRONG_TOKEN)
+    result = await coordinator.persist_and_process(lease_token=LEASE_TOKEN)
+    assert len(result.persisted_events) == 1
+    assert result.persisted_events[0].callback.local_sequence == (
+        envelope.local_sequence
+    )
+    assert result.async_bindings == ()
+    assert result.broker_mutation_allowed is False
+    restarted_buffer = QmtCallbackBuffer()
+    restarted = _coordinator(
+        buffer=restarted_buffer,
+        inbox=inbox,
+        generation=generation,
+    )
+    assert await restarted.restore_before_capture(
+        lease_token=LEASE_TOKEN,
+    ) == result
+    assert restarted_buffer.cursor == envelope.local_sequence
+    resumed = restarted_buffer.capture(
+        QmtCallbackKind.ACCOUNT_STATUS,
+        {"account_id": BROKER_ACCOUNT, "status": 0},
+        received_at=datetime.now(UTC),
+    )
+    assert resumed.local_sequence == 2
+    resumed_result = await restarted.persist_and_process(
+        lease_token=LEASE_TOKEN,
+    )
+    assert [
+        event.callback.local_sequence
+        for event in resumed_result.persisted_events
+    ] == [2]
+    empty = await restarted.persist_and_process(lease_token=LEASE_TOKEN)
+    assert empty.persisted_events == ()
+    assert empty.async_bindings == ()
+
+
+@pytest.mark.asyncio
+async def test_callback_coordinator_retains_partially_persisted_batch_on_failure(
+    callback_fixture: tuple[
+        PostgresQmtCallbackInbox,
+        PostgresQmtSessionLeaseRepository,
+        AsyncEngine,
+        str,
+        int,
+    ],
+) -> None:
+    inbox, _, _, _, generation = callback_fixture
+    buffer = QmtCallbackBuffer()
+    first = buffer.capture(
+        QmtCallbackKind.ACCOUNT_STATUS,
+        {"account_id": BROKER_ACCOUNT, "status": 0},
+        received_at=datetime.now(UTC),
+    )
+    second = buffer.capture(
+        QmtCallbackKind.DISCONNECTED,
+        {"reason": "xttrader_disconnected"},
+        received_at=datetime.now(UTC) - timedelta(seconds=6),
+    )
+    coordinator = _coordinator(
+        buffer=buffer,
+        inbox=inbox,
+        generation=generation,
+    )
+
+    with pytest.raises(BrokerStateUnknownError, match="within five seconds"):
+        await coordinator.persist_and_process(lease_token=LEASE_TOKEN)
+    durable = await inbox.replay_current(
+        account_id=LOGICAL_ACCOUNT,
+        gateway_holder_id=HOLDER_ID,
+        qmt_session_id=SESSION_ID,
+        qmt_lease_generation=generation,
+        lease_token=LEASE_TOKEN,
+    )
+    assert len(durable) == 1
+    assert durable[0].callback.local_sequence == first.local_sequence
+
+    retried = buffer.reserve_durable()
+    assert retried is not None
+    assert retried.events == (first, second)
+    buffer.release_durable(reservation_id=retried.reservation_id)
+
+
+@pytest.mark.asyncio
+async def test_callback_coordinator_serializes_concurrent_consumers(
+    callback_fixture: tuple[
+        PostgresQmtCallbackInbox,
+        PostgresQmtSessionLeaseRepository,
+        AsyncEngine,
+        str,
+        int,
+    ],
+) -> None:
+    inbox, _, _, _, generation = callback_fixture
+    buffer = QmtCallbackBuffer()
+    for status in (0, 1):
+        buffer.capture(
+            QmtCallbackKind.ACCOUNT_STATUS,
+            {"account_id": BROKER_ACCOUNT, "status": status},
+            received_at=datetime.now(UTC),
+        )
+    coordinator = _coordinator(
+        buffer=buffer,
+        inbox=inbox,
+        generation=generation,
+    )
+
+    results = await asyncio.gather(
+        coordinator.persist_and_process(
+            lease_token=LEASE_TOKEN,
+            limit=1,
+        ),
+        coordinator.persist_and_process(
+            lease_token=LEASE_TOKEN,
+            limit=1,
+        ),
+    )
+    assert [
+        event.callback.local_sequence
+        for result in results
+        for event in result.persisted_events
+    ] == [1, 2]
+    replayed = await coordinator.replay_persisted(
+        lease_token=LEASE_TOKEN,
+    )
+    assert [
+        event.callback.local_sequence for event in replayed.persisted_events
+    ] == [1, 2]
 
 
 @pytest.mark.asyncio

@@ -103,6 +103,63 @@ def test_callback_buffer_validates_limit() -> None:
         QmtCallbackBuffer().drain(limit=0)
 
 
+def test_callback_buffer_retries_reserved_batch_until_durable_acknowledgement() -> None:
+    buffer = QmtCallbackBuffer()
+    first = buffer.capture(QmtCallbackKind.ORDER, {"order_id": 1})
+    second = buffer.capture(QmtCallbackKind.TRADE, {"trade_id": 2})
+
+    reserved = buffer.reserve_durable(limit=2)
+    assert reserved is not None
+    assert reserved.events == (first, second)
+    with pytest.raises(RuntimeError, match="already has a durable"):
+        buffer.reserve_durable()
+    with pytest.raises(RuntimeError, match="durable reservation pending"):
+        buffer.drain()
+
+    buffer.release_durable(reservation_id=reserved.reservation_id)
+    retried = buffer.reserve_durable(limit=1)
+    assert retried is not None
+    assert retried.reservation_id != reserved.reservation_id
+    assert retried.events == reserved.events
+    with pytest.raises(RuntimeError, match="not the active"):
+        buffer.acknowledge_durable(reservation_id=reserved.reservation_id)
+
+    buffer.acknowledge_durable(reservation_id=retried.reservation_id)
+    assert buffer.reserve_durable() is None
+    assert buffer.drain() == ()
+
+
+def test_callback_buffer_restores_cursor_only_before_new_capture() -> None:
+    buffer = QmtCallbackBuffer()
+
+    buffer.restore_cursor(local_sequence=7)
+    event = buffer.capture(QmtCallbackKind.ACCOUNT_STATUS, {"status": 0})
+
+    assert event.local_sequence == 8
+    with pytest.raises(RuntimeError, match="fresh empty"):
+        buffer.restore_cursor(local_sequence=8)
+    with pytest.raises(ValueError, match="nonnegative"):
+        QmtCallbackBuffer().restore_cursor(local_sequence=-1)
+
+
+def test_callback_buffer_cannot_acknowledge_after_stream_overflow() -> None:
+    buffer = QmtCallbackBuffer(capacity=1)
+    buffer.capture(QmtCallbackKind.ORDER, {"order_id": 1})
+    reserved = buffer.reserve_durable()
+    assert reserved is not None
+    buffer.capture(QmtCallbackKind.ORDER, {"order_id": 2})
+    with pytest.raises(BrokerStateUnknownError, match="overflow"):
+        buffer.capture(QmtCallbackKind.ORDER, {"order_id": 3})
+
+    with pytest.raises(BrokerStateUnknownError, match="overflow"):
+        buffer.acknowledge_durable(
+            reservation_id=reserved.reservation_id,
+        )
+    buffer.release_durable(reservation_id=reserved.reservation_id)
+    with pytest.raises(BrokerStateUnknownError, match="overflow"):
+        buffer.reserve_durable()
+
+
 def test_callback_buffer_overflow_requires_a_full_reconnect() -> None:
     buffer = QmtCallbackBuffer(capacity=1)
     buffer.capture(QmtCallbackKind.ORDER, {"order_id": 1})
