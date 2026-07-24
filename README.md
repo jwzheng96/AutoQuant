@@ -54,6 +54,9 @@ verifies every production-complete data shard, the exact session calendar eviden
 universe policy and a universe snapshot strictly earlier than the session. These bindings
 accumulate evidence toward the 126-session gate but never enable paper or live trading by
 themselves.
+The first official 2026-07-23 binding is frozen as
+`2ef9a973f10b9c5c54a8589b600bd12336a3f9d1d136224d4e7671056a66557d` (1 of 126 required
+forward sessions).
 
 The repository also contains a deterministic A-share research ledger with versioned board
 rules, T+1 sellability, lot-size validation, conservative daily-open fills, liquidity caps,

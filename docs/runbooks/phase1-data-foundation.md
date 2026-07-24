@@ -841,6 +841,13 @@ snapshot, incomplete shard, wrong policy, changed instrument set, or different s
 for the same session is rejected. This evidence collection does not unlock paper or live
 execution.
 
+The first official binding covers 2026-07-23 and 300 instruments. Its immutable binding hash is
+`2ef9a973f10b9c5c54a8589b600bd12336a3f9d1d136224d4e7671056a66557d`, backed by aggregate
+dataset manifest
+`dc0156eb6e042a0c7fdb3d2adf78972013a152b9f3264c1aa85476b77c470878` and the 2026-07-22
+snapshot `28e2fe1da8855c67bb0503f25d39f6fbb093bcd1ebedf0c2b2f10a632640ed9b`. It is session 1
+of the required 126; live trading remains locked.
+
 ## Future-only low-volatility evidence correction
 
 After schema v34 is applied, freeze the methodology correction once:
