@@ -34,6 +34,7 @@ from autoquant.operations import (
     compile_fundamental_research_panel,
     compile_research_input,
     complete_qmt_recovery_drill,
+    create_low_volatility_forward_session_campaign,
     create_portfolio_validation,
     create_research_data_campaign,
     create_research_universe_snapshot,
@@ -1129,6 +1130,37 @@ def low_volatility_forward_spec_freeze(
         )
     except (AutoQuantError, LookupError, ValueError):
         _fail("low-volatility forward evidence freeze failed")
+    _emit(payload)
+
+
+@app.command("low-volatility-forward-session-create")
+def low_volatility_forward_session_create(
+    forward_spec_hash: Annotated[
+        str,
+        typer.Option("--forward-spec-hash"),
+    ],
+    session: Annotated[str, typer.Option("--session")],
+    requested_by: Annotated[
+        str,
+        typer.Option("--requested-by"),
+    ],
+) -> None:
+    """Create a resumable queue for one completed forward session."""
+
+    try:
+        payload = asyncio.run(
+            create_low_volatility_forward_session_campaign(
+                _settings(),
+                forward_spec_hash=forward_spec_hash,
+                session_date=_parse_date(
+                    session,
+                    name="session",
+                ),
+                requested_by=requested_by,
+            )
+        )
+    except (AutoQuantError, LookupError, ValueError):
+        _fail("low-volatility forward session create failed")
     _emit(payload)
 
 

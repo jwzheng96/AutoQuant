@@ -796,6 +796,32 @@ This observation cannot retroactively change, overwrite, or promote v4; any revi
 requires separately frozen evidence and a new forward-data requirement. Live trading remains
 locked.
 
+For each completed forward trading session, create a queue only after the following Shanghai
+calendar date has begun. The command selects the latest matching universe snapshot whose
+reference date is strictly earlier than the session:
+
+```bash
+uv run autoquant low-volatility-forward-session-create \
+  --forward-spec-hash \
+  ae3d74b1a35d700efea01310bd80e8fd1264eabe6c569f83d9628670a85e34f0 \
+  --session 2026-07-23 \
+  --requested-by operator
+```
+
+Run the returned campaign in bounded, restart-safe batches:
+
+```bash
+uv run autoquant research-data-campaign-run \
+  --campaign-hash <returned-campaign-hash> \
+  --max-items 10 \
+  --pause-seconds 0.25
+```
+
+Repeat until `research-data-campaign-status` reports `completed`. Each instrument receives its
+own production-complete manifest and retry budget, so a vendor or network failure does not
+discard other completed shards. Never create a queue for the current Shanghai trading date or
+use a universe snapshot dated on or after the target session.
+
 ## Future-only low-volatility evidence correction
 
 After schema v34 is applied, freeze the methodology correction once:

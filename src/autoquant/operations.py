@@ -1350,6 +1350,116 @@ async def freeze_low_volatility_forward_evidence_spec(
         await validations.close()
 
 
+async def create_low_volatility_forward_session_campaign(
+    settings: AppSettings,
+    *,
+    forward_spec_hash: str,
+    session_date: date,
+    requested_by: str,
+) -> dict[str, object]:
+    """Create one resumable, point-in-time forward-session data queue."""
+
+    if settings.live_trading_enabled:
+        raise MissingCapabilityError("forward session collection requires live trading locked")
+    if not requested_by.strip() or requested_by != requested_by.strip() or len(requested_by) > 128:
+        raise ValueError("requested_by must contain 1-128 trimmed characters")
+    safe_cutoff = to_shanghai(datetime.now(UTC)).date() - timedelta(days=1)
+    if session_date > safe_cutoff:
+        raise ValueError("forward session must be a completed Shanghai date")
+    postgres_dsn = configured_dsn(
+        settings.postgres_dsn,
+        capability="PostgreSQL",
+    )
+    forward_specs = PostgresLowVolatilityForwardEvidenceSpecRepository.connect(dsn=postgres_dsn)
+    source_specs = PostgresLowVolatilityResearchSpecRepository.connect(dsn=postgres_dsn)
+    universes = PostgresResearchUniverseRepository.connect(dsn=postgres_dsn)
+    campaigns = PostgresResearchDataCampaignRepository.connect(dsn=postgres_dsn)
+    control = PostgresControlRepository.connect(dsn=postgres_dsn)
+    market: ClickHouseDailyRepository | None = None
+    try:
+        forward = (await forward_specs.read(forward_spec_hash)).spec
+        if session_date < forward.forward_start_date:
+            raise ValueError("forward session precedes the frozen start date")
+        source = (await source_specs.read(forward.source_spec_hash)).spec
+        now = datetime.now(UTC)
+        market = await ClickHouseDailyRepository.connect(
+            dsn=configured_dsn(
+                settings.clickhouse_dsn,
+                capability="ClickHouse",
+            ),
+            source="tushare",
+        )
+        sessions = await market.query_sessions_as_of(
+            session_date,
+            session_date,
+            now,
+        )
+        if (
+            len(sessions) != 1
+            or sessions[0].session_date != session_date
+            or not sessions[0].is_open
+        ):
+            raise ValueError("forward session is not proven open")
+        candidates = tuple(
+            value
+            for value in await universes.list(limit=200)
+            if value.policy_hash == source.policy_hash and value.reference_date < session_date
+        )
+        if not candidates:
+            raise LookupError("forward session has no prior universe snapshot")
+        snapshot = max(
+            candidates,
+            key=lambda value: (
+                value.reference_date,
+                value.snapshot_hash,
+            ),
+        )
+        detail = await universes.detail(snapshot.snapshot_hash)
+        instruments = tuple(sorted(member.instrument for member in detail.members))
+        campaign_spec = ResearchDataCampaignSpec(
+            campaign_key=(f"low-vol-forward:{forward.spec_hash[:16]}:{session_date:%Y%m%d}"),
+            policy_hash=source.policy_hash,
+            snapshot_hashes=(snapshot.snapshot_hash,),
+            instruments=instruments,
+            start_date=session_date,
+            end_date=session_date,
+            requested_by=requested_by,
+        )
+        status = await campaigns.create(
+            campaign_spec,
+            created_at=now,
+        )
+        payload: dict[str, object] = {
+            "campaign_hash": campaign_spec.campaign_hash,
+            "completed_items": sum(value.state == "completed" for value in status.items),
+            "forward_spec_hash": forward.spec_hash,
+            "instrument_count": len(instruments),
+            "live_trading_locked": True,
+            "session_date": session_date.isoformat(),
+            "snapshot_hash": snapshot.snapshot_hash,
+            "snapshot_reference_date": (snapshot.reference_date.isoformat()),
+            "status": status.status,
+        }
+        await control.append_audit_event(
+            "research.low_volatility.forward_session.created",
+            now,
+            {
+                **payload,
+                "calendar_content_hash": (sessions[0].content_hash),
+                "requested_by": requested_by,
+            },
+        )
+        return payload
+    finally:
+        if market is not None:
+            await market.client.close()
+        await control.close()
+        await campaigns.close()
+        await universes.close()
+        await source_specs.close()
+        await forward_specs.close()
+
+
 async def inspect_fundamental_data_backfill(
     settings: AppSettings,
     *,

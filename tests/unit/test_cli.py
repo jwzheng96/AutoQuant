@@ -914,6 +914,48 @@ def test_low_volatility_forward_spec_discloses_outcome_observation() -> None:
     freeze.assert_awaited_once()
 
 
+def test_low_volatility_forward_session_create_is_redacted() -> None:
+    payload = {
+        "campaign_hash": "a" * 64,
+        "completed_items": 0,
+        "forward_spec_hash": "b" * 64,
+        "instrument_count": 300,
+        "live_trading_locked": True,
+        "session_date": "2026-07-23",
+        "snapshot_hash": "c" * 64,
+        "snapshot_reference_date": "2026-07-22",
+        "status": "queued",
+    }
+    creation = AsyncMock(return_value=payload)
+    with patch(
+        "autoquant.cli."
+        "create_low_volatility_forward_session_campaign",
+        new=creation,
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "low-volatility-forward-session-create",
+                "--forward-spec-hash",
+                "b" * 64,
+                "--session",
+                "2026-07-23",
+                "--requested-by",
+                "operator",
+            ],
+            env={
+                "AQ_POSTGRES_DSN": (
+                    "postgresql+asyncpg://sensitive"
+                )
+            },
+        )
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == payload
+    assert "sensitive" not in result.stdout
+    creation.assert_awaited_once()
+
+
 def test_research_input_plan_compilation_stays_live_locked_and_redacted() -> None:
     payload = {
         "activation_rule": "session_date>snapshot.reference_date",
