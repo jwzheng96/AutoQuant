@@ -10,7 +10,7 @@ orders, promise profitability, or enable live trading.
 
 The research data foundation now also stores Tushare `daily_basic` valuation snapshots and
 announcement-dated `fina_indicator` revisions in ClickHouse schema v4. PostgreSQL schemas
-v28-v31 freeze the independent quality/value v3 hypothesis before full-market collection,
+v28-v32 freeze the independent quality/value v3 hypothesis before full-market collection,
 atomically bind its restart-safe per-instrument shard union, and retain the resulting
 point-in-time feature-panel hash, executable walk-forward folds, and immutable evidence
 assessment. Financial
@@ -24,6 +24,13 @@ was 5.345% versus 8.769% for the point-in-time equal-weight benchmark, for -3.42
 The Web research console exposes this immutable summary and hash-verified fold detail through
 read-only endpoints. Rejected evidence cannot be approved or overwritten from the console, and
 live trading remains locked.
+
+Schema v32 adds a separate, pre-registered low-volatility v4 hypothesis derived from the
+immutable rejected v3 result. It fixes a 252-session trailing-volatility rank, 21-session
+rebalance, 20 holdings, one-session signal lag, the existing conservative execution limits,
+and 504/5/63 walk-forward windows. It has no candidate grid or outcome-driven parameter
+selection. Freezing this specification is research governance only; its strategy and
+validation implementation remain separate evidence gates.
 
 The repository also contains a deterministic A-share research ledger with versioned board
 rules, T+1 sellability, lot-size validation, conservative daily-open fills, liquidity caps,

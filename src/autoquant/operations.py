@@ -42,6 +42,9 @@ from autoquant.backtest.fundamental_validation import (
     FundamentalWalkForwardValidator,
     assess_fundamental_validation,
 )
+from autoquant.backtest.low_volatility_portfolio import (
+    LowVolatilityResearchSpec,
+)
 from autoquant.backtest.runner import ManifestMarketCompiler
 from autoquant.backtest.validation import (
     SmaParameters,
@@ -168,6 +171,9 @@ from autoquant.web.fundamental_research_store import (
 from autoquant.web.fundamental_validation_store import (
     FundamentalValidationRecord,
     PostgresFundamentalValidationRepository,
+)
+from autoquant.web.low_volatility_research_store import (
+    PostgresLowVolatilityResearchSpecRepository,
 )
 from autoquant.web.models import (
     PortfolioValidationExperiment,
@@ -1163,6 +1169,85 @@ async def freeze_fundamental_research_spec(
         await fundamentals.close()
         await validations.close()
         await dynamic_specs.close()
+
+
+async def freeze_low_volatility_research_spec(
+    settings: AppSettings,
+    *,
+    predecessor_result_hash: str,
+    requested_by: str,
+) -> dict[str, object]:
+    """Pre-register v4 only from an immutable rejected v3 result."""
+
+    if settings.live_trading_enabled:
+        raise MissingCapabilityError("low-volatility specification requires live trading locked")
+    postgres_dsn = configured_dsn(
+        settings.postgres_dsn,
+        capability="PostgreSQL",
+    )
+    predecessors = PostgresFundamentalValidationRepository.connect(dsn=postgres_dsn)
+    fundamental_specs = PostgresFundamentalResearchSpecRepository.connect(dsn=postgres_dsn)
+    specifications = PostgresLowVolatilityResearchSpecRepository.connect(dsn=postgres_dsn)
+    control = PostgresControlRepository.connect(dsn=postgres_dsn)
+    try:
+        predecessor = await predecessors.read(predecessor_result_hash)
+        if predecessor.evidence.evidence_status != "rejected":
+            raise ValueError("low-volatility v4 requires a rejected predecessor")
+        fundamental = await fundamental_specs.read(predecessor.result.spec_hash)
+        base = fundamental.spec
+        spec = LowVolatilityResearchSpec(
+            predecessor_result_hash=(predecessor.result.result_hash),
+            dataset_manifest_hash=(base.daily_dataset_manifest_hash),
+            plan_hash=base.plan_hash,
+            policy_hash=base.universe_policy_hash,
+            start_date=base.start_date,
+            end_date=base.end_date,
+            evidence_policy=base.evidence_policy,
+            initial_cash=base.initial_cash,
+            gross_allocation=base.gross_allocation,
+            maximum_position_weight=(base.maximum_position_weight),
+            maximum_order_notional=(base.maximum_order_notional),
+            slippage_bps=base.slippage_bps,
+            maximum_volume_participation=(base.maximum_volume_participation),
+            train_sessions=base.train_sessions,
+            test_sessions=base.test_sessions,
+            embargo_sessions=base.embargo_sessions,
+            signal_lag_sessions=base.signal_lag_sessions,
+        )
+        created_at = datetime.now(UTC)
+        record = await specifications.freeze(
+            spec,
+            requested_by=requested_by,
+            created_at=created_at,
+        )
+        payload: dict[str, object] = {
+            "created_at": record.created_at.isoformat(),
+            "live_trading_locked": True,
+            "minimum_history_sessions": (record.spec.minimum_history_sessions),
+            "predecessor_result_hash": (record.spec.predecessor_result_hash),
+            "rebalance_sessions": (record.spec.rebalance_sessions),
+            "selection_count": record.spec.selection_count,
+            "spec_hash": record.spec.spec_hash,
+            "status": "frozen",
+            "strategy_id": record.spec.strategy_id,
+            "version": record.spec.version,
+            "volatility_lookback_sessions": (record.spec.volatility_lookback_sessions),
+        }
+        await control.append_audit_event(
+            "research.low_volatility.spec.frozen",
+            created_at,
+            {
+                **payload,
+                "requested_by": requested_by,
+                "specification": record.spec.payload(),
+            },
+        )
+        return payload
+    finally:
+        await control.close()
+        await specifications.close()
+        await fundamental_specs.close()
+        await predecessors.close()
 
 
 async def inspect_fundamental_data_backfill(

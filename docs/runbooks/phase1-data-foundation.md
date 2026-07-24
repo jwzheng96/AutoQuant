@@ -49,6 +49,7 @@ Apply `migrations/postgres/001_phase1.sql`,
 `migrations/postgres/029_fundamental_dataset.sql`, then
 `migrations/postgres/030_fundamental_panels.sql`, then
 `migrations/postgres/031_fundamental_validation.sql`, then
+`migrations/postgres/032_low_volatility_research.sql`, then
 `migrations/clickhouse/001_phase1.sql` and
 `migrations/clickhouse/002_tushare_daily.sql` and
 `migrations/clickhouse/003_daily_coverage.sql` and
@@ -730,3 +731,30 @@ drawdown was `0.07933934813208103801632638192`, and no order was rejected. Four 
 end positions belonged to the benchmark, not the strategy. The independent negative-excess
 gate still rejects v3 even if benchmark liquidation diagnostics are separated, so v3 must not
 enter paper trading or be tuned using these out-of-sample results.
+
+## Pre-registered low-volatility v4 research
+
+The rejected v3 result may seed exactly one independent v4 specification after PostgreSQL
+schema v32 is applied:
+
+```bash
+uv run autoquant low-volatility-spec-freeze \
+  --predecessor-result-hash \
+  fae7de9eab5868c3e1c9c0fc5ddac1b26a109ea75d35d0d1840d1b12a9b48f59 \
+  --requested-by operator
+```
+
+The economic hypothesis comes from Blitz, Hanauer, and van Vliet,
+[“The Volatility Effect in China”](https://doi.org/10.1057/s41260-021-00218-0).
+The paper reports a distinct, robust, investable low-risk effect in local China A shares,
+including similar results across shorter and longer estimation periods. AutoQuant chooses one
+implementation before observing v4 returns: trailing volatility over 252 daily returns,
+253 required close observations, a 21-session rebalance, the 20 lowest-volatility eligible
+members, 50% gross allocation, 5% maximum position weight, and a one-session signal lag.
+
+The specification reuses the immutable point-in-time daily dataset and universe plan, applies
+the existing 10 bp slippage, order-notional and 5% volume-participation limits, and fixes
+504-session training, a five-session embargo, and 63-session tests. There is no candidate grid,
+parameter search, fundamental factor, momentum overlay, or permission to inspect returns while
+the implementation is being built. Schema v32 freezes only this design; it does not make v4 a
+candidate, start paper trading, or unlock live execution.

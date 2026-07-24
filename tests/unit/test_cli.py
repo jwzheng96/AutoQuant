@@ -131,9 +131,7 @@ def test_paper_runtime_check_reports_stable_capability_blocker() -> None:
     with patch(
         "autoquant.cli.inspect_paper_runtime_readiness",
         new=AsyncMock(
-            side_effect=MissingCapabilityError(
-                "paper runtime requires an active approved strategy"
-            )
+            side_effect=MissingCapabilityError("paper runtime requires an active approved strategy")
         ),
     ):
         result = runner.invoke(app, ["paper-runtime-check"])
@@ -444,9 +442,7 @@ def test_qmt_readonly_accept_emits_only_redacted_evidence() -> None:
             ],
             env={
                 "AQ_QMT_ACCOUNT_ID": "sensitive-broker-account",
-                "AQ_QMT_LEASE_TOKEN": (
-                    "sensitive-qmt-lease-token-with-32-characters"
-                ),
+                "AQ_QMT_LEASE_TOKEN": ("sensitive-qmt-lease-token-with-32-characters"),
             },
         )
 
@@ -780,6 +776,43 @@ def test_validation_campaign_rejects_invalid_candidate_syntax() -> None:
     assert creation.await_count == 0
 
 
+def test_low_volatility_spec_freeze_emits_only_redacted_metadata() -> None:
+    payload = {
+        "created_at": "2026-07-23T12:00:00+00:00",
+        "live_trading_locked": True,
+        "minimum_history_sessions": 253,
+        "predecessor_result_hash": "a" * 64,
+        "rebalance_sessions": 21,
+        "selection_count": 20,
+        "spec_hash": "b" * 64,
+        "status": "frozen",
+        "strategy_id": "dynamic-universe-low-volatility-v4",
+        "version": "low-volatility-research-spec-v4",
+        "volatility_lookback_sessions": 252,
+    }
+    freeze = AsyncMock(return_value=payload)
+    with patch(
+        "autoquant.cli.freeze_low_volatility_research_spec",
+        new=freeze,
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "low-volatility-spec-freeze",
+                "--predecessor-result-hash",
+                "a" * 64,
+                "--requested-by",
+                "operator",
+            ],
+            env={"AQ_POSTGRES_DSN": ("postgresql+asyncpg://sensitive")},
+        )
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == payload
+    assert "sensitive" not in result.stdout
+    freeze.assert_awaited_once()
+
+
 def test_research_input_plan_compilation_stays_live_locked_and_redacted() -> None:
     payload = {
         "activation_rule": "session_date>snapshot.reference_date",
@@ -805,11 +838,7 @@ def test_research_input_plan_compilation_stays_live_locked_and_redacted() -> Non
                 "--requested-by",
                 "operator",
             ],
-            env={
-                "AQ_POSTGRES_DSN": (
-                    "postgresql+asyncpg://sensitive"
-                )
-            },
+            env={"AQ_POSTGRES_DSN": ("postgresql+asyncpg://sensitive")},
         )
 
     assert result.exit_code == 0
@@ -862,11 +891,7 @@ def test_dynamic_research_freeze_is_live_locked_and_redacted() -> None:
                 "operator",
                 "--confirm-pre-registration",
             ],
-            env={
-                "AQ_POSTGRES_DSN": (
-                    "postgresql+asyncpg://sensitive"
-                )
-            },
+            env={"AQ_POSTGRES_DSN": ("postgresql+asyncpg://sensitive")},
         )
 
     assert result.exit_code == 0
@@ -898,11 +923,7 @@ def test_dynamic_market_panel_compilation_is_live_locked() -> None:
                 "--requested-by",
                 "operator",
             ],
-            env={
-                "AQ_POSTGRES_DSN": (
-                    "postgresql+asyncpg://sensitive"
-                )
-            },
+            env={"AQ_POSTGRES_DSN": ("postgresql+asyncpg://sensitive")},
         )
 
     assert result.exit_code == 0
@@ -932,11 +953,7 @@ def test_dynamic_regime_spec_freeze_is_live_locked() -> None:
                 "--requested-by",
                 "operator",
             ],
-            env={
-                "AQ_POSTGRES_DSN": (
-                    "postgresql+asyncpg://sensitive"
-                )
-            },
+            env={"AQ_POSTGRES_DSN": ("postgresql+asyncpg://sensitive")},
         )
 
     assert result.exit_code == 0
@@ -968,11 +985,7 @@ def test_dynamic_validation_run_is_live_locked_and_redacted() -> None:
                 "--requested-by",
                 "operator",
             ],
-            env={
-                "AQ_POSTGRES_DSN": (
-                    "postgresql+asyncpg://sensitive"
-                )
-            },
+            env={"AQ_POSTGRES_DSN": ("postgresql+asyncpg://sensitive")},
         )
 
     assert result.exit_code == 0
@@ -1005,11 +1018,7 @@ def test_research_input_shard_check_is_redacted() -> None:
                 "--requested-by",
                 "operator",
             ],
-            env={
-                "AQ_POSTGRES_DSN": (
-                    "postgresql+asyncpg://sensitive"
-                )
-            },
+            env={"AQ_POSTGRES_DSN": ("postgresql+asyncpg://sensitive")},
         )
 
     assert result.exit_code == 0
@@ -1023,17 +1032,13 @@ def test_portfolio_validation_cli_queues_live_locked_request() -> None:
         "assessment": None,
         "completed_at": None,
         "error_code": None,
-        "experiment_id": (
-            "11111111-1111-1111-1111-111111111111"
-        ),
+        "experiment_id": ("11111111-1111-1111-1111-111111111111"),
         "fold_count": 0,
         "live_trading_locked": True,
         "manifest_hash": "a" * 64,
         "result_hash": None,
         "state": "queued",
-        "validator_id": (
-            "cross_sectional_momentum_walk_forward_v1"
-        ),
+        "validator_id": ("cross_sectional_momentum_walk_forward_v1"),
     }
     creation = AsyncMock(return_value=payload)
     with patch(
@@ -1057,11 +1062,7 @@ def test_portfolio_validation_cli_queues_live_locked_request() -> None:
                 "--candidate",
                 "120:20:3",
             ],
-            env={
-                "AQ_POSTGRES_DSN": (
-                    "postgresql+asyncpg://sensitive"
-                )
-            },
+            env={"AQ_POSTGRES_DSN": ("postgresql+asyncpg://sensitive")},
         )
 
     assert result.exit_code == 0
@@ -1079,9 +1080,7 @@ def test_portfolio_validation_status_fails_for_rejected_evidence() -> None:
                 "evidence_status": "rejected",
                 "gate_failures": ["nonpositive_excess_return"],
             },
-            "experiment_id": (
-                "11111111-1111-1111-1111-111111111111"
-            ),
+            "experiment_id": ("11111111-1111-1111-1111-111111111111"),
             "live_trading_locked": True,
             "state": "completed",
         }
@@ -1097,11 +1096,7 @@ def test_portfolio_validation_status_fails_for_rejected_evidence() -> None:
                 "--experiment-id",
                 "11111111-1111-1111-1111-111111111111",
             ],
-            env={
-                "AQ_POSTGRES_DSN": (
-                    "postgresql+asyncpg://sensitive"
-                )
-            },
+            env={"AQ_POSTGRES_DSN": ("postgresql+asyncpg://sensitive")},
         )
 
     assert result.exit_code == 2
