@@ -90,6 +90,16 @@ class AppSettings(BaseSettings):
     qmt_holder_id: str | None = None
     qmt_lease_token: SecretStr | None = Field(default=None, repr=False)
     qmt_lease_ttl_seconds: int = Field(default=30, ge=5, le=300)
+    qmt_callback_poll_interval_seconds: Decimal = Field(
+        default=Decimal("0.25"),
+        ge=Decimal("0.05"),
+        le=Decimal("1"),
+    )
+    qmt_reconciliation_interval_seconds: Decimal = Field(
+        default=Decimal("30"),
+        ge=Decimal("5"),
+        le=Decimal("300"),
+    )
 
     @field_validator("qmt_userdata_path", mode="before")
     @classmethod
@@ -125,8 +135,7 @@ class AppSettings(BaseSettings):
             )
         ):
             raise ValueError(
-                "paper_account_id and paper_strategy_id must be 1-64 character "
-                "safe identifiers"
+                "paper_account_id and paper_strategy_id must be 1-64 character safe identifiers"
             )
         return normalized
 
@@ -143,25 +152,17 @@ class AppSettings(BaseSettings):
             not 1 <= len(normalized) <= 64
             or not normalized[0].isalnum()
             or any(
-                character
-                not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
+                character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
                 for character in normalized
             )
         ):
-            raise ValueError(
-                "runtime holder identifiers must be 1-64 character safe identifiers"
-            )
+            raise ValueError("runtime holder identifiers must be 1-64 character safe identifiers")
         return normalized
 
     @model_validator(mode="after")
     def require_scheduler_renewal_before_expiry(self) -> "AppSettings":
-        if (
-            self.paper_scheduler_renewal_seconds
-            >= self.paper_scheduler_lease_ttl_seconds
-        ):
-            raise ValueError(
-                "paper scheduler renewal interval must be smaller than its lease TTL"
-            )
+        if self.paper_scheduler_renewal_seconds >= self.paper_scheduler_lease_ttl_seconds:
+            raise ValueError("paper scheduler renewal interval must be smaller than its lease TTL")
         return self
 
     def require_rqdata(self) -> RqdataCredentials:
@@ -192,22 +193,14 @@ class AppSettings(BaseSettings):
     def require_web(self) -> WebCredentials:
         username = self.web_username.strip()
         password = self.web_password
-        if (
-            not username
-            or password is None
-            or len(password.get_secret_value().strip()) < 16
-        ):
+        if not username or password is None or len(password.get_secret_value().strip()) < 16:
             raise MissingCapabilityError("Web credentials are not configured")
         return WebCredentials(username=username, password=password)
 
     def require_paper_runtime(self) -> PaperRuntimeCredentials:
         holder_id = self.paper_scheduler_holder_id
         token = self.paper_scheduler_lease_token
-        if (
-            holder_id is None
-            or token is None
-            or len(token.get_secret_value()) < 32
-        ):
+        if holder_id is None or token is None or len(token.get_secret_value()) < 32:
             raise MissingCapabilityError(
                 "Paper runtime scheduler lease credentials are not configured"
             )
@@ -219,14 +212,8 @@ class AppSettings(BaseSettings):
     def require_qmt_runtime(self) -> QmtRuntimeCredentials:
         holder_id = self.qmt_holder_id
         token = self.qmt_lease_token
-        if (
-            holder_id is None
-            or token is None
-            or len(token.get_secret_value()) < 32
-        ):
-            raise MissingCapabilityError(
-                "QMT session lease credentials are not configured"
-            )
+        if holder_id is None or token is None or len(token.get_secret_value()) < 32:
+            raise MissingCapabilityError("QMT session lease credentials are not configured")
         return QmtRuntimeCredentials(
             holder_id=holder_id,
             lease_token=token,

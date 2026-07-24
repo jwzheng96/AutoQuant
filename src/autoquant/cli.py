@@ -68,6 +68,7 @@ from autoquant.operations import (
     run_low_volatility_forward_cycle,
     run_low_volatility_forward_window,
     run_low_volatility_validation,
+    run_qmt_observer,
     run_qmt_readonly_acceptance,
     run_research_data_campaign,
     run_session_reference_refresh,
@@ -384,6 +385,25 @@ def qmt_readonly_accept(
     except (AutoQuantError, LookupError, ValueError):
         _fail("QMT read-only acceptance failed closed")
     _emit(payload)
+
+
+@app.command("run-qmt-observer")
+def qmt_observer(
+    confirm_read_only: Annotated[
+        bool,
+        typer.Option("--confirm-read-only"),
+    ] = False,
+) -> None:
+    """Run durable QMT callbacks and read-only full-query reconciliation."""
+
+    if not confirm_read_only:
+        _fail("QMT observer requires explicit read-only confirmation")
+    try:
+        asyncio.run(run_qmt_observer(_settings()))
+    except MissingCapabilityError as error:
+        _fail(str(error))
+    except (AutoQuantError, LookupError, ValueError):
+        _fail("QMT read-only observer failed closed")
 
 
 @app.command("qmt-drill-start")

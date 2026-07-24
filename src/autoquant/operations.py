@@ -95,6 +95,7 @@ from autoquant.data.universe import (
 )
 from autoquant.errors import (
     AutoQuantError,
+    BrokerStateUnknownError,
     MissingCapabilityError,
     PersistenceUnavailableError,
     VendorAuthenticationError,
@@ -136,10 +137,29 @@ from autoquant.execution.promotion_audit import (
     PaperPromotionPolicy,
     PostgresPaperPromotionFactRepository,
 )
+from autoquant.execution.qmt_callback_coordinator import (
+    QmtCallbackPersistenceCoordinator,
+)
+from autoquant.execution.qmt_callback_processor import (
+    QmtPersistedAsyncResponseBinder,
+)
+from autoquant.execution.qmt_callback_reconciliation import (
+    QmtCallbackReconciliationState,
+)
+from autoquant.execution.qmt_callback_reconciliation_store import (
+    PostgresQmtCallbackReconciliationRepository,
+)
+from autoquant.execution.qmt_callback_reducer_store import (
+    PostgresQmtCallbackStateReducer,
+)
+from autoquant.execution.qmt_callback_store import PostgresQmtCallbackInbox
+from autoquant.execution.qmt_canary_store import PostgresQmtCanaryOrderLedger
+from autoquant.execution.qmt_gateway import LockedQmtGateway
 from autoquant.execution.qmt_lease_guard import (
     QmtSessionLeaseGuard,
     run_fenced_blocking,
 )
+from autoquant.execution.qmt_observer import QmtReadOnlyObserver
 from autoquant.execution.qmt_preflight import inspect_qmt_readiness
 from autoquant.execution.qmt_quote_runtime import (
     ImportedXtDataClient,
@@ -3702,6 +3722,191 @@ async def unlock_paper_runtime(
             await evidence.close()
         if clickhouse is not None:
             await clickhouse.client.close()
+
+
+async def run_qmt_observer(settings: AppSettings) -> None:
+    """Run the lease-fenced read-only XtTrader callback/query observer."""
+
+    if settings.environment is not RuntimeEnvironment.PAPER:
+        raise MissingCapabilityError("paper environment is not configured")
+    userdata_path = settings.qmt_userdata_path
+    account_secret = settings.qmt_account_id
+    session_id = settings.qmt_session_id
+    if userdata_path is None or account_secret is None or session_id is None:
+        raise MissingCapabilityError("QMT read-only settings are not configured")
+    broker_account_id = account_secret.get_secret_value().strip()
+    if not broker_account_id:
+        raise MissingCapabilityError("QMT account identifier is not configured")
+    credentials = settings.require_qmt_runtime()
+    postgres_dsn = configured_dsn(
+        settings.postgres_dsn,
+        capability="PostgreSQL",
+    )
+    controls: PostgresExecutionControlRepository | None = None
+    leases: PostgresQmtSessionLeaseRepository | None = None
+    acceptances: PostgresQmtReadOnlyAcceptanceRepository | None = None
+    inbox: PostgresQmtCallbackInbox | None = None
+    reducer: PostgresQmtCallbackStateReducer | None = None
+    ledger: PostgresQmtCanaryOrderLedger | None = None
+    reconciliations: PostgresQmtCallbackReconciliationRepository | None = None
+    lease_guard: QmtSessionLeaseGuard | None = None
+    qmt: QmtReadOnlyWindowsSession | None = None
+    coordinator: QmtCallbackPersistenceCoordinator | None = None
+    runtime_tasks: list[asyncio.Task[None]] = []
+    try:
+        controls = PostgresExecutionControlRepository.connect(dsn=postgres_dsn)
+        leases = PostgresQmtSessionLeaseRepository.connect(dsn=postgres_dsn)
+        acceptances = PostgresQmtReadOnlyAcceptanceRepository.connect(dsn=postgres_dsn)
+        inbox = PostgresQmtCallbackInbox.connect(dsn=postgres_dsn)
+        reducer = PostgresQmtCallbackStateReducer.connect(dsn=postgres_dsn)
+        ledger = PostgresQmtCanaryOrderLedger.connect(dsn=postgres_dsn)
+        reconciliations = PostgresQmtCallbackReconciliationRepository.connect(dsn=postgres_dsn)
+        await acceptances.check_connection()
+        await inbox.check_connection()
+        await reducer.check_connection()
+        await ledger.check_connection()
+        await reconciliations.check_connection()
+        control = await controls.replay(account_id=settings.paper_account_id)
+        active_session_ids = await leases.active_session_ids(now=datetime.now(UTC))
+        readiness = inspect_qmt_readiness(
+            settings,
+            kill_switch_active=control.active,
+            active_session_ids=active_session_ids,
+        )
+        if not readiness.read_only_ready:
+            blockers = ",".join(check.code.value for check in readiness.checks if not check.passed)
+            raise MissingCapabilityError(f"QMT read-only observer preflight is blocked: {blockers}")
+        bindings = await asyncio.to_thread(QmtVendorBindings.load)
+        lease_guard = QmtSessionLeaseGuard(
+            repository=leases,
+            session_id=session_id,
+            holder_id=credentials.holder_id,
+            token=credentials.lease_token,
+            ttl=timedelta(seconds=settings.qmt_lease_ttl_seconds),
+            now=lambda: datetime.now(UTC),
+        )
+        lease = await lease_guard.start()
+        gateway = LockedQmtGateway()
+        coordinator = QmtCallbackPersistenceCoordinator(
+            buffer=gateway.callbacks,
+            inbox=inbox,
+            expected_broker_account_id=broker_account_id,
+            logical_account_id=settings.paper_account_id,
+            gateway_holder_id=credentials.holder_id,
+            qmt_session_id=session_id,
+            qmt_lease_generation=lease.generation,
+            async_response_binder=QmtPersistedAsyncResponseBinder(
+                inbox=inbox,
+                ledger=ledger,
+            ),
+            state_reducer=reducer,
+        )
+        await coordinator.restore_before_capture(
+            lease_token=credentials.lease_token,
+        )
+        qmt = QmtReadOnlyWindowsSession(
+            userdata_path=userdata_path,
+            session_id=session_id,
+            broker_account_id=broker_account_id,
+            logical_account_id=settings.paper_account_id,
+            bindings=bindings,
+            gateway=gateway,
+            max_query_attempts=1,
+        )
+        await run_fenced_blocking(qmt.open)
+        observer = QmtReadOnlyObserver(
+            session=qmt,
+            callbacks=coordinator,
+            lease=lease_guard,
+            acceptances=acceptances,
+            reconciliations=reconciliations,
+            lease_token=credentials.lease_token,
+        )
+        first = await observer.observe()
+        if first.report.state is not QmtCallbackReconciliationState.PASSED:
+            raise BrokerStateUnknownError("QMT observer initial broker reconciliation was rejected")
+
+        async def pump_callbacks() -> None:
+            while True:
+                if gateway.callbacks.queued_count > 0:
+                    await coordinator.persist_and_process(
+                        lease_token=credentials.lease_token,
+                    )
+                await asyncio.sleep(float(settings.qmt_callback_poll_interval_seconds))
+
+        async def observe_queries() -> None:
+            while True:
+                await asyncio.sleep(float(settings.qmt_reconciliation_interval_seconds))
+                observation = await observer.observe()
+                if observation.report.state is not QmtCallbackReconciliationState.PASSED:
+                    raise BrokerStateUnknownError("QMT observer broker reconciliation was rejected")
+
+        async def watch_lease() -> None:
+            while True:
+                await asyncio.sleep(1)
+                await lease_guard.verify()
+
+        runtime_tasks = [
+            asyncio.create_task(pump_callbacks()),
+            asyncio.create_task(observe_queries()),
+            asyncio.create_task(watch_lease()),
+        ]
+        done, _ = await asyncio.wait(
+            runtime_tasks,
+            return_when=asyncio.FIRST_EXCEPTION,
+        )
+        for task in done:
+            task.result()
+        raise PersistenceUnavailableError("QMT observer stopped unexpectedly")
+    finally:
+        for task in runtime_tasks:
+            task.cancel()
+        if runtime_tasks:
+            await asyncio.gather(*runtime_tasks, return_exceptions=True)
+        if qmt is not None:
+            try:
+                await run_fenced_blocking(qmt.close)
+            except Exception:
+                pass
+        if coordinator is not None and lease_guard is not None:
+            try:
+                await coordinator.persist_and_process(
+                    lease_token=credentials.lease_token,
+                )
+            except Exception:
+                pass
+        if controls is not None:
+            try:
+                state = await controls.replay(account_id=settings.paper_account_id)
+                if not state.active:
+                    await controls.activate(
+                        account_id=settings.paper_account_id,
+                        command_id=f"qmt-observer-stop-{uuid4()}",
+                        reason=KillSwitchReason.DEPENDENCY_UNAVAILABLE,
+                        actor="qmt-readonly-observer",
+                        now=datetime.now(UTC),
+                    )
+            except Exception:
+                pass
+        if lease_guard is not None:
+            try:
+                await lease_guard.close()
+            except Exception:
+                pass
+        if reconciliations is not None:
+            await reconciliations.close()
+        if ledger is not None:
+            await ledger.close()
+        if reducer is not None:
+            await reducer.close()
+        if inbox is not None:
+            await inbox.close()
+        if acceptances is not None:
+            await acceptances.close()
+        if leases is not None:
+            await leases.close()
+        if controls is not None:
+            await controls.close()
 
 
 async def run_qmt_readonly_acceptance(

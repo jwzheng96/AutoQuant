@@ -530,6 +530,33 @@ def test_qmt_readonly_accept_emits_only_redacted_evidence() -> None:
     acceptance.assert_awaited_once()
 
 
+def test_qmt_observer_requires_explicit_read_only_confirmation() -> None:
+    result = runner.invoke(app, ["run-qmt-observer"])
+
+    assert result.exit_code == 2
+    assert "explicit read-only confirmation" in result.stdout
+
+
+def test_qmt_observer_starts_without_emitting_configuration() -> None:
+    observer = AsyncMock(return_value=None)
+    with patch(
+        "autoquant.cli.run_qmt_observer",
+        new=observer,
+    ):
+        result = runner.invoke(
+            app,
+            ["run-qmt-observer", "--confirm-read-only"],
+            env={
+                "AQ_QMT_ACCOUNT_ID": "sensitive-broker-account",
+                "AQ_QMT_LEASE_TOKEN": ("sensitive-qmt-lease-token-with-32-characters"),
+            },
+        )
+
+    assert result.exit_code == 0
+    assert "sensitive" not in result.stdout
+    observer.assert_awaited_once()
+
+
 def test_qmt_recovery_drill_requires_explicit_confirmation() -> None:
     start = runner.invoke(
         app,

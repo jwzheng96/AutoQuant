@@ -27,9 +27,7 @@ from autoquant.execution.qmt_readonly import (
     normalize_qmt_trade,
 )
 
-_PACKAGE_SUFFIXES = frozenset(
-    {".py", ".pyi", ".pyd", ".dll", ".so", ".json"}
-)
+_PACKAGE_SUFFIXES = frozenset({".py", ".pyi", ".pyd", ".dll", ".so", ".json"})
 _MAX_PACKAGE_FILES = 20_000
 _MAX_PACKAGE_BYTES = 512 * 1024 * 1024
 
@@ -51,9 +49,7 @@ class QmtTraderProtocol(Protocol):
 
     def query_stock_asset(self, account: object) -> object | None: ...
 
-    def query_stock_positions(
-        self, account: object
-    ) -> Sequence[object] | None: ...
+    def query_stock_positions(self, account: object) -> Sequence[object] | None: ...
 
     def query_stock_orders(
         self,
@@ -61,9 +57,7 @@ class QmtTraderProtocol(Protocol):
         cancelable_only: bool = False,
     ) -> Sequence[object] | None: ...
 
-    def query_stock_trades(
-        self, account: object
-    ) -> Sequence[object] | None: ...
+    def query_stock_trades(self, account: object) -> Sequence[object] | None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,22 +98,16 @@ class QmtVendorBindings:
             )
             package_file = package.__file__
         except (AttributeError, ImportError, TypeError, ValueError):
-            raise MissingCapabilityError(
-                "XtQuant read-only bindings are unavailable"
-            ) from None
+            raise MissingCapabilityError("XtQuant read-only bindings are unavailable") from None
         if not isinstance(package_file, str) or not package_file.strip():
-            raise MissingCapabilityError(
-                "XtQuant package location is unavailable"
-            )
+            raise MissingCapabilityError("XtQuant package location is unavailable")
         return cls(
             trader_factory=trader_factory,
             account_factory=account_factory,
             callback_base=callback_base,
             stock_buy=stock_buy,
             stock_sell=stock_sell,
-            package_manifest_hash=_package_manifest_hash(
-                Path(package_file).resolve().parent
-            ),
+            package_manifest_hash=_package_manifest_hash(Path(package_file).resolve().parent),
         )
 
     def side(self, order_type: object) -> str:
@@ -128,9 +116,7 @@ class QmtVendorBindings:
             return "buy"
         if value == self.stock_sell:
             return "sell"
-        raise BrokerStateUnknownError(
-            "QMT returned a non-stock buy/sell order type"
-        )
+        raise BrokerStateUnknownError("QMT returned a non-stock buy/sell order type")
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,13 +141,8 @@ class QmtReadOnlyWindowsSession:
         max_query_attempts: int = 3,
         max_query_duration: timedelta = timedelta(seconds=5),
     ) -> None:
-        if (
-            not userdata_path.is_absolute()
-            or userdata_path.name.casefold() != "userdata_mini"
-        ):
-            raise ValueError(
-                "QMT userdata path must be an absolute userdata_mini path"
-            )
+        if not userdata_path.is_absolute() or userdata_path.name.casefold() != "userdata_mini":
+            raise ValueError("QMT userdata path must be an absolute userdata_mini path")
         if (
             not isinstance(session_id, int)
             or isinstance(session_id, bool)
@@ -214,13 +195,9 @@ class QmtReadOnlyWindowsSession:
         try:
             trader.start()
             if trader.connect() != 0:
-                raise BrokerStateUnknownError(
-                    "QMT MiniQMT connection failed"
-                )
+                raise BrokerStateUnknownError("QMT MiniQMT connection failed")
             if trader.subscribe(account) != 0:
-                raise BrokerStateUnknownError(
-                    "QMT account subscription failed"
-                )
+                raise BrokerStateUnknownError("QMT account subscription failed")
         except Exception:
             try:
                 trader.stop()
@@ -247,16 +224,48 @@ class QmtReadOnlyWindowsSession:
         finally:
             trader.stop()
         if unsubscribe_failed:
-            raise BrokerStateUnknownError(
-                "QMT account unsubscribe failed"
-            )
+            raise BrokerStateUnknownError("QMT account unsubscribe failed")
 
     def query(self) -> QmtReadOnlyAcceptance:
+        return self._query(
+            drain_before_attempt=True,
+            attempts=self._max_query_attempts,
+        )
+
+    def query_preserving_callbacks(
+        self,
+        *,
+        expected_callback_cursor: int,
+    ) -> QmtReadOnlyAcceptance:
+        """Query once without consuming callbacks owned by the durable coordinator."""
+
+        if (
+            not isinstance(expected_callback_cursor, int)
+            or isinstance(expected_callback_cursor, bool)
+            or expected_callback_cursor < 0
+        ):
+            raise ValueError("expected callback cursor must be nonnegative")
+        if self._gateway.callbacks.cursor != expected_callback_cursor:
+            raise BrokerStateUnknownError(
+                "QMT callback persistence must catch up before read-only query"
+            )
+        return self._query(
+            drain_before_attempt=False,
+            attempts=1,
+        )
+
+    def _query(
+        self,
+        *,
+        drain_before_attempt: bool,
+        attempts: int,
+    ) -> QmtReadOnlyAcceptance:
         trader, account = self._require_open()
         self._require_account_normal(trader)
         last_error: BrokerStateUnknownError | None = None
-        for generation in range(1, self._max_query_attempts + 1):
-            self._drain_before_query()
+        for generation in range(1, attempts + 1):
+            if drain_before_attempt:
+                self._drain_before_query()
             callback_cursor_before = self._gateway.callbacks.cursor
             query_started_at = self._utc_now("QMT query start")
             asset_object = trader.query_stock_asset(account)
@@ -270,12 +279,9 @@ class QmtReadOnlyWindowsSession:
             callback_cursor_after = self._gateway.callbacks.cursor
             if (
                 query_completed_at < query_started_at
-                or query_completed_at - query_started_at
-                > self._max_query_duration
+                or query_completed_at - query_started_at > self._max_query_duration
             ):
-                raise BrokerStateUnknownError(
-                    "QMT queries exceeded the coherent snapshot window"
-                )
+                raise BrokerStateUnknownError("QMT queries exceeded the coherent snapshot window")
             try:
                 asset = (
                     None
@@ -345,6 +351,10 @@ class QmtReadOnlyWindowsSession:
                 baseline=baseline,
                 package_manifest_hash=self._bindings.package_manifest_hash,
             )
+        if not drain_before_attempt:
+            raise BrokerStateUnknownError(
+                "QMT callback changed during the durable read-only query"
+            ) from last_error
         raise BrokerStateUnknownError(
             "QMT callbacks prevented a coherent read-only baseline"
         ) from last_error
@@ -357,18 +367,12 @@ class QmtReadOnlyWindowsSession:
     def _require_account_normal(self, trader: QmtTraderProtocol) -> None:
         statuses = trader.query_account_status()
         if statuses is None:
-            raise BrokerStateUnknownError(
-                "QMT account status query returned None"
-            )
+            raise BrokerStateUnknownError("QMT account status query returned None")
         matching = [
-            item
-            for item in statuses
-            if _string_attr(item, "account_id") == self._broker_account_id
+            item for item in statuses if _string_attr(item, "account_id") == self._broker_account_id
         ]
         if len(matching) != 1 or _int_attr(matching[0], "status") != 0:
-            raise BrokerStateUnknownError(
-                "QMT account is not uniquely present in normal status"
-            )
+            raise BrokerStateUnknownError("QMT account is not uniquely present in normal status")
 
     def _drain_before_query(self) -> None:
         for event in self._gateway.callbacks.drain():
@@ -555,9 +559,7 @@ def _attr(value: object, name: str) -> object:
     try:
         return getattr(value, name)
     except AttributeError:
-        raise BrokerStateUnknownError(
-            f"QMT object omitted required field: {name}"
-        ) from None
+        raise BrokerStateUnknownError(f"QMT object omitted required field: {name}") from None
 
 
 def _string_attr(
@@ -568,9 +570,7 @@ def _string_attr(
 ) -> str:
     raw = _attr(value, name)
     if not isinstance(raw, str):
-        raise BrokerStateUnknownError(
-            f"QMT field {name} is not a string"
-        )
+        raise BrokerStateUnknownError(f"QMT field {name} is not a string")
     normalized = raw.strip()
     if not allow_blank and not normalized:
         raise BrokerStateUnknownError(f"QMT field {name} is empty")
@@ -590,22 +590,16 @@ def _strict_int(value: object, *, name: str) -> int:
 def _float_attr(value: object, name: str) -> float:
     raw = _attr(value, name)
     if isinstance(raw, bool) or not isinstance(raw, (int, float)):
-        raise BrokerStateUnknownError(
-            f"QMT field {name} is not numeric"
-        )
+        raise BrokerStateUnknownError(f"QMT field {name} is not numeric")
     converted = float(raw)
     if not (-float("inf") < converted < float("inf")):
-        raise BrokerStateUnknownError(
-            f"QMT field {name} is not finite"
-        )
+        raise BrokerStateUnknownError(f"QMT field {name} is not finite")
     return converted
 
 
 def _package_manifest_hash(root: Path) -> str:
     if not root.is_absolute() or not root.is_dir():
-        raise MissingCapabilityError(
-            "XtQuant package directory is unavailable"
-        )
+        raise MissingCapabilityError("XtQuant package directory is unavailable")
     files = tuple(
         sorted(
             (
@@ -619,14 +613,10 @@ def _package_manifest_hash(root: Path) -> str:
         )
     )
     if not files or len(files) > _MAX_PACKAGE_FILES:
-        raise MissingCapabilityError(
-            "XtQuant package manifest has an unsafe file count"
-        )
+        raise MissingCapabilityError("XtQuant package manifest has an unsafe file count")
     total_bytes = sum(path.stat().st_size for path in files)
     if total_bytes > _MAX_PACKAGE_BYTES:
-        raise MissingCapabilityError(
-            "XtQuant package manifest exceeds the audit size limit"
-        )
+        raise MissingCapabilityError("XtQuant package manifest exceeds the audit size limit")
     manifest = hashlib.sha256()
     for path in files:
         relative = path.relative_to(root).as_posix()
@@ -638,16 +628,9 @@ def _package_manifest_hash(root: Path) -> str:
                     file_hash.update(chunk)
             after = path.stat()
         except OSError:
-            raise MissingCapabilityError(
-                "XtQuant package manifest could not be read"
-            ) from None
-        if (
-            before.st_size != after.st_size
-            or before.st_mtime_ns != after.st_mtime_ns
-        ):
-            raise MissingCapabilityError(
-                "XtQuant package changed while its manifest was computed"
-            )
+            raise MissingCapabilityError("XtQuant package manifest could not be read") from None
+        if before.st_size != after.st_size or before.st_mtime_ns != after.st_mtime_ns:
+            raise MissingCapabilityError("XtQuant package changed while its manifest was computed")
         manifest.update(relative.encode("utf-8"))
         manifest.update(b"\0")
         manifest.update(str(after.st_size).encode("ascii"))

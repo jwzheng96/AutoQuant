@@ -94,6 +94,8 @@ AQ_QMT_SESSION_ID=一个与同机其他策略不同的正整数
 AQ_QMT_HOLDER_ID=windows-qmt-readonly-01
 AQ_QMT_LEASE_TOKEN=至少32字符的独立随机秘密
 AQ_QMT_LEASE_TTL_SECONDS=30
+AQ_QMT_CALLBACK_POLL_INTERVAL_SECONDS=0.25
+AQ_QMT_RECONCILIATION_INTERVAL_SECONDS=30
 ```
 
 同时保留：
@@ -151,6 +153,31 @@ Windows 进程并等待租约过期，不能另起同 session id 的验收进程
 验收后可在受认证的 `/trading` 页面或 `GET /api/v1/qmt` 查看最近证据时间、脱敏记录数量、
 当前控制台主机的逐项 `pass`/`blocked` 和剩余演练门禁。证据超过 24 小时会显示为过期；
 页面不提供验收、解锁、下单或撤单操作。
+
+## 启动常驻只读账户观察器
+
+一次性验收通过后，可在同一受控 Windows 节点启动 schema v40-v43 常驻闭环：
+
+```powershell
+uv run autoquant run-qmt-observer --confirm-read-only
+```
+
+观察器严格先回放当前 lease generation 的持久化回调和游标，再注册 XtTrader 回调。回调
+线程仍只复制字段到有界内存队列；单消费者默认每 0.25 秒追加收件箱、数据库及时回执和
+处理链，默认每 30 秒执行一次资产、持仓、当日委托和当日成交全量查询。查询期间到达的
+回调不会被丢弃或拼接进快照：观察器先将它们持久化，再重新查询；连续三次无法取得稳定
+窗口就失败关闭。
+
+每轮稳定查询都会追加脱敏验收证据和 v43 对账报告。只有 lease scope、回调游标、订单
+投影和成交事实完全一致时报告才是 `passed`；`rejected` 报告同样不可变，并立即终止
+观察器。租约每秒复验，数据库错误、队列溢出、断线、账户异常、查询不确定或续租失败都会
+停止进程并确保停机开关保持 active。正常停止也会先断开 XtTrader、尽力持久化剩余回调，
+再释放租约。
+
+该命令只装配 `query_*`、账户订阅和回调接口。运行对象使用 `LockedQmtGateway`，没有
+`order_stock`、撤单或资金操作路径；控制台的 `GET /api/v1/qmt/operations` 只读显示
+当前租约、游标、哈希链、订单/成交投影和最新对账状态。应由 Windows 服务管理器负责进程
+拉起，但在根因未处理前不得无限自动重启失败实例。
 
 ## 故障恢复演练
 
@@ -246,5 +273,6 @@ Windows 装配层建立连接并成功订阅账户后，按以下顺序构建只
 空集合。因此 AutoQuant 对四类 `None` 均不作“空账户”推断。
 
 schema v14 同时要求常驻模拟盘 scheduler 在启动前获取账户级进程租约并持续续租。租约
-丢失会激活停机开关；不能以重启进程绕过。下一阶段仍需在 Windows 增加真实只读连接、
-账户订阅、回调/查询汇合和断线恢复演练，完成前无需向系统提供任何交易授权。
+丢失会激活停机开关；不能以重启进程绕过。当前只读观察器已经装配账户订阅、回调持久化
+和全量查询对账，但仍需在授权 Windows 节点完成断网、MiniQMT 重启和进程崩溃演练；完成
+前无需向系统提供任何交易授权。

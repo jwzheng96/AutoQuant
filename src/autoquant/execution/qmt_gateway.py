@@ -63,12 +63,8 @@ class QmtCallbackReservation:
             raise ValueError("QMT callback reservation_id must be positive")
         if not self.events:
             raise ValueError("QMT callback reservation must contain events")
-        if any(
-            not isinstance(event, QmtCallbackEnvelope) for event in self.events
-        ):
-            raise TypeError(
-                "QMT callback reservation must contain callback envelopes"
-            )
+        if any(not isinstance(event, QmtCallbackEnvelope) for event in self.events):
+            raise TypeError("QMT callback reservation must contain callback envelopes")
 
 
 class QmtCallbackBuffer:
@@ -99,6 +95,12 @@ class QmtCallbackBuffer:
     def healthy(self) -> bool:
         with self._sequence_lock:
             return not self._overflowed
+
+    @property
+    def queued_count(self) -> int:
+        """Return a scheduling hint; durable reservation still owns consumption."""
+
+        return self._queue.qsize()
 
     def capture(
         self,
@@ -141,13 +143,8 @@ class QmtCallbackBuffer:
         try:
             with self._sequence_lock:
                 self._require_healthy()
-                if (
-                    self._active_reservation_id is not None
-                    or self._pending_events
-                ):
-                    raise RuntimeError(
-                        "QMT callback buffer has a durable reservation pending"
-                    )
+                if self._active_reservation_id is not None or self._pending_events:
+                    raise RuntimeError("QMT callback buffer has a durable reservation pending")
                 return self._take(limit=limit)
         finally:
             self._drain_lock.release()
@@ -166,9 +163,7 @@ class QmtCallbackBuffer:
             with self._sequence_lock:
                 self._require_healthy()
                 if self._active_reservation_id is not None:
-                    raise RuntimeError(
-                        "QMT callback buffer already has a durable reservation"
-                    )
+                    raise RuntimeError("QMT callback buffer already has a durable reservation")
                 if not self._pending_events:
                     self._pending_events = self._take(limit=limit)
                 if not self._pending_events:
@@ -242,9 +237,7 @@ class QmtCallbackBuffer:
         try:
             with self._sequence_lock:
                 if self._active_reservation_id != reservation_id:
-                    raise RuntimeError(
-                        "QMT callback reservation is not the active batch"
-                    )
+                    raise RuntimeError("QMT callback reservation is not the active batch")
                 if acknowledge:
                     self._require_healthy()
                     self._pending_events = ()
@@ -254,9 +247,7 @@ class QmtCallbackBuffer:
 
     def _require_healthy(self) -> None:
         if self._overflowed:
-            raise BrokerStateUnknownError(
-                "QMT callback buffer overflow requires a full reconnect"
-            )
+            raise BrokerStateUnknownError("QMT callback buffer overflow requires a full reconnect")
 
     def _take(self, *, limit: int) -> tuple[QmtCallbackEnvelope, ...]:
         events: list[QmtCallbackEnvelope] = []

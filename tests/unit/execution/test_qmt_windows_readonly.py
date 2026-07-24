@@ -211,6 +211,54 @@ def test_readonly_session_retries_normal_status_callback_during_query() -> None:
     assert result.baseline.callback_cursor == 1
 
 
+def test_durable_query_preserves_callback_for_persistence_coordinator() -> None:
+    trader = FakeTrader()
+    session = _session(trader)
+    session.open()
+    session.gateway.callbacks.capture(
+        QmtCallbackKind.ACCOUNT_STATUS,
+        {"account_id": ACCOUNT, "status": 0},
+    )
+
+    with pytest.raises(
+        BrokerStateUnknownError,
+        match="persistence must catch up",
+    ):
+        session.query_preserving_callbacks(expected_callback_cursor=0)
+
+    events = session.gateway.callbacks.drain()
+    session.close()
+    assert len(events) == 1
+    assert events[0].kind is QmtCallbackKind.ACCOUNT_STATUS
+
+
+def test_durable_query_retains_callback_arriving_during_query() -> None:
+    trader = FakeTrader()
+    session = _session(trader)
+    original = trader.query_stock_asset
+
+    def query_with_callback(account: object) -> object | None:
+        session.gateway.callbacks.capture(
+            QmtCallbackKind.ACCOUNT_STATUS,
+            {"account_id": ACCOUNT, "status": 0},
+        )
+        return original(account)
+
+    trader.query_stock_asset = query_with_callback  # type: ignore[method-assign]
+    session.open()
+
+    with pytest.raises(
+        BrokerStateUnknownError,
+        match="changed during the durable",
+    ):
+        session.query_preserving_callbacks(expected_callback_cursor=0)
+
+    events = session.gateway.callbacks.drain()
+    session.close()
+    assert len(events) == 1
+    assert events[0].kind is QmtCallbackKind.ACCOUNT_STATUS
+
+
 def test_readonly_session_rejects_state_changing_callback() -> None:
     trader = FakeTrader()
     session = _session(

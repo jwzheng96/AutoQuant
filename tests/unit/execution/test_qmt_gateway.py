@@ -89,10 +89,12 @@ def test_callback_capture_preserves_local_order_and_copies_payload() -> None:
     payload["order_id"] = "mutated"
     second = buffer.capture(QmtCallbackKind.TRADE, {"trade_id": "second"})
 
+    assert buffer.queued_count == 2
     drained = buffer.drain()
 
     assert [event.local_sequence for event in drained] == [1, 2]
     assert buffer.cursor == 2
+    assert buffer.queued_count == 0
     assert first.payload["order_id"] == "first"
     assert second.local_sequence == 2
     assert buffer.drain() == ()
