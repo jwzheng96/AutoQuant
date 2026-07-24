@@ -1237,9 +1237,7 @@ def test_execution_compatibility_freeze_requires_confirmation() -> None:
 def test_execution_compatibility_freeze_discloses_partial_outcome() -> None:
     payload = {
         "compatibility_can_only_disqualify": True,
-        "decision_order_policy_version": (
-            "low-volatility-prior-close-order-intents-v1"
-        ),
+        "decision_order_policy_version": ("low-volatility-prior-close-order-intents-v1"),
         "execution_compatibility_spec_hash": "a" * 64,
         "forward_spec_hash": "b" * 64,
         "live_trading_locked": True,
@@ -1248,9 +1246,7 @@ def test_execution_compatibility_freeze_discloses_partial_outcome() -> None:
         "partial_outcome_observed_before_freeze": True,
         "runtime_activation_allowed": False,
         "source_spec_hash": "c" * 64,
-        "status": (
-            "frozen_awaiting_terminal_forward_evaluation"
-        ),
+        "status": ("frozen_awaiting_terminal_forward_evaluation"),
         "terminal_outcome_observed_before_freeze": False,
     }
     freeze = AsyncMock(return_value=payload)
@@ -1268,11 +1264,7 @@ def test_execution_compatibility_freeze_discloses_partial_outcome() -> None:
                 "research-operator",
                 "--confirm-decision-time-audit",
             ],
-            env={
-                "AQ_POSTGRES_DSN": (
-                    "postgresql+asyncpg://sensitive"
-                )
-            },
+            env={"AQ_POSTGRES_DSN": ("postgresql+asyncpg://sensitive")},
         )
 
     assert result.exit_code == 0
@@ -1280,6 +1272,100 @@ def test_execution_compatibility_freeze_discloses_partial_outcome() -> None:
     assert "sensitive" not in result.stdout
     assert payload["paper_activation_allowed"] is False
     freeze.assert_awaited_once()
+
+
+def test_execution_compatibility_evaluation_is_redacted_and_locked() -> None:
+    payload = {
+        "compatibility_run_hash": "a" * 64,
+        "compatibility_spec_hash": "b" * 64,
+        "compatibility_status": "compatible",
+        "execution_timing_compatible": True,
+        "gate_failures": [],
+        "live_trading_locked": True,
+        "paper_activation_allowed": False,
+        "runtime_activation_allowed": False,
+        "session_count": 126,
+        "status": "completed",
+    }
+    evaluation = AsyncMock(return_value=payload)
+    with patch(
+        "autoquant.cli.run_low_volatility_execution_compatibility_evaluation",
+        new=evaluation,
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "low-volatility-execution-compatibility-evaluate",
+                "--compatibility-spec-hash",
+                "b" * 64,
+                "--requested-by",
+                "research-operator",
+            ],
+            env={"AQ_POSTGRES_DSN": ("postgresql+asyncpg://sensitive")},
+        )
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == payload
+    assert "sensitive" not in result.stdout
+    assert payload["paper_activation_allowed"] is False
+    assert payload["runtime_activation_allowed"] is False
+    evaluation.assert_awaited_once()
+
+
+def test_execution_compatibility_evaluation_fails_closed() -> None:
+    evaluation = AsyncMock(side_effect=ValueError("terminal forward evaluation is not available"))
+    with patch(
+        "autoquant.cli.run_low_volatility_execution_compatibility_evaluation",
+        new=evaluation,
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "low-volatility-execution-compatibility-evaluate",
+                "--compatibility-spec-hash",
+                "b" * 64,
+                "--requested-by",
+                "research-operator",
+            ],
+            env={"AQ_POSTGRES_DSN": ("postgresql+asyncpg://sensitive")},
+        )
+
+    assert result.exit_code == 2
+    assert "terminal forward evaluation" not in result.stdout
+    assert "sensitive" not in result.stdout
+
+
+def test_execution_compatibility_incompatibility_exits_nonzero() -> None:
+    payload = {
+        "compatibility_run_hash": "a" * 64,
+        "compatibility_spec_hash": "b" * 64,
+        "compatibility_status": "incompatible",
+        "execution_timing_compatible": False,
+        "gate_failures": ["execution_rejections"],
+        "live_trading_locked": True,
+        "paper_activation_allowed": False,
+        "runtime_activation_allowed": False,
+        "session_count": 126,
+        "status": "completed",
+    }
+    evaluation = AsyncMock(return_value=payload)
+    with patch(
+        "autoquant.cli.run_low_volatility_execution_compatibility_evaluation",
+        new=evaluation,
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "low-volatility-execution-compatibility-evaluate",
+                "--compatibility-spec-hash",
+                "b" * 64,
+                "--requested-by",
+                "research-operator",
+            ],
+        )
+
+    assert result.exit_code == 2
+    assert json.loads(result.stdout) == payload
 
 
 def test_low_volatility_candidate_approval_requires_confirmation() -> None:
@@ -1464,9 +1550,7 @@ def test_low_volatility_signal_data_is_runtime_locked() -> None:
             ],
             env={
                 "AQ_ENVIRONMENT": "paper",
-                "AQ_POSTGRES_DSN": (
-                    "postgresql+asyncpg://sensitive"
-                ),
+                "AQ_POSTGRES_DSN": ("postgresql+asyncpg://sensitive"),
             },
         )
 
@@ -1534,9 +1618,7 @@ def test_low_volatility_signal_prepare_is_observation_only() -> None:
             ],
             env={
                 "AQ_ENVIRONMENT": "paper",
-                "AQ_POSTGRES_DSN": (
-                    "postgresql+asyncpg://sensitive"
-                ),
+                "AQ_POSTGRES_DSN": ("postgresql+asyncpg://sensitive"),
             },
         )
 

@@ -74,6 +74,7 @@ from autoquant.operations import (
     run_fundamental_data_backfill,
     run_fundamental_ingestion,
     run_fundamental_validation,
+    run_low_volatility_execution_compatibility_evaluation,
     run_low_volatility_forward_cycle,
     run_low_volatility_forward_evaluation,
     run_low_volatility_forward_window,
@@ -1275,10 +1276,7 @@ def low_volatility_execution_compatibility_freeze(
     """Freeze a disqualifying-only decision-time execution audit."""
 
     if not confirm_decision_time_audit:
-        _fail(
-            "decision-time execution compatibility confirmation "
-            "is required"
-        )
+        _fail("decision-time execution compatibility confirmation is required")
     try:
         payload = asyncio.run(
             freeze_low_volatility_execution_compatibility_spec(
@@ -1288,10 +1286,7 @@ def low_volatility_execution_compatibility_freeze(
             )
         )
     except (AutoQuantError, LookupError, ValueError):
-        _fail(
-            "low-volatility execution compatibility freeze "
-            "failed closed"
-        )
+        _fail("low-volatility execution compatibility freeze failed closed")
     _emit(payload)
 
 
@@ -1481,6 +1476,34 @@ def low_volatility_forward_evaluate(
     except (AutoQuantError, LookupError, ValueError):
         _fail("low-volatility forward evaluation failed closed")
     _emit(payload)
+
+
+@app.command("low-volatility-execution-compatibility-evaluate")
+def low_volatility_execution_compatibility_evaluate(
+    compatibility_spec_hash: Annotated[
+        str,
+        typer.Option("--compatibility-spec-hash"),
+    ],
+    requested_by: Annotated[
+        str,
+        typer.Option("--requested-by"),
+    ],
+) -> None:
+    """Audit terminal evidence with decision-time order intents."""
+
+    try:
+        payload = asyncio.run(
+            run_low_volatility_execution_compatibility_evaluation(
+                _settings(),
+                compatibility_spec_hash=compatibility_spec_hash,
+                requested_by=requested_by,
+            )
+        )
+    except (AutoQuantError, LookupError, ValueError):
+        _fail("low-volatility execution compatibility evaluation failed closed")
+    _emit(payload)
+    if not payload["execution_timing_compatible"]:
+        raise typer.Exit(code=2)
 
 
 @app.command("approve-paper-low-volatility-candidate")

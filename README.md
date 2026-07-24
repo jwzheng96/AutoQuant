@@ -100,6 +100,14 @@ official compatibility spec
 was frozen at 1/126 observed forward sessions, explicitly discloses that partial observation,
 and can only disqualify a future candidate. It cannot reclassify history or activate paper/live
 trading.
+Schema v49 adds the immutable terminal compatibility run. After—and only after—the original
+126-session evaluation is a locked `paper_candidate`, the evaluator reconstructs the same
+hash-addressed panel and session prefix, replaces only order-intent construction with the
+pre-registered decision-time policy, and reruns the unchanged execution simulator and gates.
+The stored artifact includes all 126 account snapshots and execution reports. Both compatible
+and incompatible outcomes permanently retain `paper_activation_allowed=false`,
+`runtime_activation_allowed=false`, and `live_trading_locked=true`. With the official ledger
+currently at 1/126, the command fails closed and the compatibility-run table remains empty.
 PostgreSQL schema v36 adds an append-only, revocable compliance-approval artifact bound to the
 active paper registration and exact promotion policy. No approval is created automatically,
 and even a valid artifact can only satisfy an evidence gate while the code-level live release

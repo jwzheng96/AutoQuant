@@ -1070,3 +1070,30 @@ This compatibility audit is disqualifying-only. It must reuse the exact first 12
 sessions and unchanged signal/risk parameters. A failure blocks paper promotion; a pass cannot
 rescue a rejected original evaluation, change historical classification, activate the runtime,
 or unlock live trading.
+
+Schema v49 implements that terminal audit:
+
+```bash
+uv run autoquant low-volatility-execution-compatibility-evaluate \
+  --compatibility-spec-hash \
+  7da729b9dfe7b9035b9552236a6c1c80e4f5d814c3166a35bf57f234c997102a \
+  --requested-by risk-auditor
+```
+
+Run it only after `low-volatility-forward-evaluate` has stored a passing 126-session
+`paper_candidate`. Before then it exits nonzero with a redacted fail-closed error and writes no
+row. It refuses to run if the original evaluation was rejected, so the corrected intent policy
+cannot rescue failed research.
+
+At terminal time the command reproduces the exact source and forward manifests, point-in-time
+universe bindings, panel hash, market-panel hash, and contiguous 126-session prefix. It reuses
+the original benchmark and all frozen thresholds, then persists the corrected strategy's full
+reports, snapshots, ledger events, assessment hashes, and gate failures in an append-only row.
+Database constraints require the original row to remain a locked paper candidate and make the
+compatibility result immutable.
+
+A `compatible` result only resolves the decision-time research question. The v49 result still
+hard-codes `paper_activation_allowed=false`, `runtime_activation_allowed=false`, and
+`live_trading_locked=true`. Paper deployment needs a later, separately reviewed schema that
+binds this result to daily signal evidence, session risk controls, and an explicitly approved
+paper target; live trading remains out of scope.

@@ -44,6 +44,7 @@ from autoquant.backtest.fundamental_validation import (
     assess_fundamental_validation,
 )
 from autoquant.backtest.low_volatility_execution_compatibility import (
+    LowVolatilityExecutionCompatibilityRun,
     LowVolatilityExecutionCompatibilitySpec,
 )
 from autoquant.backtest.low_volatility_forward import (
@@ -53,6 +54,7 @@ from autoquant.backtest.low_volatility_forward import (
 from autoquant.backtest.low_volatility_forward_evaluation import (
     LowVolatilityForwardEvaluator,
     assess_low_volatility_forward,
+    build_low_volatility_forward_result,
 )
 from autoquant.backtest.low_volatility_forward_panel import (
     LowVolatilityForwardPanelCompiler,
@@ -66,6 +68,7 @@ from autoquant.backtest.low_volatility_strategy import (
 from autoquant.backtest.low_volatility_validation import (
     LowVolatilityWalkForwardValidator,
     assess_low_volatility_validation,
+    run_low_volatility_decision_time_strategy_interval,
 )
 from autoquant.backtest.runner import ManifestMarketCompiler
 from autoquant.backtest.validation import (
@@ -240,6 +243,9 @@ from autoquant.web.fundamental_research_store import (
 from autoquant.web.fundamental_validation_store import (
     FundamentalValidationRecord,
     PostgresFundamentalValidationRepository,
+)
+from autoquant.web.low_volatility_execution_compatibility_run_store import (
+    PostgresLowVolatilityExecutionCompatibilityRunRepository,
 )
 from autoquant.web.low_volatility_execution_compatibility_store import (
     PostgresLowVolatilityExecutionCompatibilityRepository,
@@ -1428,32 +1434,18 @@ async def freeze_low_volatility_execution_compatibility_spec(
     """Pre-register decision-time intent rules before terminal outcome."""
 
     if settings.live_trading_enabled:
-        raise MissingCapabilityError(
-            "execution compatibility requires live trading locked"
-        )
+        raise MissingCapabilityError("execution compatibility requires live trading locked")
     dsn = configured_dsn(
         settings.postgres_dsn,
         capability="PostgreSQL",
     )
-    forward_specs = (
-        PostgresLowVolatilityForwardEvidenceSpecRepository.connect(
-            dsn=dsn
-        )
-    )
-    sessions = PostgresLowVolatilityForwardSessionRepository.connect(
-        dsn=dsn
-    )
-    compatibility = (
-        PostgresLowVolatilityExecutionCompatibilityRepository.connect(
-            dsn=dsn
-        )
-    )
+    forward_specs = PostgresLowVolatilityForwardEvidenceSpecRepository.connect(dsn=dsn)
+    sessions = PostgresLowVolatilityForwardSessionRepository.connect(dsn=dsn)
+    compatibility = PostgresLowVolatilityExecutionCompatibilityRepository.connect(dsn=dsn)
     control = PostgresControlRepository.connect(dsn=dsn)
     try:
         try:
-            existing = await compatibility.for_forward_spec(
-                forward_spec_hash
-            )
+            existing = await compatibility.for_forward_spec(forward_spec_hash)
         except LookupError:
             existing = None
         if existing is not None:
@@ -1461,12 +1453,8 @@ async def freeze_low_volatility_execution_compatibility_spec(
                 existing,
                 status="stored",
             )
-        forward = (
-            await forward_specs.read(forward_spec_hash)
-        ).spec
-        records = await sessions.list_for_spec(
-            forward_spec_hash=forward.spec_hash
-        )
+        forward = (await forward_specs.read(forward_spec_hash)).spec
+        records = await sessions.list_for_spec(forward_spec_hash=forward.spec_hash)
         spec = LowVolatilityExecutionCompatibilitySpec(
             source_spec_hash=forward.source_spec_hash,
             forward_spec_hash=forward.spec_hash,
@@ -1499,19 +1487,13 @@ def _low_volatility_compatibility_spec_payload(
 ) -> dict[str, object]:
     return {
         "compatibility_can_only_disqualify": True,
-        "decision_order_policy_version": (
-            spec.decision_order_policy_version
-        ),
+        "decision_order_policy_version": (spec.decision_order_policy_version),
         "execution_compatibility_spec_hash": spec.spec_hash,
         "forward_spec_hash": spec.forward_spec_hash,
         "live_trading_locked": True,
-        "observed_forward_session_count": (
-            spec.observed_forward_session_count
-        ),
+        "observed_forward_session_count": (spec.observed_forward_session_count),
         "paper_activation_allowed": False,
-        "partial_outcome_observed_before_freeze": (
-            spec.partial_outcome_observed_before_freeze
-        ),
+        "partial_outcome_observed_before_freeze": (spec.partial_outcome_observed_before_freeze),
         "runtime_activation_allowed": False,
         "source_spec_hash": spec.source_spec_hash,
         "status": status,
@@ -2071,6 +2053,198 @@ async def run_low_volatility_forward_evaluation(
         await forward_specs.close()
 
 
+async def run_low_volatility_execution_compatibility_evaluation(
+    settings: AppSettings,
+    *,
+    compatibility_spec_hash: str,
+    requested_by: str,
+) -> dict[str, object]:
+    """Reproduce the terminal window with decision-time order intents."""
+
+    if settings.live_trading_enabled:
+        raise MissingCapabilityError("execution compatibility requires live trading locked")
+    dsn = configured_dsn(
+        settings.postgres_dsn,
+        capability="PostgreSQL",
+    )
+    compatibility = PostgresLowVolatilityExecutionCompatibilityRepository.connect(dsn=dsn)
+    runs = PostgresLowVolatilityExecutionCompatibilityRunRepository.connect(dsn=dsn)
+    evaluations = PostgresLowVolatilityForwardEvaluationRepository.connect(dsn=dsn)
+    forward_specs = PostgresLowVolatilityForwardEvidenceSpecRepository.connect(dsn=dsn)
+    source_specs = PostgresLowVolatilityResearchSpecRepository.connect(dsn=dsn)
+    validations = PostgresLowVolatilityValidationRepository.connect(dsn=dsn)
+    campaigns = PostgresResearchDataCampaignRepository.connect(dsn=dsn)
+    universes = PostgresResearchUniverseRepository.connect(dsn=dsn)
+    control = PostgresControlRepository.connect(dsn=dsn)
+    market: ClickHouseDailyRepository | None = None
+    try:
+        spec = await compatibility.read(compatibility_spec_hash)
+        try:
+            existing = await runs.for_spec(spec.spec_hash)
+        except LookupError:
+            existing = None
+        if existing is not None:
+            return _low_volatility_compatibility_run_payload(
+                existing,
+                status="stored",
+            )
+        original = await evaluations.read_for_spec(spec.forward_spec_hash)
+        if original is None:
+            raise ValueError("terminal forward evaluation is not available")
+        if (
+            original.assessment.evidence_status != "paper_candidate"
+            or not original.assessment.paper_trading_eligible
+            or original.paper_deployment_allowed
+            or not original.live_trading_locked
+            or original.result.source_spec_hash != spec.source_spec_hash
+        ):
+            raise ValueError("execution compatibility cannot rescue a rejected evaluation")
+        forward = (await forward_specs.read(spec.forward_spec_hash)).spec
+        source = (await source_specs.read(spec.source_spec_hash)).spec
+        predecessor = await validations.read(forward.predecessor_result_hash)
+        bindings = original.result.session_bindings
+        source_plan = await _load_research_input_plan(
+            campaigns=campaigns,
+            universes=universes,
+            manifest_hash=source.dataset_manifest_hash,
+        )
+        evaluation_manifest = await campaigns.read_manifest(
+            original.result.evaluation_dataset_manifest_hash
+        )
+        market = await ClickHouseDailyRepository.connect(
+            dsn=configured_dsn(
+                settings.clickhouse_dsn,
+                capability="ClickHouse",
+            ),
+            source="tushare",
+        )
+        historical_reader = ExactManifestResearchDatasetReader(
+            plan=source_plan,
+            control_reader=control,
+            record_reader=market,
+            batch_size=4,
+        )
+        forward_reader = ExactManifestResearchDatasetReader(
+            plan=evaluation_manifest,
+            control_reader=control,
+            record_reader=market,
+            batch_size=4,
+        )
+        dynamic_panel = await LowVolatilityForwardPanelCompiler(
+            historical_reader=historical_reader,
+            forward_reader=forward_reader,
+        ).compile(
+            source_plan=source_plan,
+            source_spec=source,
+            forward_spec=forward,
+            forward_manifest=evaluation_manifest,
+            bindings=bindings,
+        )
+        executable = compile_low_volatility_executable_panel(
+            spec=source,
+            markets=dynamic_panel,
+        )
+        panel_dates = tuple(value.session_date for value in executable.sessions)
+        try:
+            start_index = panel_dates.index(forward.forward_start_date)
+        except ValueError:
+            raise ValueError("compatibility window is absent from the panel") from None
+        if (
+            executable.panel_hash != original.result.panel_hash
+            or executable.market_panel_hash != original.result.market_panel_hash
+            or tuple(value.session_date for value in bindings)
+            != panel_dates[start_index : start_index + forward.minimum_forward_sessions]
+        ):
+            raise ValueError("compatibility did not reproduce the exact panel")
+        decision_strategy = run_low_volatility_decision_time_strategy_interval(
+            panel=executable,
+            spec=source,
+            start_index=start_index,
+            trade_session_count=(forward.minimum_forward_sessions),
+        )
+        corrected = build_low_volatility_forward_result(
+            panel_hash=executable.panel_hash,
+            market_panel_hash=executable.market_panel_hash,
+            as_of=executable.as_of,
+            forward_spec=forward,
+            evaluation_dataset_manifest_hash=(evaluation_manifest.manifest_hash),
+            bindings=bindings,
+            predecessor_result=predecessor.result,
+            strategy_result=decision_strategy,
+            benchmark_result=original.result.benchmark_result,
+        )
+        assessment = assess_low_volatility_forward(
+            corrected,
+            spec=forward,
+        )
+        completed_at = datetime.now(UTC)
+        if completed_at < original.completed_at:
+            raise ValueError("compatibility completion cannot precede evaluation")
+        run = LowVolatilityExecutionCompatibilityRun(
+            compatibility_spec_hash=spec.spec_hash,
+            original_evaluation_result_hash=(original.result.result_hash),
+            corrected_forward_result_hash=(corrected.result_hash),
+            corrected_assessment_hash=(assessment.assessment_hash),
+            forward_spec_hash=forward.spec_hash,
+            source_spec_hash=source.spec_hash,
+            evaluation_dataset_manifest_hash=(evaluation_manifest.manifest_hash),
+            panel_hash=executable.panel_hash,
+            strategy_result=decision_strategy,
+            gate_failures=assessment.gate_failures,
+            completed_by=requested_by,
+            completed_at=completed_at,
+        )
+        stored = await runs.save(run)
+        payload = _low_volatility_compatibility_run_payload(
+            stored,
+            status="completed",
+        )
+        await control.append_audit_event(
+            "research.low_volatility.execution_compatibility.completed",
+            stored.completed_at,
+            payload,
+        )
+        return payload
+    finally:
+        if market is not None:
+            await market.client.close()
+        await control.close()
+        await universes.close()
+        await campaigns.close()
+        await validations.close()
+        await source_specs.close()
+        await forward_specs.close()
+        await evaluations.close()
+        await runs.close()
+        await compatibility.close()
+
+
+def _low_volatility_compatibility_run_payload(
+    run: LowVolatilityExecutionCompatibilityRun,
+    *,
+    status: str,
+) -> dict[str, object]:
+    return {
+        "compatibility_run_hash": run.run_hash,
+        "compatibility_spec_hash": (run.compatibility_spec_hash),
+        "compatibility_status": run.compatibility_status,
+        "corrected_assessment_hash": (run.corrected_assessment_hash),
+        "corrected_forward_result_hash": (run.corrected_forward_result_hash),
+        "execution_timing_compatible": (run.execution_timing_compatible),
+        "gate_failures": list(run.gate_failures),
+        "live_trading_locked": True,
+        "original_evaluation_result_hash": (run.original_evaluation_result_hash),
+        "paper_activation_allowed": False,
+        "runtime_activation_allowed": False,
+        "session_count": run.session_count,
+        "status": status,
+        "strategy_max_drawdown": str(run.strategy_result.max_drawdown),
+        "strategy_rejected_order_count": (run.strategy_rejected_order_count),
+        "strategy_total_return": str(run.strategy_result.total_return),
+        "strategy_unresolved_position_count": (run.strategy_unresolved_position_count),
+    }
+
+
 def _low_volatility_forward_evaluation_payload(
     record: LowVolatilityForwardEvaluationRecord,
     *,
@@ -2362,83 +2536,46 @@ async def create_low_volatility_paper_signal_campaign(
     """Create the exact 253-session prior-close data campaign."""
 
     if settings.environment is not RuntimeEnvironment.PAPER:
-        raise MissingCapabilityError(
-            "paper environment is not configured"
-        )
+        raise MissingCapabilityError("paper environment is not configured")
     if settings.live_trading_enabled:
-        raise MissingCapabilityError(
-            "live trading must remain hard-locked"
-        )
+        raise MissingCapabilityError("live trading must remain hard-locked")
     dsn = configured_dsn(
         settings.postgres_dsn,
         capability="PostgreSQL",
     )
-    candidates = (
-        PostgresLowVolatilityPaperCandidateRepository.connect(
-            dsn=dsn
-        )
-    )
-    signals = PostgresLowVolatilityPaperSignalRepository.connect(
-        dsn=dsn
-    )
-    specs = PostgresLowVolatilityResearchSpecRepository.connect(
-        dsn=dsn
-    )
+    candidates = PostgresLowVolatilityPaperCandidateRepository.connect(dsn=dsn)
+    signals = PostgresLowVolatilityPaperSignalRepository.connect(dsn=dsn)
+    specs = PostgresLowVolatilityResearchSpecRepository.connect(dsn=dsn)
     universes = PostgresResearchUniverseRepository.connect(dsn=dsn)
-    campaigns = PostgresResearchDataCampaignRepository.connect(
-        dsn=dsn
-    )
+    campaigns = PostgresResearchDataCampaignRepository.connect(dsn=dsn)
     controls = PostgresExecutionControlRepository.connect(dsn=dsn)
     control = PostgresControlRepository.connect(dsn=dsn)
     market: ClickHouseDailyRepository | None = None
     try:
-        fence = await controls.replay(
-            account_id=settings.paper_account_id
-        )
+        fence = await controls.replay(account_id=settings.paper_account_id)
         if not fence.active:
             raise MissingCapabilityError(
-                "paper signal campaign requires the kill switch "
-                "to remain active"
+                "paper signal campaign requires the kill switch to remain active"
             )
         active = await candidates.active(
             account_id=settings.paper_account_id,
             strategy_id=settings.paper_strategy_id,
         )
         if active is None:
-            raise LookupError(
-                "low-volatility paper candidate is not active"
-            )
+            raise LookupError("low-volatility paper candidate is not active")
         candidate = active.approval
-        if (
-            candidate.risk_policy_hash
-            != default_paper_policy(
-                candidate.instruments
-            ).policy_hash
-        ):
-            raise ValueError(
-                "paper candidate risk policy is inconsistent"
-            )
+        if candidate.risk_policy_hash != default_paper_policy(candidate.instruments).policy_hash:
+            raise ValueError("paper candidate risk policy is inconsistent")
         existing = await signals.for_session(
             candidate_approval_hash=candidate.approval_hash,
             session_date=session_date,
         )
         if existing is not None:
-            raise ValueError(
-                "paper signal already exists for the session"
-            )
-        previous = await signals.latest(
-            candidate_approval_hash=candidate.approval_hash
-        )
-        if (
-            previous is not None
-            and previous.session_date >= session_date
-        ):
-            raise ValueError(
-                "paper signal sessions must be prepared in order"
-            )
-        spec = (
-            await specs.read(candidate.source_spec_hash)
-        ).spec
+            raise ValueError("paper signal already exists for the session")
+        previous = await signals.latest(candidate_approval_hash=candidate.approval_hash)
+        if previous is not None and previous.session_date >= session_date:
+            raise ValueError("paper signal sessions must be prepared in order")
+        spec = (await specs.read(candidate.source_spec_hash)).spec
         detail = await universes.detail(snapshot_hash)
         created_at = datetime.now(UTC)
         session_open = datetime.combine(
@@ -2449,17 +2586,10 @@ async def create_low_volatility_paper_signal_campaign(
             ),
             tzinfo=SHANGHAI,
         ).astimezone(UTC)
-        members = tuple(
-            value.instrument for value in detail.members
-        )
+        members = tuple(value.instrument for value in detail.members)
         evidence_instruments = tuple(
             sorted(
-                set(members)
-                | (
-                    set()
-                    if previous is None
-                    else set(previous.selected_instruments)
-                )
+                set(members) | (set() if previous is None else set(previous.selected_instruments))
             )
         )
         if (
@@ -2468,12 +2598,9 @@ async def create_low_volatility_paper_signal_campaign(
             or detail.snapshot.reference_date >= session_date
             or detail.snapshot.knowledge_as_of > created_at
             or created_at >= session_open
-            or not set(evidence_instruments)
-            <= set(candidate.instruments)
+            or not set(evidence_instruments) <= set(candidate.instruments)
         ):
-            raise ValueError(
-                "paper signal universe is outside approved evidence"
-            )
+            raise ValueError("paper signal universe is outside approved evidence")
         market = await ClickHouseDailyRepository.connect(
             dsn=configured_dsn(
                 settings.clickhouse_dsn,
@@ -2487,60 +2614,28 @@ async def create_low_volatility_paper_signal_campaign(
             session_date,
             created_at,
         )
-        calendar_rows = tuple(
-            value
-            for value in coverage.sessions
-            if value.source == "tushare"
-        )
+        calendar_rows = tuple(value for value in coverage.sessions if value.source == "tushare")
         if (
             not calendar_rows
-            or len(
-                {
-                    value.session_date
-                    for value in calendar_rows
-                }
-            )
-            != len(calendar_rows)
-            or any(
-                value.available_at > created_at
-                for value in calendar_rows
-            )
+            or len({value.session_date for value in calendar_rows}) != len(calendar_rows)
+            or any(value.available_at > created_at for value in calendar_rows)
         ):
-            raise ValueError(
-                "paper signal calendar evidence is incomplete"
-            )
-        current = tuple(
-            value
-            for value in calendar_rows
-            if value.session_date == session_date
-        )
+            raise ValueError("paper signal calendar evidence is incomplete")
+        current = tuple(value for value in calendar_rows if value.session_date == session_date)
         prior_open = tuple(
-            value
-            for value in calendar_rows
-            if value.is_open
-            and value.session_date < session_date
+            value for value in calendar_rows if value.is_open and value.session_date < session_date
         )
         if (
             len(current) != 1
             or not current[0].is_open
-            or len(prior_open)
-            < spec.minimum_history_sessions
+            or len(prior_open) < spec.minimum_history_sessions
         ):
-            raise ValueError(
-                "paper signal session or history is unavailable"
-            )
-        window = prior_open[
-            -spec.minimum_history_sessions :
-        ]
+            raise ValueError("paper signal session or history is unavailable")
+        window = prior_open[-spec.minimum_history_sessions :]
         evidence = await asyncio.gather(
             *(
                 control.read_source_evidence(value)
-                for value in sorted(
-                    {
-                        item.response_hash
-                        for item in (*window, current[0])
-                    }
-                )
+                for value in sorted({item.response_hash for item in (*window, current[0])})
             )
         )
         if any(
@@ -2549,14 +2644,10 @@ async def create_low_volatility_paper_signal_campaign(
             or value.requested_at > created_at
             for value in evidence
         ):
-            raise ValueError(
-                "paper signal calendar provenance is invalid"
-            )
+            raise ValueError("paper signal calendar provenance is invalid")
         campaign_spec = ResearchDataCampaignSpec(
             campaign_key=(
-                "low-vol-paper-signal:"
-                f"{candidate.approval_hash[:12]}:"
-                f"{session_date:%Y%m%d}"
+                f"low-vol-paper-signal:{candidate.approval_hash[:12]}:{session_date:%Y%m%d}"
             ),
             policy_hash=spec.policy_hash,
             snapshot_hashes=(snapshot_hash,),
@@ -2571,9 +2662,7 @@ async def create_low_volatility_paper_signal_campaign(
         )
         payload: dict[str, object] = {
             "campaign_hash": campaign_spec.campaign_hash,
-            "candidate_approval_hash": (
-                candidate.approval_hash
-            ),
+            "candidate_approval_hash": (candidate.approval_hash),
             "end_date": campaign_spec.end_date.isoformat(),
             "execution_timing_compatible": False,
             "instrument_count": len(evidence_instruments),
@@ -2616,52 +2705,33 @@ async def prepare_low_volatility_paper_signal(
     """Freeze prior-close selection evidence without runtime authority."""
 
     if settings.environment is not RuntimeEnvironment.PAPER:
-        raise MissingCapabilityError(
-            "paper environment is not configured"
-        )
+        raise MissingCapabilityError("paper environment is not configured")
     if settings.live_trading_enabled:
-        raise MissingCapabilityError(
-            "live trading must remain hard-locked"
-        )
+        raise MissingCapabilityError("live trading must remain hard-locked")
     dsn = configured_dsn(
         settings.postgres_dsn,
         capability="PostgreSQL",
     )
-    candidates = (
-        PostgresLowVolatilityPaperCandidateRepository.connect(
-            dsn=dsn
-        )
-    )
-    signals = PostgresLowVolatilityPaperSignalRepository.connect(
-        dsn=dsn
-    )
-    specs = PostgresLowVolatilityResearchSpecRepository.connect(
-        dsn=dsn
-    )
+    candidates = PostgresLowVolatilityPaperCandidateRepository.connect(dsn=dsn)
+    signals = PostgresLowVolatilityPaperSignalRepository.connect(dsn=dsn)
+    specs = PostgresLowVolatilityResearchSpecRepository.connect(dsn=dsn)
     universes = PostgresResearchUniverseRepository.connect(dsn=dsn)
-    campaigns = PostgresResearchDataCampaignRepository.connect(
-        dsn=dsn
-    )
+    campaigns = PostgresResearchDataCampaignRepository.connect(dsn=dsn)
     controls = PostgresExecutionControlRepository.connect(dsn=dsn)
     control = PostgresControlRepository.connect(dsn=dsn)
     market: ClickHouseDailyRepository | None = None
     try:
-        fence = await controls.replay(
-            account_id=settings.paper_account_id
-        )
+        fence = await controls.replay(account_id=settings.paper_account_id)
         if not fence.active:
             raise MissingCapabilityError(
-                "paper signal preparation requires the kill switch "
-                "to remain active"
+                "paper signal preparation requires the kill switch to remain active"
             )
         active = await candidates.active(
             account_id=settings.paper_account_id,
             strategy_id=settings.paper_strategy_id,
         )
         if active is None:
-            raise LookupError(
-                "low-volatility paper candidate is not active"
-            )
+            raise LookupError("low-volatility paper candidate is not active")
         candidate = active.approval
         existing = await signals.for_session(
             candidate_approval_hash=candidate.approval_hash,
@@ -2672,31 +2742,16 @@ async def prepare_low_volatility_paper_signal(
                 existing,
                 status="stored",
             )
-        previous = await signals.latest(
-            candidate_approval_hash=candidate.approval_hash
-        )
-        if (
-            previous is not None
-            and previous.session_date >= session_date
-        ):
-            raise ValueError(
-                "paper signal sessions must be prepared in order"
-            )
-        spec = (
-            await specs.read(candidate.source_spec_hash)
-        ).spec
-        manifest = await campaigns.read_manifest(
-            dataset_manifest_hash
-        )
+        previous = await signals.latest(candidate_approval_hash=candidate.approval_hash)
+        if previous is not None and previous.session_date >= session_date:
+            raise ValueError("paper signal sessions must be prepared in order")
+        spec = (await specs.read(candidate.source_spec_hash)).spec
+        manifest = await campaigns.read_manifest(dataset_manifest_hash)
         if len(manifest.snapshot_hashes) != 1:
-            raise ValueError(
-                "paper signal data requires one universe snapshot"
-            )
+            raise ValueError("paper signal data requires one universe snapshot")
         snapshot_hash = manifest.snapshot_hashes[0]
         detail = await universes.detail(snapshot_hash)
-        members = tuple(
-            value.instrument for value in detail.members
-        )
+        members = tuple(value.instrument for value in detail.members)
         prepared_at = datetime.now(UTC)
         market = await ClickHouseDailyRepository.connect(
             dsn=configured_dsn(
@@ -2719,9 +2774,7 @@ async def prepare_low_volatility_paper_signal(
             record_reader=market,
             batch_size=4,
         )
-        signal = await LowVolatilityPaperSignalCompiler(
-            reader=reader
-        ).compile(
+        signal = await LowVolatilityPaperSignalCompiler(reader=reader).compile(
             candidate=candidate,
             spec=spec,
             manifest=manifest,
@@ -2762,22 +2815,16 @@ def _low_volatility_paper_signal_payload(
     status: str,
 ) -> dict[str, object]:
     if not isinstance(signal, LowVolatilityPaperDailySignal):
-        raise TypeError(
-            "paper signal payload requires daily signal evidence"
-        )
+        raise TypeError("paper signal payload requires daily signal evidence")
     return {
-        "candidate_approval_hash": (
-            signal.candidate_approval_hash
-        ),
+        "candidate_approval_hash": (signal.candidate_approval_hash),
         "dataset_manifest_hash": signal.dataset_manifest_hash,
         "eligible_instrument_count": len(signal.observations),
         "execution_timing_compatible": False,
         "live_trading_locked": True,
         "rebalance_due": signal.rebalance_due,
         "runtime_activation_allowed": False,
-        "selected_instrument_count": len(
-            signal.selected_instruments
-        ),
+        "selected_instrument_count": len(signal.selected_instruments),
         "session_date": signal.session_date.isoformat(),
         "session_sequence": signal.session_sequence,
         "signal_date": signal.signal_date.isoformat(),
