@@ -778,3 +778,19 @@ stores full training, test, and benchmark ledgers plus hash-verified folds. Stra
 rejections and unresolved positions are evidence gates; benchmark liquidation anomalies remain
 visible diagnostics but cannot falsely reject the strategy. A passing result remains live
 locked and can only seed a separately controlled paper-trading stage.
+
+The official run completed with result hash
+`f3a9acca898d30ef0672a16f43a73fb20644d8f19a6603c026a58a8a868f2a92` and assessment hash
+`85e6af23f80768a56915efa131b94fb842d991cb74006a068f496b7be8771ef5`. Across 12 folds and
+756 out-of-sample sessions, v4 returned `0.21904943562578038236052043`, the benchmark returned
+`0.098579794526777702963044235`, and excess return was
+`0.120469641099002679397476195`. Its profitable-fold rate was `0.75`, worst test drawdown was
+`0.05356652584954738693057764518`, and the strategy had no rejected orders or unresolved
+positions. Three unresolved positions belonged only to the benchmark.
+
+The frozen assessment is still `rejected` because `train_test_gap` was `0.1513014875`.
+That gate compares total returns from unequal 504-session training and 63-session test
+intervals, so a future methodology version must pre-register a horizon-normalized comparison.
+This observation cannot retroactively change, overwrite, or promote v4; any revised method
+requires separately frozen evidence and a new forward-data requirement. Live trading remains
+locked.

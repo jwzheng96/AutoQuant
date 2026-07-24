@@ -307,6 +307,43 @@ class PostgresLowVolatilityValidationRepository:
             return None
         return await self.read(str(row["result_hash"]))
 
+    async def list_recent(
+        self,
+        *,
+        limit: int = 20,
+    ) -> tuple[LowVolatilityValidationRecord, ...]:
+        if limit < 1 or limit > 200:
+            raise ValueError(
+                "low-volatility validation limit must be between 1 and 200"
+            )
+        try:
+            async with self._engine.connect() as connection:
+                rows = (
+                    (
+                        await connection.execute(
+                            text(
+                                f"""
+                                SELECT result_hash
+                                FROM
+                                    {self._schema}.low_volatility_validation_runs
+                                ORDER BY completed_at DESC, result_hash
+                                LIMIT :limit
+                                """
+                            ),
+                            {"limit": limit},
+                        )
+                    )
+                    .mappings()
+                    .all()
+                )
+        except Exception:
+            raise PersistenceUnavailableError(
+                "low-volatility validation list failed"
+            ) from None
+        return tuple(
+            [await self.read(str(row["result_hash"])) for row in rows]
+        )
+
 
 def _run_parameters(
     record: LowVolatilityValidationRecord,

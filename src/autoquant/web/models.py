@@ -506,6 +506,106 @@ class FundamentalValidationDetailView(BaseModel):
         return self
 
 
+class LowVolatilityValidationListItemView(BaseModel):
+    result_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    assessment_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    spec_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    strategy_id: str
+    evidence_status: str
+    gate_failures: tuple[str, ...]
+    fold_count: int = Field(ge=1)
+    oos_sessions: int = Field(ge=1)
+    compounded_oos_return: Decimal
+    benchmark_compounded_oos_return: Decimal
+    excess_oos_return: Decimal
+    profitable_fold_rate: Decimal = Field(ge=0, le=1)
+    worst_oos_drawdown: Decimal = Field(ge=0, le=1)
+    train_test_gap: Decimal
+    strategy_rejected_order_count: int = Field(ge=0)
+    benchmark_rejected_order_count: int = Field(ge=0)
+    strategy_unresolved_position_count: int = Field(ge=0)
+    benchmark_unresolved_position_count: int = Field(ge=0)
+    requested_by: str
+    completed_at: datetime
+    live_trading_locked: bool = True
+
+    @field_validator("completed_at")
+    @classmethod
+    def require_aware_low_volatility_completion(
+        cls,
+        value: datetime,
+    ) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError(
+                "low-volatility validation completion must be timezone-aware"
+            )
+        return value.astimezone(UTC)
+
+    @model_validator(mode="after")
+    def require_low_volatility_research_lock(self) -> Self:
+        if not self.live_trading_locked or self.evidence_status not in {
+            "research_candidate",
+            "rejected",
+            "insufficient",
+        }:
+            raise ValueError(
+                "low-volatility validation item is inconsistent"
+            )
+        return self
+
+
+class LowVolatilityValidationPhaseView(
+    FundamentalValidationPhaseView
+):
+    pass
+
+
+class LowVolatilityValidationFoldView(BaseModel):
+    sequence: int = Field(ge=1)
+    train_start: date
+    train_end: date
+    test_start: date
+    test_end: date
+    training: LowVolatilityValidationPhaseView
+    test: LowVolatilityValidationPhaseView
+    benchmark: LowVolatilityValidationPhaseView
+    fold_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def require_ordered_low_volatility_fold(self) -> Self:
+        if not (
+            self.train_start
+            <= self.train_end
+            < self.test_start
+            <= self.test_end
+        ):
+            raise ValueError(
+                "low-volatility validation fold intervals are invalid"
+            )
+        return self
+
+
+class LowVolatilityValidationDetailView(BaseModel):
+    summary: LowVolatilityValidationListItemView
+    folds: tuple[LowVolatilityValidationFoldView, ...] = Field(
+        min_length=1
+    )
+    integrity_verified: bool = True
+
+    @model_validator(mode="after")
+    def require_verified_low_volatility_detail(self) -> Self:
+        if (
+            not self.integrity_verified
+            or len(self.folds) != self.summary.fold_count
+            or tuple(value.sequence for value in self.folds)
+            != tuple(range(1, len(self.folds) + 1))
+        ):
+            raise ValueError(
+                "low-volatility validation detail is not verified"
+            )
+        return self
+
+
 class MomentumCandidateRequest(BaseModel):
     lookback_sessions: int = Field(ge=20, le=252)
     rebalance_sessions: int = Field(ge=5, le=63)

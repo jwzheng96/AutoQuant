@@ -59,6 +59,9 @@ from autoquant.web.backtest_store import PostgresBacktestRepository
 from autoquant.web.fundamental_validation_store import (
     PostgresFundamentalValidationRepository,
 )
+from autoquant.web.low_volatility_validation_store import (
+    PostgresLowVolatilityValidationRepository,
+)
 from autoquant.web.models import (
     BacktestRunRequest,
     DailyIngestionJobRequest,
@@ -373,6 +376,43 @@ def create_app(
             ) from None
         return detail.model_dump(mode="json")
 
+    @app.get("/api/v1/low-volatility-validations")
+    async def low_volatility_validations(
+        request: Request,
+        limit: Annotated[int, Query(ge=1, le=200)] = 20,
+        _: str = Depends(authenticated_user),
+    ) -> dict[str, object]:
+        items = await active_service(
+            request
+        ).list_low_volatility_validations(limit=limit)
+        return {
+            "items": [
+                item.model_dump(mode="json") for item in items
+            ]
+        }
+
+    @app.get(
+        "/api/v1/low-volatility-validations/{result_hash}"
+    )
+    async def low_volatility_validation_detail(
+        request: Request,
+        result_hash: Annotated[
+            str,
+            ApiPath(pattern=r"^[0-9a-f]{64}$"),
+        ],
+        _: str = Depends(authenticated_user),
+    ) -> dict[str, object]:
+        try:
+            detail = await active_service(
+                request
+            ).low_volatility_validation_detail(result_hash)
+        except LookupError:
+            raise HTTPException(
+                status_code=404,
+                detail="low-volatility validation not found",
+            ) from None
+        return detail.model_dump(mode="json")
+
     @app.get("/api/v1/portfolio-validations")
     async def portfolio_validations(
         request: Request,
@@ -515,6 +555,9 @@ async def _production_service(settings: AppSettings) -> ConsoleService:
     universes = PostgresResearchUniverseRepository.connect(dsn=postgres_dsn)
     validation_campaigns = PostgresValidationCampaignRepository.connect(dsn=postgres_dsn)
     fundamental_validations = PostgresFundamentalValidationRepository.connect(dsn=postgres_dsn)
+    low_volatility_validations = PostgresLowVolatilityValidationRepository.connect(
+        dsn=postgres_dsn
+    )
     risks = PostgresRiskDecisionRepository.connect(dsn=postgres_dsn)
     executions = PostgresPaperExecutionRepository.connect(dsn=postgres_dsn)
     execution_controls = PostgresExecutionControlRepository.connect(dsn=postgres_dsn)
@@ -535,6 +578,7 @@ async def _production_service(settings: AppSettings) -> ConsoleService:
         await universes.close()
         await validation_campaigns.close()
         await fundamental_validations.close()
+        await low_volatility_validations.close()
         await risks.close()
         await executions.close()
         await execution_controls.close()
@@ -576,6 +620,9 @@ async def _production_service(settings: AppSettings) -> ConsoleService:
         universe_repository=universes,
         validation_campaign_repository=validation_campaigns,
         fundamental_validation_repository=fundamental_validations,
+        low_volatility_validation_repository=(
+            low_volatility_validations
+        ),
         risk_repository=risks,
         execution_repository=executions,
         execution_control_repository=execution_controls,

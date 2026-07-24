@@ -33,6 +33,13 @@ selection. The point-in-time compiler refuses incomplete 253-session histories, 
 v33 retains every fixed validation ledger and its strategy/benchmark diagnostics as immutable
 evidence. This remains a research gate, not trading permission.
 
+The official v4 run is also retained as rejected evidence. It returned 21.905% out of sample
+versus 9.858% for the benchmark, with 12.047% excess return, a 75% profitable-fold rate,
+5.357% worst test drawdown, and no strategy rejection or unresolved position. It nevertheless
+failed the frozen `train_test_gap` gate at 15.130%. The console exposes the complete
+hash-verified result and separate benchmark diagnostics read-only; positive returns cannot
+override the failed gate or unlock trading.
+
 The repository also contains a deterministic A-share research ledger with versioned board
 rules, T+1 sellability, lot-size validation, conservative daily-open fills, liquidity caps,
 configurable commission/slippage, sell-side stamp duty, bilateral transfer fees, and a

@@ -19,6 +19,10 @@ from autoquant.web.models import (
     FundamentalValidationFoldView,
     FundamentalValidationPhaseView,
     FundamentalValidationSummaryView,
+    LowVolatilityValidationDetailView,
+    LowVolatilityValidationFoldView,
+    LowVolatilityValidationListItemView,
+    LowVolatilityValidationPhaseView,
     OperatorJob,
     OperatorJobState,
     OperatorOverview,
@@ -52,6 +56,7 @@ class FakeConsoleService:
         self.created_portfolio_validations: list[PortfolioWalkForwardJobRequest] = []
         self.portfolio_validation_experiment_id = uuid4()
         self.fundamental_result_hash = "f" * 64
+        self.low_volatility_result_hash = "1" * 64
         self.kill_switch_activations: list[tuple[str, str, str]] = []
 
     async def start(self) -> None:
@@ -240,6 +245,70 @@ class FakeConsoleService:
             benchmark_unresolved_position_count=0,
             requested_by="operator",
             completed_at=datetime(2026, 7, 23, tzinfo=UTC),
+        )
+
+    async def list_low_volatility_validations(
+        self,
+        *,
+        limit: int = 20,
+    ) -> tuple[LowVolatilityValidationListItemView, ...]:
+        assert 1 <= limit <= 200
+        return (self._low_volatility_summary(),)
+
+    async def low_volatility_validation_detail(
+        self,
+        result_hash: str,
+    ) -> LowVolatilityValidationDetailView:
+        assert result_hash == self.low_volatility_result_hash
+        phase = LowVolatilityValidationPhaseView(
+            total_return=Decimal("0.01"),
+            max_drawdown=Decimal("0.02"),
+            ending_equity=Decimal("1010000"),
+            rejected_order_count=0,
+            unresolved_position_count=0,
+            artifact_hash="2" * 64,
+        )
+        return LowVolatilityValidationDetailView(
+            summary=self._low_volatility_summary(),
+            folds=(
+                LowVolatilityValidationFoldView(
+                    sequence=1,
+                    train_start=date(2020, 1, 1),
+                    train_end=date(2021, 12, 31),
+                    test_start=date(2022, 1, 10),
+                    test_end=date(2022, 4, 8),
+                    training=phase,
+                    test=phase,
+                    benchmark=phase,
+                    fold_hash="3" * 64,
+                ),
+            ),
+        )
+
+    def _low_volatility_summary(
+        self,
+    ) -> LowVolatilityValidationListItemView:
+        return LowVolatilityValidationListItemView(
+            result_hash=self.low_volatility_result_hash,
+            assessment_hash="4" * 64,
+            spec_hash="5" * 64,
+            strategy_id="dynamic-universe-low-volatility-v4",
+            evidence_status="rejected",
+            gate_failures=("train_test_gap",),
+            fold_count=1,
+            oos_sessions=63,
+            compounded_oos_return=Decimal("0.02"),
+            benchmark_compounded_oos_return=Decimal("0.01"),
+            excess_oos_return=Decimal("0.01"),
+            profitable_fold_rate=Decimal("1"),
+            worst_oos_drawdown=Decimal("0.02"),
+            train_test_gap=Decimal("0.15"),
+            strategy_rejected_order_count=0,
+            benchmark_rejected_order_count=0,
+            strategy_unresolved_position_count=0,
+            benchmark_unresolved_position_count=1,
+            requested_by="operator",
+            completed_at=datetime(2026, 7, 24, tzinfo=UTC),
         )
 
     async def create_portfolio_validation(
@@ -516,6 +585,44 @@ def test_fundamental_validation_endpoints_are_authenticated_and_read_only() -> N
     assert detail.status_code == 200
     assert detail.json()["integrity_verified"] is True
     assert detail.json()["folds"][0]["benchmark"]["artifact_hash"] == "e" * 64
+    assert "approve" not in detail.text.casefold()
+
+
+def test_low_volatility_validation_endpoints_are_authenticated_and_read_only() -> None:
+    service = FakeConsoleService()
+    app = create_app(_settings(), service=service)
+
+    with TestClient(app) as client:
+        denied = client.get(
+            "/api/v1/low-volatility-validations"
+        )
+        listed = client.get(
+            "/api/v1/low-volatility-validations",
+            auth=_auth(),
+        )
+        detail = client.get(
+            (
+                "/api/v1/low-volatility-validations/"
+                f"{service.low_volatility_result_hash}"
+            ),
+            auth=_auth(),
+        )
+
+    assert denied.status_code == 401
+    assert listed.status_code == 200
+    assert (
+        listed.json()["items"][0]["gate_failures"]
+        == ["train_test_gap"]
+    )
+    assert listed.json()["items"][0]["live_trading_locked"] is True
+    assert detail.status_code == 200
+    assert detail.json()["integrity_verified"] is True
+    assert (
+        detail.json()["summary"][
+            "benchmark_unresolved_position_count"
+        ]
+        == 1
+    )
     assert "approve" not in detail.text.casefold()
 
 

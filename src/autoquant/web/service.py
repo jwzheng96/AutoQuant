@@ -11,6 +11,9 @@ from autoquant.adapters.postgres import PostgresControlRepository
 from autoquant.backtest.fundamental_portfolio import (
     FUNDAMENTAL_PORTFOLIO_STRATEGY_ID,
 )
+from autoquant.backtest.low_volatility_portfolio import (
+    LOW_VOLATILITY_STRATEGY_ID,
+)
 from autoquant.backtest.models import (
     BacktestResult,
     ExecutionState,
@@ -53,6 +56,10 @@ from autoquant.web.fundamental_validation_store import (
     FundamentalValidationRecord,
     PostgresFundamentalValidationRepository,
 )
+from autoquant.web.low_volatility_validation_store import (
+    LowVolatilityValidationRecord,
+    PostgresLowVolatilityValidationRepository,
+)
 from autoquant.web.models import (
     BacktestRun,
     BacktestRunDetail,
@@ -64,6 +71,10 @@ from autoquant.web.models import (
     FundamentalValidationListItemView,
     FundamentalValidationPhaseView,
     FundamentalValidationSummaryView,
+    LowVolatilityValidationDetailView,
+    LowVolatilityValidationFoldView,
+    LowVolatilityValidationListItemView,
+    LowVolatilityValidationPhaseView,
     OperatorJob,
     OperatorOverview,
     PaperExecutionStatus,
@@ -196,6 +207,14 @@ class ConsoleServicePort(Protocol):
         self, result_hash: str
     ) -> FundamentalValidationDetailView: ...
 
+    async def list_low_volatility_validations(
+        self, *, limit: int = 20
+    ) -> tuple[LowVolatilityValidationListItemView, ...]: ...
+
+    async def low_volatility_validation_detail(
+        self, result_hash: str
+    ) -> LowVolatilityValidationDetailView: ...
+
     async def risk_status(self) -> RiskControlStatus: ...
 
     async def execution_status(self) -> PaperExecutionStatus: ...
@@ -236,6 +255,9 @@ class ConsoleService:
         portfolio_validation_runner: (PortfolioWalkForwardRunnerPort | None) = None,
         validation_campaign_repository: (PostgresValidationCampaignRepository | None) = None,
         fundamental_validation_repository: (PostgresFundamentalValidationRepository | None) = None,
+        low_volatility_validation_repository: (
+            PostgresLowVolatilityValidationRepository | None
+        ) = None,
         universe_repository: (PostgresResearchUniverseRepository | None) = None,
         risk_repository: PostgresRiskDecisionRepository | None = None,
         execution_repository: PostgresPaperExecutionRepository | None = None,
@@ -270,6 +292,9 @@ class ConsoleService:
         self._portfolio_validation_runner = portfolio_validation_runner
         self._validation_campaigns = validation_campaign_repository
         self._fundamental_validations = fundamental_validation_repository
+        self._low_volatility_validations = (
+            low_volatility_validation_repository
+        )
         self._universes = universe_repository
         self._risk = risk_repository
         self._execution = execution_repository
@@ -442,6 +467,8 @@ class ConsoleService:
             await self._validation_campaigns.close()
         if self._fundamental_validations is not None:
             await self._fundamental_validations.close()
+        if self._low_volatility_validations is not None:
+            await self._low_volatility_validations.close()
         if self._universes is not None:
             await self._universes.close()
         if self._risk is not None:
@@ -730,6 +757,56 @@ class ConsoleService:
                     training=_fundamental_validation_phase(fold.training_result),
                     test=_fundamental_validation_phase(fold.test_result),
                     benchmark=_fundamental_validation_phase(fold.benchmark_result),
+                    fold_hash=fold.fold_hash,
+                )
+                for fold in record.result.folds
+            ),
+        )
+
+    async def list_low_volatility_validations(
+        self,
+        *,
+        limit: int = 20,
+    ) -> tuple[LowVolatilityValidationListItemView, ...]:
+        if self._low_volatility_validations is None:
+            return ()
+        records = await self._low_volatility_validations.list_recent(
+            limit=limit,
+        )
+        return tuple(
+            _low_volatility_validation_summary(value)
+            for value in records
+        )
+
+    async def low_volatility_validation_detail(
+        self,
+        result_hash: str,
+    ) -> LowVolatilityValidationDetailView:
+        if self._low_volatility_validations is None:
+            raise LookupError(
+                "low-volatility validation service is unavailable"
+            )
+        record = await self._low_volatility_validations.read(
+            result_hash
+        )
+        return LowVolatilityValidationDetailView(
+            summary=_low_volatility_validation_summary(record),
+            folds=tuple(
+                LowVolatilityValidationFoldView(
+                    sequence=fold.sequence,
+                    train_start=fold.train_start,
+                    train_end=fold.train_end,
+                    test_start=fold.test_start,
+                    test_end=fold.test_end,
+                    training=_low_volatility_validation_phase(
+                        fold.training_result
+                    ),
+                    test=_low_volatility_validation_phase(
+                        fold.test_result
+                    ),
+                    benchmark=_low_volatility_validation_phase(
+                        fold.benchmark_result
+                    ),
                     fold_hash=fold.fold_hash,
                 )
                 for fold in record.result.folds
@@ -1593,6 +1670,63 @@ def _fundamental_validation_phase(
             value.state is ExecutionState.REJECTED for value in result.reports
         ),
         unresolved_position_count=len(result.snapshots[-1].positions),
+        artifact_hash=backtest_artifact_hash(result),
+    )
+
+
+def _low_volatility_validation_summary(
+    record: LowVolatilityValidationRecord,
+) -> LowVolatilityValidationListItemView:
+    result = record.result
+    evidence = record.evidence
+    return LowVolatilityValidationListItemView(
+        result_hash=result.result_hash,
+        assessment_hash=evidence.assessment_hash,
+        spec_hash=result.spec_hash,
+        strategy_id=LOW_VOLATILITY_STRATEGY_ID,
+        evidence_status=evidence.evidence_status,
+        gate_failures=evidence.gate_failures,
+        fold_count=evidence.fold_count,
+        oos_sessions=evidence.oos_sessions,
+        compounded_oos_return=result.compounded_oos_return,
+        benchmark_compounded_oos_return=(
+            result.benchmark_compounded_oos_return
+        ),
+        excess_oos_return=result.excess_oos_return,
+        profitable_fold_rate=result.profitable_fold_rate,
+        worst_oos_drawdown=result.worst_oos_drawdown,
+        train_test_gap=result.train_test_gap,
+        strategy_rejected_order_count=(
+            result.strategy_rejected_order_count
+        ),
+        benchmark_rejected_order_count=(
+            result.benchmark_rejected_order_count
+        ),
+        strategy_unresolved_position_count=(
+            result.strategy_unresolved_position_count
+        ),
+        benchmark_unresolved_position_count=(
+            result.benchmark_unresolved_position_count
+        ),
+        requested_by=record.requested_by,
+        completed_at=record.completed_at,
+    )
+
+
+def _low_volatility_validation_phase(
+    result: BacktestResult,
+) -> LowVolatilityValidationPhaseView:
+    return LowVolatilityValidationPhaseView(
+        total_return=result.total_return,
+        max_drawdown=result.max_drawdown,
+        ending_equity=result.snapshots[-1].equity,
+        rejected_order_count=sum(
+            value.state is ExecutionState.REJECTED
+            for value in result.reports
+        ),
+        unresolved_position_count=len(
+            result.snapshots[-1].positions
+        ),
         artifact_hash=backtest_artifact_hash(result),
     )
 

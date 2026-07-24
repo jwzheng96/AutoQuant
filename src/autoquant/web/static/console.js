@@ -668,6 +668,130 @@ async function loadFundamentalValidations() {
   }
 }
 
+async function loadLowVolatilityValidationDetail(resultHash) {
+  try {
+    const detail = await requestJson(
+      `/api/v1/low-volatility-validations/${resultHash}`,
+    );
+    const summary = detail.summary;
+    document.getElementById("low-volatility-validation-detail").hidden = false;
+    setText("low-volatility-oos-return", formatPercent(summary.compounded_oos_return));
+    setText(
+      "low-volatility-benchmark-return",
+      formatPercent(summary.benchmark_compounded_oos_return),
+    );
+    setText("low-volatility-excess-return", formatPercent(summary.excess_oos_return));
+    setText("low-volatility-evidence-status", summary.evidence_status);
+    setText(
+      "low-volatility-gate-failures",
+      summary.gate_failures.length
+        ? summary.gate_failures.join(", ")
+        : "研究门槛通过仍不等于模拟盘或实盘批准",
+    );
+    setText(
+      "low-volatility-worst-drawdown",
+      formatPercent(summary.worst_oos_drawdown),
+    );
+    setText(
+      "low-volatility-profitable-rate",
+      formatPercent(summary.profitable_fold_rate),
+    );
+    setText("low-volatility-train-test-gap", formatPercent(summary.train_test_gap));
+    setText("low-volatility-oos-sessions", summary.oos_sessions);
+    setText(
+      "low-volatility-strategy-diagnostics",
+      `${summary.strategy_rejected_order_count}/${summary.strategy_unresolved_position_count}`,
+    );
+    setText(
+      "low-volatility-benchmark-diagnostics",
+      `${summary.benchmark_rejected_order_count}/${summary.benchmark_unresolved_position_count}`,
+    );
+    setText(
+      "low-volatility-integrity",
+      detail.integrity_verified ? "哈希复验通过" : "未验证",
+    );
+    const table = document.getElementById(
+      "low-volatility-validation-folds-table",
+    );
+    table.replaceChildren();
+    detail.folds.forEach(fold => {
+      const row = document.createElement("tr");
+      [
+        fold.sequence,
+        `${fold.train_start} — ${fold.train_end}`,
+        `${fold.test_start} — ${fold.test_end}`,
+        formatPercent(fold.training.total_return),
+        formatPercent(fold.test.total_return),
+        formatPercent(fold.benchmark.total_return),
+        formatPercent(fold.test.max_drawdown),
+        `${fold.training.unresolved_position_count + fold.test.unresolved_position_count}/${fold.benchmark.unresolved_position_count}`,
+      ].forEach(value => {
+        const cell = document.createElement("td");
+        cell.textContent = value;
+        row.append(cell);
+      });
+      table.append(row);
+    });
+  } catch (error) {
+    showToast(`低波动验证明细读取失败：${error.message}`);
+  }
+}
+
+async function loadLowVolatilityValidations() {
+  try {
+    const data = await requestJson(
+      "/api/v1/low-volatility-validations?limit=20",
+    );
+    const table = document.getElementById(
+      "low-volatility-validations-table",
+    );
+    table.replaceChildren();
+    data.items.forEach(summary => {
+      const row = document.createElement("tr");
+      row.className = "selectable-row";
+      row.tabIndex = 0;
+      [
+        new Date(summary.completed_at).toLocaleString(),
+        summary.strategy_id,
+      ].forEach(value => {
+        const cell = document.createElement("td");
+        cell.textContent = value;
+        row.append(cell);
+      });
+      const stateCell = document.createElement("td");
+      const badge = document.createElement("span");
+      statusPill(badge, summary.evidence_status);
+      stateCell.append(badge);
+      row.append(stateCell);
+      [
+        formatPercent(summary.compounded_oos_return),
+        formatPercent(summary.benchmark_compounded_oos_return),
+        formatPercent(summary.excess_oos_return),
+        summary.gate_failures.length ? summary.gate_failures.join(", ") : "—",
+      ].forEach(value => {
+        const cell = document.createElement("td");
+        cell.textContent = value;
+        row.append(cell);
+      });
+      const open = () => loadLowVolatilityValidationDetail(
+        summary.result_hash,
+      );
+      row.addEventListener("click", open);
+      row.addEventListener("keydown", event => {
+        if (event.key === "Enter" || event.key === " ") open();
+      });
+      table.append(row);
+    });
+    if (data.items.length) {
+      await loadLowVolatilityValidationDetail(
+        data.items[0].result_hash,
+      );
+    }
+  } catch (error) {
+    showToast(`低波动验证证据读取失败：${error.message}`);
+  }
+}
+
 async function loadPortfolioValidationDetail(experimentId) {
   try {
     const detail = await requestJson(`/api/v1/portfolio-validations/${experimentId}`);
@@ -913,6 +1037,9 @@ if (page === "/") {
     "click",
     loadFundamentalValidations,
   );
+  document.getElementById(
+    "refresh-low-volatility-validations",
+  ).addEventListener("click", loadLowVolatilityValidations);
   document.getElementById("refresh-validations").addEventListener(
     "click",
     () => Promise.all([loadValidations(), loadValidationCampaigns()]),
@@ -924,6 +1051,7 @@ if (page === "/") {
     loadValidationCampaigns(),
     loadPortfolioValidations(),
     loadFundamentalValidations(),
+    loadLowVolatilityValidations(),
     loadResearchUniverses(),
   ]));
 } else {
