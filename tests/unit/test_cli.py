@@ -1201,11 +1201,7 @@ def test_low_volatility_forward_evaluation_is_redacted_and_does_not_deploy() -> 
                 "--requested-by",
                 "research-operator",
             ],
-            env={
-                "AQ_POSTGRES_DSN": (
-                    "postgresql+asyncpg://sensitive"
-                )
-            },
+            env={"AQ_POSTGRES_DSN": ("postgresql+asyncpg://sensitive")},
         )
 
     assert result.exit_code == 0
@@ -1214,12 +1210,132 @@ def test_low_volatility_forward_evaluation_is_redacted_and_does_not_deploy() -> 
     assert payload["paper_deployment_allowed"] is False
     assert payload["live_trading_locked"] is True
     evaluation.assert_awaited_once()
-    assert (
-        evaluation.await_args.kwargs[
-            "evaluation_dataset_manifest_hash"
-        ]
-        == "d" * 64
-    )
+    assert evaluation.await_args.kwargs["evaluation_dataset_manifest_hash"] == "d" * 64
+
+
+def test_low_volatility_candidate_approval_requires_confirmation() -> None:
+    approval = AsyncMock()
+    with patch(
+        "autoquant.cli.approve_low_volatility_paper_candidate",
+        new=approval,
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "approve-paper-low-volatility-candidate",
+                "--evaluation-result-hash",
+                "a" * 64,
+                "--approved-by",
+                "risk-operator",
+            ],
+        )
+
+    assert result.exit_code == 2
+    assert approval.await_count == 0
+
+
+def test_low_volatility_candidate_approval_is_locked_and_redacted() -> None:
+    payload = {
+        "account_id": "paper-main",
+        "approval_hash": "a" * 64,
+        "daily_signal_evidence_required": True,
+        "evaluation_result_hash": "b" * 64,
+        "execution_mode": "paper",
+        "instrument_count": 340,
+        "live_trading_locked": True,
+        "minimum_paper_sessions": 60,
+        "risk_policy_hash": "c" * 64,
+        "runtime_activation_allowed": False,
+        "status": "approved_awaiting_daily_signal_runtime",
+        "strategy_id": "low-volatility-paper",
+    }
+    approval = AsyncMock(return_value=payload)
+    with patch(
+        "autoquant.cli.approve_low_volatility_paper_candidate",
+        new=approval,
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "approve-paper-low-volatility-candidate",
+                "--evaluation-result-hash",
+                "b" * 64,
+                "--approved-by",
+                "risk-operator",
+                "--confirm-paper-only",
+            ],
+            env={
+                "AQ_ENVIRONMENT": "paper",
+                "AQ_POSTGRES_DSN": ("postgresql+asyncpg://sensitive"),
+            },
+        )
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == payload
+    assert "sensitive" not in result.stdout
+    assert payload["runtime_activation_allowed"] is False
+    assert payload["live_trading_locked"] is True
+    approval.assert_awaited_once()
+
+
+def test_low_volatility_candidate_revocation_requires_confirmation() -> None:
+    revocation = AsyncMock()
+    with patch(
+        "autoquant.cli.revoke_low_volatility_paper_candidate",
+        new=revocation,
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "revoke-paper-low-volatility-candidate",
+                "--revoked-by",
+                "risk-operator",
+                "--reason",
+                "operator_safety_action",
+            ],
+        )
+
+    assert result.exit_code == 2
+    assert revocation.await_count == 0
+
+
+def test_low_volatility_candidate_revocation_is_redacted() -> None:
+    payload = {
+        "account_id": "paper-main",
+        "approval_hash": "a" * 64,
+        "live_trading_locked": True,
+        "reason": "operator_safety_action",
+        "revocation_hash": "b" * 64,
+        "runtime_activation_allowed": False,
+        "status": "revoked",
+        "strategy_id": "low-volatility-paper",
+    }
+    revocation = AsyncMock(return_value=payload)
+    with patch(
+        "autoquant.cli.revoke_low_volatility_paper_candidate",
+        new=revocation,
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "revoke-paper-low-volatility-candidate",
+                "--revoked-by",
+                "risk-operator",
+                "--reason",
+                "operator_safety_action",
+                "--confirm-revoke",
+            ],
+            env={
+                "AQ_ENVIRONMENT": "paper",
+                "AQ_POSTGRES_DSN": ("postgresql+asyncpg://sensitive"),
+            },
+        )
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == payload
+    assert "sensitive" not in result.stdout
+    revocation.assert_awaited_once()
+    assert revocation.await_args.kwargs["reason"].value == "operator_safety_action"
 
 
 def test_forward_evaluation_data_campaign_is_bounded_and_locked() -> None:
@@ -1236,8 +1352,7 @@ def test_forward_evaluation_data_campaign_is_bounded_and_locked() -> None:
     }
     creation = AsyncMock(return_value=payload)
     with patch(
-        "autoquant.cli."
-        "create_low_volatility_forward_evaluation_campaign",
+        "autoquant.cli.create_low_volatility_forward_evaluation_campaign",
         new=creation,
     ):
         result = runner.invoke(
@@ -1249,11 +1364,7 @@ def test_forward_evaluation_data_campaign_is_bounded_and_locked() -> None:
                 "--requested-by",
                 "research-operator",
             ],
-            env={
-                "AQ_POSTGRES_DSN": (
-                    "postgresql+asyncpg://sensitive"
-                )
-            },
+            env={"AQ_POSTGRES_DSN": ("postgresql+asyncpg://sensitive")},
         )
 
     assert result.exit_code == 0

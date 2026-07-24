@@ -119,6 +119,14 @@ from autoquant.execution.compliance_approval import (
 )
 from autoquant.execution.control import KillSwitchReason
 from autoquant.execution.control_store import PostgresExecutionControlRepository
+from autoquant.execution.low_volatility_paper_approval import (
+    LowVolatilityPaperCandidateApproval,
+    LowVolatilityPaperCandidateRevocation,
+    LowVolatilityPaperRevocationReason,
+)
+from autoquant.execution.low_volatility_paper_approval_store import (
+    PostgresLowVolatilityPaperCandidateRepository,
+)
 from autoquant.execution.paper_deployment import (
     PostgresPaperDeploymentRegistry,
 )
@@ -1830,42 +1838,20 @@ async def run_low_volatility_forward_evaluation(
     """Evaluate only the immutable first 126-session forward window."""
 
     if settings.live_trading_enabled:
-        raise MissingCapabilityError(
-            "forward evaluation requires live trading locked"
-        )
-    if (
-        not requested_by.strip()
-        or requested_by != requested_by.strip()
-        or len(requested_by) > 128
-    ):
-        raise ValueError(
-            "requested_by must contain 1-128 trimmed characters"
-        )
+        raise MissingCapabilityError("forward evaluation requires live trading locked")
+    if not requested_by.strip() or requested_by != requested_by.strip() or len(requested_by) > 128:
+        raise ValueError("requested_by must contain 1-128 trimmed characters")
     dsn = configured_dsn(
         settings.postgres_dsn,
         capability="PostgreSQL",
     )
-    forward_specs = (
-        PostgresLowVolatilityForwardEvidenceSpecRepository.connect(
-            dsn=dsn
-        )
-    )
-    source_specs = PostgresLowVolatilityResearchSpecRepository.connect(
-        dsn=dsn
-    )
-    sessions = PostgresLowVolatilityForwardSessionRepository.connect(
-        dsn=dsn
-    )
+    forward_specs = PostgresLowVolatilityForwardEvidenceSpecRepository.connect(dsn=dsn)
+    source_specs = PostgresLowVolatilityResearchSpecRepository.connect(dsn=dsn)
+    sessions = PostgresLowVolatilityForwardSessionRepository.connect(dsn=dsn)
     campaigns = PostgresResearchDataCampaignRepository.connect(dsn=dsn)
     universes = PostgresResearchUniverseRepository.connect(dsn=dsn)
-    validations = PostgresLowVolatilityValidationRepository.connect(
-        dsn=dsn
-    )
-    evaluations = (
-        PostgresLowVolatilityForwardEvaluationRepository.connect(
-            dsn=dsn
-        )
-    )
+    validations = PostgresLowVolatilityValidationRepository.connect(dsn=dsn)
+    evaluations = PostgresLowVolatilityForwardEvaluationRepository.connect(dsn=dsn)
     control = PostgresControlRepository.connect(dsn=dsn)
     market: ClickHouseDailyRepository | None = None
     try:
@@ -1876,39 +1862,24 @@ async def run_low_volatility_forward_evaluation(
                 existing,
                 status="stored",
             )
-        source = (
-            await source_specs.read(forward.source_spec_hash)
-        ).spec
-        predecessor = await validations.read(
-            forward.predecessor_result_hash
-        )
-        records = await sessions.list_for_spec(
-            forward_spec_hash=forward.spec_hash
-        )
+        source = (await source_specs.read(forward.source_spec_hash)).spec
+        predecessor = await validations.read(forward.predecessor_result_hash)
+        records = await sessions.list_for_spec(forward_spec_hash=forward.spec_hash)
         if len(records) < forward.minimum_forward_sessions:
-            raise ValueError(
-                "forward evaluation window is incomplete"
-            )
+            raise ValueError("forward evaluation window is incomplete")
         selected = records[: forward.minimum_forward_sessions]
         bindings = tuple(value.binding for value in selected)
-        if (
-            bindings[0].session_date != forward.forward_start_date
-            or any(
-                current.session_date >= following.session_date
-                for current, following in pairwise(bindings)
-            )
+        if bindings[0].session_date != forward.forward_start_date or any(
+            current.session_date >= following.session_date
+            for current, following in pairwise(bindings)
         ):
-            raise ValueError(
-                "forward evaluation window is not the frozen prefix"
-            )
+            raise ValueError("forward evaluation window is not the frozen prefix")
         source_plan = await _load_research_input_plan(
             campaigns=campaigns,
             universes=universes,
             manifest_hash=source.dataset_manifest_hash,
         )
-        evaluation_manifest = await campaigns.read_manifest(
-            evaluation_dataset_manifest_hash
-        )
+        evaluation_manifest = await campaigns.read_manifest(evaluation_dataset_manifest_hash)
         market = await ClickHouseDailyRepository.connect(
             dsn=configured_dsn(
                 settings.clickhouse_dsn,
@@ -1946,9 +1917,7 @@ async def run_low_volatility_forward_evaluation(
             panel=executable,
             source_spec=source,
             forward_spec=forward,
-            evaluation_dataset_manifest_hash=(
-                evaluation_manifest.manifest_hash
-            ),
+            evaluation_dataset_manifest_hash=(evaluation_manifest.manifest_hash),
             bindings=bindings,
             predecessor_result=predecessor.result,
             predecessor_evidence=predecessor.evidence,
@@ -1995,50 +1964,28 @@ def _low_volatility_forward_evaluation_payload(
     result = record.result
     assessment = record.assessment
     return {
-        "annualized_forward_return": str(
-            result.annualized_forward_return
-        ),
-        "annualized_stability_gap": str(
-            result.annualized_stability_gap
-        ),
-        "annualized_training_return": str(
-            result.annualized_training_return
-        ),
+        "annualized_forward_return": str(result.annualized_forward_return),
+        "annualized_stability_gap": str(result.annualized_stability_gap),
+        "annualized_training_return": str(result.annualized_training_return),
         "assessment_hash": assessment.assessment_hash,
-        "benchmark_compounded_return": str(
-            result.benchmark_compounded_return
-        ),
+        "benchmark_compounded_return": str(result.benchmark_compounded_return),
         "block_count": len(result.blocks),
         "evidence_status": assessment.evidence_status,
-        "evaluation_dataset_manifest_hash": (
-            result.evaluation_dataset_manifest_hash
-        ),
-        "forward_compounded_return": str(
-            result.forward_compounded_return
-        ),
-        "forward_excess_return": str(
-            result.forward_excess_return
-        ),
+        "evaluation_dataset_manifest_hash": (result.evaluation_dataset_manifest_hash),
+        "forward_compounded_return": str(result.forward_compounded_return),
+        "forward_excess_return": str(result.forward_excess_return),
         "forward_spec_hash": result.forward_spec_hash,
         "gate_failures": list(assessment.gate_failures),
         "live_trading_locked": True,
         "paper_deployment_allowed": False,
-        "paper_trading_eligible": (
-            assessment.paper_trading_eligible
-        ),
-        "profitable_block_rate": str(
-            result.profitable_block_rate
-        ),
+        "paper_trading_eligible": (assessment.paper_trading_eligible),
+        "profitable_block_rate": str(result.profitable_block_rate),
         "requested_by": record.requested_by,
         "result_hash": result.result_hash,
         "session_count": len(result.session_bindings),
         "status": status,
-        "strategy_rejected_order_count": (
-            result.strategy_rejected_order_count
-        ),
-        "strategy_unresolved_position_count": (
-            result.strategy_unresolved_position_count
-        ),
+        "strategy_rejected_order_count": (result.strategy_rejected_order_count),
+        "strategy_unresolved_position_count": (result.strategy_unresolved_position_count),
         "version": result.version,
     }
 
@@ -2052,46 +1999,23 @@ async def create_low_volatility_forward_evaluation_campaign(
     """Freeze deterministic full-market coverage for the 126-day prefix."""
 
     if settings.live_trading_enabled:
-        raise MissingCapabilityError(
-            "forward evaluation data requires live trading locked"
-        )
-    if (
-        not requested_by.strip()
-        or requested_by != requested_by.strip()
-        or len(requested_by) > 128
-    ):
-        raise ValueError(
-            "requested_by must contain 1-128 trimmed characters"
-        )
+        raise MissingCapabilityError("forward evaluation data requires live trading locked")
+    if not requested_by.strip() or requested_by != requested_by.strip() or len(requested_by) > 128:
+        raise ValueError("requested_by must contain 1-128 trimmed characters")
     dsn = configured_dsn(
         settings.postgres_dsn,
         capability="PostgreSQL",
     )
-    forward_specs = (
-        PostgresLowVolatilityForwardEvidenceSpecRepository.connect(
-            dsn=dsn
-        )
-    )
-    sessions = PostgresLowVolatilityForwardSessionRepository.connect(
-        dsn=dsn
-    )
+    forward_specs = PostgresLowVolatilityForwardEvidenceSpecRepository.connect(dsn=dsn)
+    sessions = PostgresLowVolatilityForwardSessionRepository.connect(dsn=dsn)
     campaigns = PostgresResearchDataCampaignRepository.connect(dsn=dsn)
     control = PostgresControlRepository.connect(dsn=dsn)
     try:
         forward = (await forward_specs.read(forward_spec_hash)).spec
-        records = await sessions.list_for_spec(
-            forward_spec_hash=forward.spec_hash
-        )
+        records = await sessions.list_for_spec(forward_spec_hash=forward.spec_hash)
         if len(records) < forward.minimum_forward_sessions:
-            raise ValueError(
-                "forward evaluation data window is incomplete"
-            )
-        bindings = tuple(
-            value.binding
-            for value in records[
-                : forward.minimum_forward_sessions
-            ]
-        )
+            raise ValueError("forward evaluation data window is incomplete")
+        bindings = tuple(value.binding for value in records[: forward.minimum_forward_sessions])
         if (
             bindings[0].session_date != forward.forward_start_date
             or any(
@@ -2100,26 +2024,13 @@ async def create_low_volatility_forward_evaluation_campaign(
             )
             or len({value.policy_hash for value in bindings}) != 1
         ):
-            raise ValueError(
-                "forward evaluation data prefix is inconsistent"
-            )
-        snapshot_hashes = tuple(
-            dict.fromkeys(value.snapshot_hash for value in bindings)
-        )
+            raise ValueError("forward evaluation data prefix is inconsistent")
+        snapshot_hashes = tuple(dict.fromkeys(value.snapshot_hash for value in bindings))
         instruments = tuple(
-            sorted(
-                {
-                    instrument
-                    for value in bindings
-                    for instrument in value.instruments
-                }
-            )
+            sorted({instrument for value in bindings for instrument in value.instruments})
         )
         campaign_spec = ResearchDataCampaignSpec(
-            campaign_key=(
-                "low-vol-forward-eval:"
-                f"{forward.spec_hash[:16]}"
-            ),
+            campaign_key=(f"low-vol-forward-eval:{forward.spec_hash[:16]}"),
             policy_hash=bindings[0].policy_hash,
             snapshot_hashes=snapshot_hashes,
             instruments=instruments,
@@ -2134,10 +2045,7 @@ async def create_low_volatility_forward_evaluation_campaign(
         )
         payload: dict[str, object] = {
             "campaign_hash": campaign_spec.campaign_hash,
-            "completed_items": sum(
-                value.state == "completed"
-                for value in status.items
-            ),
+            "completed_items": sum(value.state == "completed" for value in status.items),
             "end_date": campaign_spec.end_date.isoformat(),
             "forward_spec_hash": forward.spec_hash,
             "instrument_count": len(instruments),
@@ -2162,6 +2070,171 @@ async def create_low_volatility_forward_evaluation_campaign(
         await campaigns.close()
         await sessions.close()
         await forward_specs.close()
+
+
+async def approve_low_volatility_paper_candidate(
+    settings: AppSettings,
+    *,
+    evaluation_result_hash: str,
+    approved_by: str,
+) -> dict[str, object]:
+    """Approve passed forward evidence without activating a runtime."""
+
+    if settings.environment is not RuntimeEnvironment.PAPER:
+        raise MissingCapabilityError("paper environment is not configured")
+    if settings.live_trading_enabled:
+        raise MissingCapabilityError("live trading must remain hard-locked")
+    if not approved_by.strip() or approved_by != approved_by.strip() or len(approved_by) > 128:
+        raise ValueError("approved_by must contain 1-128 trimmed characters")
+    dsn = configured_dsn(
+        settings.postgres_dsn,
+        capability="PostgreSQL",
+    )
+    evaluations = PostgresLowVolatilityForwardEvaluationRepository.connect(dsn=dsn)
+    candidates = PostgresLowVolatilityPaperCandidateRepository.connect(dsn=dsn)
+    campaigns = PostgresResearchDataCampaignRepository.connect(dsn=dsn)
+    controls = PostgresExecutionControlRepository.connect(dsn=dsn)
+    control = PostgresControlRepository.connect(dsn=dsn)
+    try:
+        fence = await controls.replay(account_id=settings.paper_account_id)
+        if not fence.active:
+            raise MissingCapabilityError(
+                "low-volatility approval requires the kill switch to remain active"
+            )
+        evaluation = await evaluations.read(evaluation_result_hash)
+        if (
+            evaluation.assessment.evidence_status != "paper_candidate"
+            or not evaluation.assessment.paper_trading_eligible
+            or evaluation.paper_deployment_allowed
+            or not evaluation.live_trading_locked
+        ):
+            raise ValueError("forward evaluation is not a locked paper candidate")
+        manifest = await campaigns.read_manifest(evaluation.result.evaluation_dataset_manifest_hash)
+        bindings = evaluation.result.session_bindings
+        expected_snapshots = tuple(dict.fromkeys(value.snapshot_hash for value in bindings))
+        expected_instruments = tuple(
+            sorted({instrument for value in bindings for instrument in value.instruments})
+        )
+        if (
+            manifest.manifest_hash != evaluation.result.evaluation_dataset_manifest_hash
+            or manifest.policy_hash != bindings[0].policy_hash
+            or manifest.start_date != bindings[0].session_date
+            or manifest.end_date != bindings[-1].session_date
+            or manifest.snapshot_hashes != expected_snapshots
+            or manifest.instruments != expected_instruments
+        ):
+            raise ValueError("paper candidate evaluation dataset is inconsistent")
+        policy = default_paper_policy(expected_instruments)
+        approved_at = datetime.now(UTC)
+        if approved_at < evaluation.completed_at:
+            raise ValueError("paper candidate approval cannot precede evaluation")
+        approval = LowVolatilityPaperCandidateApproval(
+            account_id=settings.paper_account_id,
+            strategy_id=settings.paper_strategy_id,
+            forward_spec_hash=(evaluation.result.forward_spec_hash),
+            evaluation_result_hash=(evaluation.result.result_hash),
+            evaluation_assessment_hash=(evaluation.assessment.assessment_hash),
+            evaluation_dataset_manifest_hash=(evaluation.result.evaluation_dataset_manifest_hash),
+            source_spec_hash=evaluation.result.source_spec_hash,
+            risk_policy_hash=policy.policy_hash,
+            instruments=expected_instruments,
+            approved_by=approved_by,
+            approved_at=approved_at,
+        )
+        stored = await candidates.approve(approval)
+        payload: dict[str, object] = {
+            "account_id": stored.approval.account_id,
+            "approval_hash": stored.approval.approval_hash,
+            "daily_signal_evidence_required": True,
+            "evaluation_result_hash": (stored.approval.evaluation_result_hash),
+            "execution_mode": "paper",
+            "instrument_count": len(stored.approval.instruments),
+            "live_trading_locked": True,
+            "minimum_paper_sessions": (stored.approval.minimum_paper_sessions),
+            "risk_policy_hash": (stored.approval.risk_policy_hash),
+            "runtime_activation_allowed": False,
+            "status": ("approved_awaiting_daily_signal_runtime"),
+            "strategy_id": stored.approval.strategy_id,
+        }
+        await control.append_audit_event(
+            "research.low_volatility.paper_candidate.approved",
+            stored.approval.approved_at,
+            {
+                **payload,
+                "approved_by": approved_by,
+                "evaluation_assessment_hash": (stored.approval.evaluation_assessment_hash),
+            },
+        )
+        return payload
+    finally:
+        await control.close()
+        await controls.close()
+        await campaigns.close()
+        await candidates.close()
+        await evaluations.close()
+
+
+async def revoke_low_volatility_paper_candidate(
+    settings: AppSettings,
+    *,
+    revoked_by: str,
+    reason: LowVolatilityPaperRevocationReason,
+) -> dict[str, object]:
+    """Revoke the active candidate without touching broker state."""
+
+    if settings.environment is not RuntimeEnvironment.PAPER:
+        raise MissingCapabilityError("paper environment is not configured")
+    if settings.live_trading_enabled:
+        raise MissingCapabilityError("live trading must remain hard-locked")
+    dsn = configured_dsn(
+        settings.postgres_dsn,
+        capability="PostgreSQL",
+    )
+    candidates = PostgresLowVolatilityPaperCandidateRepository.connect(dsn=dsn)
+    controls = PostgresExecutionControlRepository.connect(dsn=dsn)
+    control = PostgresControlRepository.connect(dsn=dsn)
+    try:
+        fence = await controls.replay(account_id=settings.paper_account_id)
+        if not fence.active:
+            raise MissingCapabilityError(
+                "candidate revocation requires the kill switch to remain active"
+            )
+        active = await candidates.active(
+            account_id=settings.paper_account_id,
+            strategy_id=settings.paper_strategy_id,
+        )
+        if active is None:
+            raise LookupError("low-volatility paper candidate is not active")
+        revocation = LowVolatilityPaperCandidateRevocation(
+            approval_hash=active.approval.approval_hash,
+            revoked_by=revoked_by,
+            revoked_at=datetime.now(UTC),
+            reason=reason,
+        )
+        stored = await candidates.revoke(revocation)
+        payload: dict[str, object] = {
+            "account_id": stored.approval.account_id,
+            "approval_hash": stored.approval.approval_hash,
+            "live_trading_locked": True,
+            "reason": revocation.reason.value,
+            "revocation_hash": revocation.revocation_hash,
+            "runtime_activation_allowed": False,
+            "status": "revoked",
+            "strategy_id": stored.approval.strategy_id,
+        }
+        await control.append_audit_event(
+            "research.low_volatility.paper_candidate.revoked",
+            revocation.revoked_at,
+            {
+                **payload,
+                "revoked_by": revoked_by,
+            },
+        )
+        return payload
+    finally:
+        await control.close()
+        await controls.close()
+        await candidates.close()
 
 
 async def inspect_fundamental_data_backfill(

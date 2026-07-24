@@ -26,10 +26,14 @@ from autoquant.execution.compliance_approval import (
     ComplianceRevocationReason,
 )
 from autoquant.execution.control_store import PostgresExecutionControlRepository
+from autoquant.execution.low_volatility_paper_approval import (
+    LowVolatilityPaperRevocationReason,
+)
 from autoquant.execution.qmt_preflight import inspect_qmt_readiness
 from autoquant.execution.qmt_recovery_drill import QmtRecoveryDrillKind
 from autoquant.execution.qmt_session_store import PostgresQmtSessionLeaseRepository
 from autoquant.operations import (
+    approve_low_volatility_paper_candidate,
     approve_paper_sma_portfolio_strategy,
     approve_paper_sma_strategy,
     backfill_research_universe_snapshots,
@@ -60,6 +64,7 @@ from autoquant.operations import (
     inspect_validation_campaign,
     retry_research_data_campaign_item,
     revoke_compliance_approval,
+    revoke_low_volatility_paper_candidate,
     revoke_paper_strategy,
     run_daily_ingestion,
     run_dynamic_validation,
@@ -1428,14 +1433,76 @@ def low_volatility_forward_evaluate(
             run_low_volatility_forward_evaluation(
                 _settings(),
                 forward_spec_hash=forward_spec_hash,
-                evaluation_dataset_manifest_hash=(
-                    evaluation_dataset_manifest_hash
-                ),
+                evaluation_dataset_manifest_hash=(evaluation_dataset_manifest_hash),
                 requested_by=requested_by,
             )
         )
     except (AutoQuantError, LookupError, ValueError):
         _fail("low-volatility forward evaluation failed closed")
+    _emit(payload)
+
+
+@app.command("approve-paper-low-volatility-candidate")
+def approve_paper_low_volatility_candidate(
+    evaluation_result_hash: Annotated[
+        str,
+        typer.Option("--evaluation-result-hash"),
+    ],
+    approved_by: Annotated[
+        str,
+        typer.Option("--approved-by"),
+    ],
+    confirm_paper_only: Annotated[
+        bool,
+        typer.Option("--confirm-paper-only"),
+    ] = False,
+) -> None:
+    """Record a paper candidate; this does not activate a runtime."""
+
+    if not confirm_paper_only:
+        _fail("paper-only candidate approval confirmation is required")
+    try:
+        payload = asyncio.run(
+            approve_low_volatility_paper_candidate(
+                _settings(),
+                evaluation_result_hash=evaluation_result_hash,
+                approved_by=approved_by,
+            )
+        )
+    except (AutoQuantError, LookupError, ValueError):
+        _fail("low-volatility paper candidate approval failed closed")
+    _emit(payload)
+
+
+@app.command("revoke-paper-low-volatility-candidate")
+def revoke_paper_low_volatility_candidate(
+    revoked_by: Annotated[
+        str,
+        typer.Option("--revoked-by"),
+    ],
+    reason: Annotated[
+        LowVolatilityPaperRevocationReason,
+        typer.Option("--reason"),
+    ],
+    confirm_revoke: Annotated[
+        bool,
+        typer.Option("--confirm-revoke"),
+    ] = False,
+) -> None:
+    """Revoke the active paper candidate without touching broker state."""
+
+    if not confirm_revoke:
+        _fail("low-volatility paper candidate revocation confirmation is required")
+    try:
+        payload = asyncio.run(
+            revoke_low_volatility_paper_candidate(
+                _settings(),
+                revoked_by=revoked_by,
+                reason=reason,
+            )
+        )
+    except (AutoQuantError, LookupError, ValueError):
+        _fail("low-volatility paper candidate revocation failed closed")
     _emit(payload)
 
 
@@ -1461,10 +1528,7 @@ def low_volatility_forward_evaluation_data_create(
             )
         )
     except (AutoQuantError, LookupError, ValueError):
-        _fail(
-            "low-volatility forward evaluation data creation "
-            "failed closed"
-        )
+        _fail("low-volatility forward evaluation data creation failed closed")
     _emit(payload)
 
 

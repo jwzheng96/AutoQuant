@@ -77,6 +77,12 @@ Schema v45 additionally requires one full-window evaluation dataset over the det
 union of the 126 frozen point-in-time universes. This ensures a position can still be valued
 and exited after leaving an index; it cannot change the frozen active members, session prefix,
 signal, or parameters.
+Schema v46 adds a separate append-only approval and revocation ledger for a passing
+low-volatility `paper_candidate`. Approval requires the kill switch to remain active and is
+database-bound to the exact forward result, assessment, source specification and evaluation
+dataset. It explicitly stores `runtime_activation_allowed=false`,
+`daily_signal_evidence_required=true` and `live_trading_locked=true`; therefore approval records
+a governance decision but cannot start the scheduler or unlock either paper or live trading.
 PostgreSQL schema v36 adds an append-only, revocable compliance-approval artifact bound to the
 active paper registration and exact promotion policy. No approval is created automatically,
 and even a valid artifact can only satisfy an evidence gate while the code-level live release

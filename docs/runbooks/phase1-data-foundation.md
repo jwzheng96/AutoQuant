@@ -961,3 +961,36 @@ state to `forward_evaluation_passed_awaiting_paper_approval`, but schema v44 sti
 `paper_deployment_allowed=false` and `live_trading_locked=true`. A rejected result cannot be
 edited, deleted, re-windowed, or promoted. No command in this stage activates paper or live
 trading.
+
+If and only if the immutable assessment is `paper_candidate`, switch the process configuration
+to `AQ_ENVIRONMENT=paper` while keeping `AQ_LIVE_TRADING_ENABLED=false` and the account kill
+switch active. Record the independent paper-only decision with:
+
+```bash
+uv run autoquant approve-paper-low-volatility-candidate \
+  --evaluation-result-hash <passing-forward-evaluation-result-hash> \
+  --approved-by risk-operator \
+  --confirm-paper-only
+```
+
+Schema v46 verifies the exact result, assessment, source specification, evaluation dataset and
+completion time again inside PostgreSQL before accepting the append-only row. A successful
+response is `approved_awaiting_daily_signal_runtime`; it is not an active paper deployment.
+The row hard-codes a 60-session minimum, requires immutable daily signal evidence, sets
+`runtime_activation_allowed=false`, and leaves live trading locked. The existing paper runtime
+registry and unlock service cannot see this candidate.
+
+Revoke an active candidate before replacing it or whenever its evidence or risk design is no
+longer acceptable:
+
+```bash
+uv run autoquant revoke-paper-low-volatility-candidate \
+  --revoked-by risk-operator \
+  --reason operator_safety_action \
+  --confirm-revoke
+```
+
+Allowed reasons are `evidence_invalidated`, `risk_changed`, `runtime_design_changed`, and
+`operator_safety_action`. Revocation appends a second immutable artifact and performs no broker
+operation. Do not attempt candidate approval before a passing 126-session evaluation exists;
+the command exits nonzero without creating an approval.
