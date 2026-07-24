@@ -109,6 +109,15 @@ Only an exact receipt-backed async response may be correlated after that freshne
 closes the crash-after-inbox/before-binding gap without relaxing stale unpersisted callbacks.
 Request and broker identifiers are scoped by QMT session-lease generation, so vendor counters may
 restart without ever joining a new process callback to an old process order.
+Schema v42 reduces only receipt-backed callbacks into an auditable broker-fact ledger. Immutable
+processing events cover every inbox sequence, immutable trade facts enforce one economic meaning
+per broker trade identifier, and rebuildable order projections bind the staged instrument, side,
+quantity, limit price and remark to the durable broker-order correlation. ORDER and TRADE
+callbacks may arrive in either order, but the projection is trusted only after cumulative volume
+and weighted amount converge. Missing evidence remains pending; quantity regression, identity
+conflict, a conflicting duplicate trade identifier, disconnect or broker error permanently marks
+that lease generation broker-state-unknown. Restart replay is idempotent and cannot erase the
+immutable processing chain.
 Candidate reservation, asynchronous broker-order binding and restart recovery also require the
 current lease bearer token and recheck the active holder/generation against database time while
 holding the lease row. A released, expired or superseded process therefore cannot append or

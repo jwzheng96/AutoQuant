@@ -47,6 +47,14 @@ schema v41 为每个收件箱事件在同一数据库事务内追加独立、不
 lease generation 和序号。只有完整回放且回执校验通过的异步回报，才允许在 5 秒窗口之后
 补写订单关联，从而恢复“事件已落库但关联前崩溃”的状态；未持久化事件、缺少回执的历史
 事件和伪造回执仍按过期或券商状态未知处理。
+schema v42 在回执之后增加顺序归并账本。每个 inbox 序号都对应一条不可变 processing
+event；TRADE 形成不可变成交事实，ORDER 形成可由事件链重建的订单投影。处理前必须先验证
+当前 generation 的 broker order 绑定和候选单中证券、方向、数量、限价、remark 完全
+一致。ORDER 与 TRADE 可以乱序到达，但累计成交数量、成交金额和委托均价完全收敛前只能
+标记 `pending_reconciliation`，不能向风险引擎声称成交状态已知。同一 `traded_id` 的
+完全相同重复回调是幂等的；内容冲突、累计数量回退、超量成交、订单身份冲突、断线或错误
+回调会将当前 lease generation 永久标记为 `broker_state_unknown`。后续正常回调不能
+洗白该熔断；必须新建 generation，并通过完整只读基线重新建立可信状态。
 候选外键必须指向同一 holder 的真实 `acquire` 事件；预留事务还会锁定并检查当前租约
 未释放、未过期且 generation 未变化。候选预留、异步券商订单号绑定和重启恢复都必须
 提交当前租约 bearer token；数据库只比较其 SHA-256，并以数据库时钟在持有 lease 行锁
@@ -192,7 +200,8 @@ uv run autoquant qmt-drill-complete `
 - 不直接调用 `order_stock`、`order_stock_async` 或撤单函数做“连通性测试”。
 - 不把查询的 `None` 当作空持仓、空委托或空成交。
 - 不在 XtQuant 回调线程内执行同步查询。
-- 不在 schema v40 回调事实持久化成功前更新内部订单状态；持久化失败必须停机和全量重查。
+- 不在 schema v42 回执校验和顺序归并成功前更新内部订单状态；持久化或归并失败必须停机
+  并全量重查。
 - 不复用已经捕获过回调的 buffer 做启动恢复，也不在恢复 durable cursor 前注册回调。
 - 不用本阶段的适配器或预检结果宣称可盈利或可上实盘。
 

@@ -14,6 +14,10 @@ from autoquant.execution.qmt_callback_inbox import (
 from autoquant.execution.qmt_callback_processor import (
     QmtPersistedAsyncResponseBinder,
 )
+from autoquant.execution.qmt_callback_reducer_store import (
+    PostgresQmtCallbackStateReducer,
+    QmtCallbackReductionResult,
+)
 from autoquant.execution.qmt_callback_store import PostgresQmtCallbackInbox
 from autoquant.execution.qmt_canary_contract import QmtOrderCorrelation
 from autoquant.execution.qmt_gateway import (
@@ -28,6 +32,7 @@ _HOLDER_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z")
 class QmtCallbackCoordinationResult:
     persisted_events: tuple[QmtCallbackInboxEvent, ...]
     async_bindings: tuple[QmtOrderCorrelation, ...]
+    state_reduction: QmtCallbackReductionResult | None = None
 
     @property
     def broker_mutation_allowed(self) -> bool:
@@ -48,21 +53,22 @@ class QmtCallbackPersistenceCoordinator:
         qmt_session_id: int,
         qmt_lease_generation: int,
         async_response_binder: QmtPersistedAsyncResponseBinder | None = None,
+        state_reducer: PostgresQmtCallbackStateReducer | None = None,
     ) -> None:
         if not isinstance(buffer, QmtCallbackBuffer):
             raise TypeError("buffer must be QmtCallbackBuffer")
         if not isinstance(inbox, PostgresQmtCallbackInbox):
             raise TypeError("inbox must be PostgresQmtCallbackInbox")
-        if (
-            async_response_binder is not None
-            and not isinstance(
-                async_response_binder,
-                QmtPersistedAsyncResponseBinder,
-            )
+        if async_response_binder is not None and not isinstance(
+            async_response_binder,
+            QmtPersistedAsyncResponseBinder,
         ):
-            raise TypeError(
-                "async_response_binder must be QmtPersistedAsyncResponseBinder"
-            )
+            raise TypeError("async_response_binder must be QmtPersistedAsyncResponseBinder")
+        if state_reducer is not None and not isinstance(
+            state_reducer,
+            PostgresQmtCallbackStateReducer,
+        ):
+            raise TypeError("state_reducer must be PostgresQmtCallbackStateReducer")
         _validate_identity(
             expected_broker_account_id=expected_broker_account_id,
             logical_account_id=logical_account_id,
@@ -78,6 +84,7 @@ class QmtCallbackPersistenceCoordinator:
         self._qmt_session_id = qmt_session_id
         self._qmt_lease_generation = qmt_lease_generation
         self._async_response_binder = async_response_binder
+        self._state_reducer = state_reducer
         self._coordination_lock = Lock()
 
     async def persist_and_process(
@@ -100,15 +107,17 @@ class QmtCallbackPersistenceCoordinator:
     ) -> QmtCallbackCoordinationResult:
         reservation = self._buffer.reserve_durable(limit=limit)
         if reservation is None:
-            return QmtCallbackCoordinationResult((), ())
+            return QmtCallbackCoordinationResult(
+                (),
+                (),
+                await self._reduce_state(lease_token=lease_token),
+            )
         persisted: list[QmtCallbackInboxEvent] = []
         try:
             for envelope in reservation.events:
                 callback = sanitize_qmt_callback(
                     envelope,
-                    expected_broker_account_id=(
-                        self._expected_broker_account_id
-                    ),
+                    expected_broker_account_id=(self._expected_broker_account_id),
                     logical_account_id=self._logical_account_id,
                 )
                 persisted.append(
@@ -132,10 +141,14 @@ class QmtCallbackPersistenceCoordinator:
                 pass
             raise
         events = tuple(persisted)
+        bindings = await self._bind_async_responses(
+            events,
+            lease_token=lease_token,
+        )
         return QmtCallbackCoordinationResult(
             persisted_events=events,
-            async_bindings=await self._bind_async_responses(
-                events,
+            async_bindings=bindings,
+            state_reduction=await self._reduce_state(
                 lease_token=lease_token,
             ),
         )
@@ -181,10 +194,14 @@ class QmtCallbackPersistenceCoordinator:
             qmt_lease_generation=self._qmt_lease_generation,
             lease_token=lease_token,
         )
+        bindings = await self._bind_async_responses(
+            events,
+            lease_token=lease_token,
+        )
         return QmtCallbackCoordinationResult(
             persisted_events=events,
-            async_bindings=await self._bind_async_responses(
-                events,
+            async_bindings=bindings,
+            state_reduction=await self._reduce_state(
                 lease_token=lease_token,
             ),
         )
@@ -196,14 +213,10 @@ class QmtCallbackPersistenceCoordinator:
         lease_token: SecretStr,
     ) -> tuple[QmtOrderCorrelation, ...]:
         responses = tuple(
-            event
-            for event in events
-            if event.callback.kind is QmtCallbackKind.ASYNC_ORDER_RESPONSE
+            event for event in events if event.callback.kind is QmtCallbackKind.ASYNC_ORDER_RESPONSE
         )
         if responses and self._async_response_binder is None:
-            raise BrokerStateUnknownError(
-                "durable QMT async responses require a configured binder"
-            )
+            raise BrokerStateUnknownError("durable QMT async responses require a configured binder")
         if self._async_response_binder is None:
             return ()
         bindings: list[QmtOrderCorrelation] = []
@@ -215,6 +228,36 @@ class QmtCallbackPersistenceCoordinator:
                 )
             )
         return tuple(bindings)
+
+    async def _reduce_state(
+        self,
+        *,
+        lease_token: SecretStr,
+    ) -> QmtCallbackReductionResult | None:
+        if self._state_reducer is None:
+            return None
+        # A prior process may have crashed after the inbox commit and before
+        # correlation binding. Rebind the complete durable generation before
+        # interpreting any later ORDER or TRADE callback.
+        events = await self._inbox.replay_current(
+            account_id=self._logical_account_id,
+            gateway_holder_id=self._gateway_holder_id,
+            qmt_session_id=self._qmt_session_id,
+            qmt_lease_generation=self._qmt_lease_generation,
+            lease_token=lease_token,
+        )
+        await self._bind_async_responses(
+            events,
+            lease_token=lease_token,
+        )
+        return await self._state_reducer.process(
+            events,
+            account_id=self._logical_account_id,
+            gateway_holder_id=self._gateway_holder_id,
+            qmt_session_id=self._qmt_session_id,
+            qmt_lease_generation=self._qmt_lease_generation,
+            lease_token=lease_token,
+        )
 
 
 def _validate_identity(
@@ -235,16 +278,9 @@ def _validate_identity(
             or value != value.strip()
             or len(value) > maximum
         ):
-            raise ValueError(
-                f"{name} must be trimmed, nonblank and at most {maximum} characters"
-            )
-    if (
-        not isinstance(gateway_holder_id, str)
-        or _HOLDER_ID.fullmatch(gateway_holder_id) is None
-    ):
-        raise ValueError(
-            "gateway_holder_id must be a safe 1-64 character identifier"
-        )
+            raise ValueError(f"{name} must be trimmed, nonblank and at most {maximum} characters")
+    if not isinstance(gateway_holder_id, str) or _HOLDER_ID.fullmatch(gateway_holder_id) is None:
+        raise ValueError("gateway_holder_id must be a safe 1-64 character identifier")
     if (
         not isinstance(qmt_session_id, int)
         or isinstance(qmt_session_id, bool)
