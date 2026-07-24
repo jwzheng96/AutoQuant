@@ -251,6 +251,95 @@ async function loadTrading() {
         : blockedQmtChecks.join(", ") || "不可用",
     );
     setText("qmt-remaining-gates", data.qmt?.remaining_gates?.join(", ") ?? "—");
+    const qmtOperations = data.qmt_operations ?? {};
+    const qmtStateLabels = {
+      reconciled: "完整性与全量对账均通过",
+      pending: "等待新鲜全量对账",
+      unknown: "券商状态未知，必须人工处置",
+      idle: "尚无 QMT 回调会话",
+      unavailable: "运维证据不可用",
+    };
+    setText(
+      "qmt-ledger-state",
+      qmtOperations.integrity_verified
+        ? qmtStateLabels[qmtOperations.status] ?? qmtOperations.status
+        : "完整性复验失败",
+    );
+    setText(
+      "qmt-lease-scope",
+      qmtOperations.gateway_holder_id
+        ? `${qmtOperations.gateway_holder_id} / session ${qmtOperations.qmt_session_id} / generation ${qmtOperations.qmt_lease_generation} · ${qmtOperations.lease_active ? "ACTIVE" : "EXPIRED"}`
+        : "—",
+    );
+    setText("qmt-callback-cursor", qmtOperations.callback_cursor ?? 0);
+    setText(
+      "qmt-processing-hash",
+      qmtOperations.processing_hash
+        ? `${qmtOperations.processing_hash.slice(0, 16)}… (${qmtOperations.processing_event_count ?? 0} events)`
+        : "—",
+    );
+    setText(
+      "qmt-broker-state",
+      qmtOperations.broker_state_known
+        ? "KNOWN"
+        : `UNKNOWN${qmtOperations.fatal_reason ? ` · ${qmtOperations.fatal_reason}` : ""}`,
+    );
+    setText(
+      "qmt-reconciliation-state",
+      qmtOperations.reconciliation_state
+        ? `${qmtOperations.reconciliation_state.toUpperCase()} · ${qmtOperations.reconciliation_current ? "CURRENT" : "STALE"}`
+        : "尚无报告",
+    );
+    setText(
+      "qmt-reconciliation-hash",
+      qmtOperations.reconciliation_report_hash
+        ? `${qmtOperations.reconciliation_report_hash.slice(0, 16)}…`
+        : "—",
+    );
+    setText(
+      "qmt-reconciliation-issues",
+      qmtOperations.reconciliation_issues?.join(", ") || "—",
+    );
+    const qmtOrdersTable = document.getElementById("qmt-orders-table");
+    qmtOrdersTable.replaceChildren();
+    (qmtOperations.orders ?? []).forEach(order => {
+      const row = document.createElement("tr");
+      [
+        order.client_order_id,
+        order.instrument,
+        order.side,
+        `${order.quantity} @ ${order.limit_price}`,
+        order.order_state,
+        `${order.trade_volume} / ${order.reported_traded_volume ?? "—"}`,
+        order.convergence,
+        new Date(order.updated_at).toLocaleString(),
+      ].forEach(value => {
+        const cell = document.createElement("td");
+        cell.textContent = value;
+        row.append(cell);
+      });
+      qmtOrdersTable.append(row);
+    });
+    const qmtTradesTable = document.getElementById("qmt-trades-table");
+    qmtTradesTable.replaceChildren();
+    (qmtOperations.trades ?? []).forEach(trade => {
+      const row = document.createElement("tr");
+      [
+        trade.trade_id,
+        trade.client_order_id,
+        trade.instrument,
+        trade.side,
+        trade.volume,
+        trade.price,
+        trade.amount,
+        new Date(trade.observed_at).toLocaleString(),
+      ].forEach(value => {
+        const cell = document.createElement("td");
+        cell.textContent = value;
+        row.append(cell);
+      });
+      qmtTradesTable.append(row);
+    });
     setText(
       "promotion-state",
       data.promotion?.evidence_gates_passed

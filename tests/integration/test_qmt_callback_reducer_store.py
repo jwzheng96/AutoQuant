@@ -67,6 +67,7 @@ from autoquant.risk.models import (
     RiskDecision,
     RiskDecisionState,
 )
+from autoquant.web.qmt_operations_store import PostgresQmtOperationsRepository
 
 POSTGRES_DSN = os.environ.get("AQ_POSTGRES_DSN", "").strip()
 ACCOUNT_ID = "canary-account"
@@ -398,6 +399,20 @@ async def test_qmt_reducer_converges_restart_replays_and_fences_trade_conflict(
         )
         == passed_report
     )
+    operations = PostgresQmtOperationsRepository(
+        engine=engine,
+        schema=schema,
+    )
+    passed_snapshot = await operations.snapshot(account_id=ACCOUNT_ID)
+    assert passed_snapshot.integrity_verified is True
+    assert passed_snapshot.lease_active is True
+    assert passed_snapshot.last_local_sequence == 2
+    assert passed_snapshot.processing_event_count == 2
+    assert passed_snapshot.broker_state_known is True
+    assert passed_snapshot.reconciliation_current is True
+    assert passed_snapshot.latest_reconciliation == passed_report
+    assert passed_snapshot.projections == converged.projections
+    assert passed_snapshot.trade_facts == converged.trade_facts
 
     buffer.capture(
         QmtCallbackKind.TRADE,
@@ -443,6 +458,14 @@ async def test_qmt_reducer_converges_restart_replays_and_fences_trade_conflict(
         lease_token=LEASE_TOKEN,
     )
     assert await reconciliation_store.latest(logical_account_id=ACCOUNT_ID) == rejected_report
+    rejected_snapshot = await operations.snapshot(account_id=ACCOUNT_ID)
+    assert rejected_snapshot.integrity_verified is True
+    assert rejected_snapshot.last_local_sequence == 3
+    assert rejected_snapshot.processing_event_count == 3
+    assert rejected_snapshot.broker_state_known is False
+    assert rejected_snapshot.fatal_reason == "trade_id_conflict"
+    assert rejected_snapshot.reconciliation_current is True
+    assert rejected_snapshot.latest_reconciliation == rejected_report
 
     async with engine.begin() as connection:
         with pytest.raises(SQLAlchemyError):

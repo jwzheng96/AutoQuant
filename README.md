@@ -124,6 +124,12 @@ field and every trade identifier/amount must match the v42 ledger exactly. A que
 before the last callback, an untracked AutoQuant remark, stale projection hashes or any
 broker-state-unknown generation produces an immutable rejected report. Passed and rejected
 reports both commit `broker_mutation_allowed=false`; this evidence still does not unlock orders.
+The authenticated trading console exposes the current v42/v43 state through a GET-only,
+redacted QMT operations view. Each read reconstructs the complete callback, receipt and
+processing hash chains, verifies order projections and trade facts, and marks reconciliation
+current only when its scope, cursor and evidence hashes match the latest ledger. The page has no
+broker submit, cancel or unlock action; an integrity failure aborts console startup and activates
+the paper kill switch when execution controls are available.
 Candidate reservation, asynchronous broker-order binding and restart recovery also require the
 current lease bearer token and recheck the active holder/generation against database time while
 holding the lease row. A released, expired or superseded process therefore cannot append or

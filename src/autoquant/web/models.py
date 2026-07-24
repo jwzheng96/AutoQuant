@@ -1031,6 +1031,147 @@ class QmtReadOnlyStatus(BaseModel):
         return self
 
 
+class QmtBrokerOrderView(BaseModel):
+    client_order_id: str
+    broker_order_id: str = Field(pattern=r"^[1-9][0-9]*$")
+    instrument: str = Field(pattern=r"^[0-9]{6}\.(?:XSHG|XSHE)$")
+    side: str
+    quantity: int = Field(gt=0)
+    limit_price: Decimal = Field(gt=0)
+    order_state: str
+    reported_traded_volume: int | None = Field(default=None, ge=0)
+    trade_volume: int = Field(ge=0)
+    trade_amount: Decimal = Field(ge=0)
+    convergence: str
+    updated_at: datetime
+    projection_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @field_validator("updated_at")
+    @classmethod
+    def require_aware_qmt_order_time(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("QMT order time must be timezone-aware")
+        return value.astimezone(UTC)
+
+
+class QmtBrokerTradeView(BaseModel):
+    trade_id: str
+    client_order_id: str
+    broker_order_id: str = Field(pattern=r"^[1-9][0-9]*$")
+    instrument: str = Field(pattern=r"^[0-9]{6}\.(?:XSHG|XSHE)$")
+    side: str
+    volume: int = Field(gt=0)
+    price: Decimal = Field(gt=0)
+    amount: Decimal = Field(gt=0)
+    observed_at: datetime
+    fact_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @field_validator("observed_at")
+    @classmethod
+    def require_aware_qmt_trade_time(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("QMT trade time must be timezone-aware")
+        return value.astimezone(UTC)
+
+
+class QmtOperationsStatus(BaseModel):
+    status: str
+    live_trading_locked: bool = True
+    broker_mutation_allowed: bool = False
+    integrity_verified: bool
+    gateway_holder_id: str | None = None
+    qmt_session_id: int | None = Field(default=None, gt=0)
+    qmt_lease_generation: int | None = Field(default=None, gt=0)
+    lease_active: bool
+    lease_expires_at: datetime | None = None
+    callback_cursor: int = Field(ge=0)
+    processing_event_count: int = Field(ge=0)
+    processing_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    broker_state_known: bool
+    fatal_reason: str | None = None
+    reconciliation_state: str | None = None
+    reconciliation_current: bool
+    reconciliation_report_hash: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    reconciliation_observed_at: datetime | None = None
+    reconciliation_issues: tuple[str, ...] = ()
+    orders: tuple[QmtBrokerOrderView, ...]
+    trades: tuple[QmtBrokerTradeView, ...]
+
+    @field_validator(
+        "lease_expires_at",
+        "reconciliation_observed_at",
+    )
+    @classmethod
+    def require_aware_qmt_operations_time(
+        cls,
+        value: datetime | None,
+    ) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("QMT operations time must be timezone-aware")
+        return value.astimezone(UTC)
+
+    @model_validator(mode="after")
+    def enforce_qmt_operations_read_only(self) -> Self:
+        if not self.live_trading_locked or self.broker_mutation_allowed:
+            raise ValueError("QMT operations view must remain read-only")
+        scope = (
+            self.gateway_holder_id,
+            self.qmt_session_id,
+            self.qmt_lease_generation,
+        )
+        if any(value is None for value in scope) != all(value is None for value in scope):
+            raise ValueError("QMT operations lease scope is incomplete")
+        reconciliation = (
+            self.reconciliation_state,
+            self.reconciliation_report_hash,
+            self.reconciliation_observed_at,
+        )
+        if any(value is None for value in reconciliation) != all(
+            value is None for value in reconciliation
+        ):
+            raise ValueError("QMT reconciliation summary is incomplete")
+        if self.processing_event_count != self.callback_cursor:
+            raise ValueError("QMT operations cursor does not match processing events")
+        if self.lease_active and (self.gateway_holder_id is None or self.lease_expires_at is None):
+            raise ValueError("active QMT lease requires a complete scope and expiry")
+        if self.reconciliation_current and (
+            not self.integrity_verified or self.reconciliation_state is None
+        ):
+            raise ValueError("current QMT reconciliation requires verified evidence")
+        if self.status not in {
+            "unavailable",
+            "idle",
+            "pending",
+            "reconciled",
+            "unknown",
+        }:
+            raise ValueError("QMT operations status is invalid")
+        if self.status in {"unavailable", "idle"} and (
+            self.gateway_holder_id is not None
+            or self.callback_cursor != 0
+            or self.processing_event_count != 0
+            or self.processing_hash != "0" * 64
+            or self.lease_active
+            or self.reconciliation_current
+            or self.orders
+            or self.trades
+        ):
+            raise ValueError("inactive QMT operations status cannot contain session evidence")
+        if self.status == "reconciled" and (
+            not self.integrity_verified
+            or not self.broker_state_known
+            or not self.reconciliation_current
+            or self.reconciliation_state != "passed"
+        ):
+            raise ValueError("reconciled QMT status requires current evidence")
+        return self
+
+
 class PromotionGateView(BaseModel):
     status: str
     actual: str

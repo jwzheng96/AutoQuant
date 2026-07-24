@@ -291,7 +291,10 @@ class PostgresQmtCallbackReconciliationRepository:
                     .mappings()
                     .all()
                 )
-                if any(_report_from_row(row) != report for row in conflict_rows):
+                if any(
+                    qmt_callback_reconciliation_report_from_row(row) != report
+                    for row in conflict_rows
+                ):
                     raise BrokerStateUnknownError(
                         "QMT reconciliation identity already has another report"
                     )
@@ -348,7 +351,7 @@ class PostgresQmtCallbackReconciliationRepository:
                     .mappings()
                     .one()
                 )
-            stored = _report_from_row(stored_row)
+            stored = qmt_callback_reconciliation_report_from_row(stored_row)
             if stored != report:
                 raise PersistenceUnavailableError(
                     "stored QMT callback reconciliation failed verification"
@@ -403,7 +406,7 @@ class PostgresQmtCallbackReconciliationRepository:
                 )
         except Exception:
             raise PersistenceUnavailableError("QMT callback reconciliation read failed") from None
-        return None if row is None else _report_from_row(row)
+        return None if row is None else qmt_callback_reconciliation_report_from_row(row)
 
 
 def _report_parameters(
@@ -431,7 +434,9 @@ def _report_parameters(
     }
 
 
-def _report_from_row(row: RowMapping) -> QmtCallbackReconciliationReport:
+def qmt_callback_reconciliation_report_from_row(
+    row: RowMapping,
+) -> QmtCallbackReconciliationReport:
     report = QmtCallbackReconciliationReport(
         logical_account_id=str(row["logical_account_id"]),
         gateway_holder_id=str(row["gateway_holder_id"]),
@@ -548,4 +553,7 @@ def _json(payload: object) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 
-__all__ = ["PostgresQmtCallbackReconciliationRepository"]
+__all__ = [
+    "PostgresQmtCallbackReconciliationRepository",
+    "qmt_callback_reconciliation_report_from_row",
+]

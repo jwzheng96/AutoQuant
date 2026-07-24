@@ -95,6 +95,9 @@ from autoquant.web.models import (
     PortfolioValidationExperimentDetail,
     PortfolioWalkForwardJobRequest,
     PromotionGateView,
+    QmtBrokerOrderView,
+    QmtBrokerTradeView,
+    QmtOperationsStatus,
     QmtReadOnlyStatus,
     ResearchManifest,
     ResearchUniverseSnapshotDetail,
@@ -109,6 +112,9 @@ from autoquant.web.models import (
 from autoquant.web.portfolio_validation_store import (
     PostgresPortfolioValidationRepository,
     portfolio_validation_config,
+)
+from autoquant.web.qmt_operations_store import (
+    PostgresQmtOperationsRepository,
 )
 from autoquant.web.risk_store import PostgresRiskDecisionRepository
 from autoquant.web.store import PostgresOperatorRepository
@@ -236,6 +242,8 @@ class ConsoleServicePort(Protocol):
 
     async def qmt_readonly_status(self) -> QmtReadOnlyStatus: ...
 
+    async def qmt_operations_status(self) -> QmtOperationsStatus: ...
+
     async def promotion_status(self) -> PaperPromotionStatus: ...
 
     async def activate_kill_switch(
@@ -286,6 +294,7 @@ class ConsoleService:
         strategy_registry: PostgresPaperDeploymentRegistry | None = None,
         qmt_acceptance_repository: (PostgresQmtReadOnlyAcceptanceRepository | None) = None,
         qmt_session_repository: PostgresQmtSessionLeaseRepository | None = None,
+        qmt_operations_repository: PostgresQmtOperationsRepository | None = None,
         promotion_repository: (PostgresPaperPromotionFactRepository | None) = None,
         ingestion_runner: IngestionRunner = run_daily_ingestion,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
@@ -331,6 +340,7 @@ class ConsoleService:
             raise ValueError("QMT acceptance and session repositories must be configured together")
         self._qmt_acceptances = qmt_acceptance_repository
         self._qmt_sessions = qmt_session_repository
+        self._qmt_operations = qmt_operations_repository
         self._promotion = promotion_repository
         self._ingestion_runner = ingestion_runner
         self._now = now
@@ -419,6 +429,20 @@ class ConsoleService:
                     await self._execution_controls.activate(
                         account_id=self._settings.paper_account_id,
                         command_id=f"qmt-acceptance-recovery-{uuid4()}",
+                        reason=KillSwitchReason.RECOVERY_FAILED,
+                        actor="console-startup",
+                        now=self._now(),
+                    )
+                raise
+        if self._qmt_operations is not None:
+            try:
+                await self._qmt_operations.check_connection()
+                await self._qmt_operations.snapshot(account_id=self._settings.paper_account_id)
+            except Exception:
+                if self._execution_controls is not None:
+                    await self._execution_controls.activate(
+                        account_id=self._settings.paper_account_id,
+                        command_id=f"qmt-operations-recovery-{uuid4()}",
                         reason=KillSwitchReason.RECOVERY_FAILED,
                         actor="console-startup",
                         now=self._now(),
@@ -516,6 +540,8 @@ class ConsoleService:
             await self._qmt_acceptances.close()
         if self._qmt_sessions is not None:
             await self._qmt_sessions.close()
+        if self._qmt_operations is not None:
+            await self._qmt_operations.close()
         if self._promotion is not None:
             await self._promotion.close()
         await self._operators.close()
@@ -1196,6 +1222,96 @@ class ConsoleService:
             order_count=evidence.order_count,
             trade_count=evidence.trade_count,
             remaining_gates=tuple(gates),
+        )
+
+    async def qmt_operations_status(self) -> QmtOperationsStatus:
+        if self._qmt_operations is None:
+            return QmtOperationsStatus(
+                status="unavailable",
+                integrity_verified=False,
+                lease_active=False,
+                callback_cursor=0,
+                processing_event_count=0,
+                processing_hash="0" * 64,
+                broker_state_known=False,
+                reconciliation_current=False,
+                orders=(),
+                trades=(),
+            )
+        snapshot = await self._qmt_operations.snapshot(account_id=self._settings.paper_account_id)
+        reconciliation = snapshot.latest_reconciliation
+        if snapshot.gateway_holder_id is None:
+            status = "idle"
+        elif not snapshot.broker_state_known or snapshot.fatal_reason is not None:
+            status = "unknown"
+        elif (
+            snapshot.lease_active
+            and snapshot.reconciliation_current
+            and reconciliation is not None
+            and reconciliation.state.value == "passed"
+        ):
+            status = "reconciled"
+        else:
+            status = "pending"
+        return QmtOperationsStatus(
+            status=status,
+            integrity_verified=snapshot.integrity_verified,
+            gateway_holder_id=snapshot.gateway_holder_id,
+            qmt_session_id=snapshot.qmt_session_id,
+            qmt_lease_generation=snapshot.qmt_lease_generation,
+            lease_active=snapshot.lease_active,
+            lease_expires_at=snapshot.lease_expires_at,
+            callback_cursor=snapshot.last_local_sequence,
+            processing_event_count=snapshot.processing_event_count,
+            processing_hash=snapshot.last_processing_hash,
+            broker_state_known=snapshot.broker_state_known,
+            fatal_reason=snapshot.fatal_reason,
+            reconciliation_state=(None if reconciliation is None else reconciliation.state.value),
+            reconciliation_current=snapshot.reconciliation_current,
+            reconciliation_report_hash=(
+                None if reconciliation is None else reconciliation.report_hash
+            ),
+            reconciliation_observed_at=(
+                None if reconciliation is None else reconciliation.observed_at
+            ),
+            reconciliation_issues=(
+                ()
+                if reconciliation is None
+                else tuple(item.value for item in reconciliation.issues)
+            ),
+            orders=tuple(
+                QmtBrokerOrderView(
+                    client_order_id=item.client_order_id,
+                    broker_order_id=item.broker_order_id,
+                    instrument=item.instrument,
+                    side=item.side.value,
+                    quantity=item.quantity,
+                    limit_price=item.limit_price,
+                    order_state=item.order_state.value,
+                    reported_traded_volume=item.reported_traded_volume,
+                    trade_volume=item.trade_volume,
+                    trade_amount=item.trade_amount,
+                    convergence=item.convergence.value,
+                    updated_at=item.updated_at,
+                    projection_hash=item.projection_hash,
+                )
+                for item in snapshot.projections
+            ),
+            trades=tuple(
+                QmtBrokerTradeView(
+                    trade_id=item.trade_id,
+                    client_order_id=item.client_order_id,
+                    broker_order_id=item.broker_order_id,
+                    instrument=item.instrument,
+                    side=item.side.value,
+                    volume=item.volume,
+                    price=item.price,
+                    amount=item.amount,
+                    observed_at=item.observed_at,
+                    fact_hash=item.fact_hash,
+                )
+                for item in snapshot.trade_facts
+            ),
         )
 
     async def promotion_status(self) -> PaperPromotionStatus:

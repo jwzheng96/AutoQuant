@@ -35,6 +35,7 @@ from autoquant.web.models import (
     PortfolioValidationExperimentDetail,
     PortfolioWalkForwardJobRequest,
     PromotionGateView,
+    QmtOperationsStatus,
     QmtReadOnlyStatus,
     ResearchManifest,
     RiskControlStatus,
@@ -466,6 +467,20 @@ class FakeConsoleService:
             remaining_gates=("windows_qmt_readonly_acceptance",),
         )
 
+    async def qmt_operations_status(self) -> QmtOperationsStatus:
+        return QmtOperationsStatus(
+            status="idle",
+            integrity_verified=True,
+            lease_active=False,
+            callback_cursor=0,
+            processing_event_count=0,
+            processing_hash="0" * 64,
+            broker_state_known=False,
+            reconciliation_current=False,
+            orders=(),
+            trades=(),
+        )
+
     async def promotion_status(self) -> PaperPromotionStatus:
         return PaperPromotionStatus(
             status="blocked",
@@ -684,6 +699,9 @@ def test_trading_endpoint_is_explicitly_unavailable() -> None:
     assert response.json()["strategy"]["active"] is False
     assert response.json()["qmt"]["live_trading_locked"] is True
     assert response.json()["qmt"]["status"] == "blocked"
+    assert response.json()["qmt_operations"]["live_trading_locked"] is True
+    assert response.json()["qmt_operations"]["broker_mutation_allowed"] is False
+    assert response.json()["qmt_operations"]["status"] == "idle"
     assert response.json()["promotion"]["live_trading_ready"] is False
     assert "paper_session_count" in response.json()["promotion"]["blockers"]
 
@@ -751,6 +769,32 @@ def test_qmt_endpoint_is_authenticated_read_only_and_redacted() -> None:
     assert "account_id" not in accepted.text
     assert "session_id" not in accepted.text
     assert "userdata" not in accepted.text
+
+
+def test_qmt_operations_endpoint_is_authenticated_read_only_and_redacted() -> None:
+    app = create_app(_settings(), service=FakeConsoleService())
+
+    with TestClient(app) as client:
+        denied = client.get("/api/v1/qmt/operations")
+        accepted = client.get("/api/v1/qmt/operations", auth=_auth())
+        mutation = client.post("/api/v1/qmt/operations", auth=_auth(), json={})
+        page = client.get("/trading", auth=_auth())
+
+    assert denied.status_code == 401
+    assert accepted.status_code == 200
+    assert mutation.status_code == 405
+    assert accepted.json()["status"] == "idle"
+    assert accepted.json()["integrity_verified"] is True
+    assert accepted.json()["live_trading_locked"] is True
+    assert accepted.json()["broker_mutation_allowed"] is False
+    assert accepted.json()["orders"] == []
+    assert accepted.json()["trades"] == []
+    redacted_payload = accepted.text.casefold()
+    for secret_name in ("password", "token", "dsn", "userdata", "broker_account"):
+        assert secret_name not in redacted_payload
+    assert "qmt-orders-table" in page.text
+    assert "qmt-trades-table" in page.text
+    assert "下单功能已安全禁用" in page.text
 
 
 def test_kill_switch_activation_is_authenticated_and_csrf_protected() -> None:

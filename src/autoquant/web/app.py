@@ -78,6 +78,9 @@ from autoquant.web.models import (
 from autoquant.web.portfolio_validation_store import (
     PostgresPortfolioValidationRepository,
 )
+from autoquant.web.qmt_operations_store import (
+    PostgresQmtOperationsRepository,
+)
 from autoquant.web.risk_store import PostgresRiskDecisionRepository
 from autoquant.web.service import ConsoleService, ConsoleServicePort
 from autoquant.web.store import PostgresOperatorRepository
@@ -475,6 +478,7 @@ def create_app(
         execution = await active_service(request).execution_status()
         strategy = await active_service(request).paper_strategy_status()
         qmt = await active_service(request).qmt_readonly_status()
+        qmt_operations = await active_service(request).qmt_operations_status()
         promotion = await active_service(request).promotion_status()
         return {
             "status": "unavailable",
@@ -484,6 +488,7 @@ def create_app(
             "execution": execution.model_dump(mode="json"),
             "strategy": strategy.model_dump(mode="json"),
             "qmt": qmt.model_dump(mode="json"),
+            "qmt_operations": qmt_operations.model_dump(mode="json"),
             "promotion": promotion.model_dump(mode="json"),
             "reason": (
                 "Paper risk, reconciliation, simulation, and approval evidence are "
@@ -522,6 +527,14 @@ def create_app(
         _: str = Depends(authenticated_user),
     ) -> dict[str, object]:
         result = await active_service(request).qmt_readonly_status()
+        return result.model_dump(mode="json")
+
+    @app.get("/api/v1/qmt/operations")
+    async def qmt_operations_status(
+        request: Request,
+        _: str = Depends(authenticated_user),
+    ) -> dict[str, object]:
+        result = await active_service(request).qmt_operations_status()
         return result.model_dump(mode="json")
 
     @app.get("/api/v1/promotion")
@@ -580,6 +593,7 @@ async def _production_service(settings: AppSettings) -> ConsoleService:
     strategy_registry = PostgresPaperDeploymentRegistry.connect(dsn=postgres_dsn)
     qmt_acceptances = PostgresQmtReadOnlyAcceptanceRepository.connect(dsn=postgres_dsn)
     qmt_sessions = PostgresQmtSessionLeaseRepository.connect(dsn=postgres_dsn)
+    qmt_operations = PostgresQmtOperationsRepository.connect(dsn=postgres_dsn)
     promotions = PostgresPaperPromotionFactRepository.connect(dsn=postgres_dsn)
     control = PostgresControlRepository.connect(dsn=postgres_dsn)
     try:
@@ -603,6 +617,7 @@ async def _production_service(settings: AppSettings) -> ConsoleService:
         await strategy_registry.close()
         await qmt_acceptances.close()
         await qmt_sessions.close()
+        await qmt_operations.close()
         await promotions.close()
         await control.close()
         raise
@@ -647,6 +662,7 @@ async def _production_service(settings: AppSettings) -> ConsoleService:
         strategy_registry=strategy_registry,
         qmt_acceptance_repository=qmt_acceptances,
         qmt_session_repository=qmt_sessions,
+        qmt_operations_repository=qmt_operations,
         promotion_repository=promotions,
     )
 
