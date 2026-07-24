@@ -661,6 +661,11 @@ class LowVolatilityForwardProgressView(BaseModel):
         default=None,
         pattern=r"^[0-9a-f]{64}$",
     )
+    deployment_contract_hash: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    deployment_contract_status: str = "not_configured"
     daily_signal_hash: str | None = Field(
         default=None,
         pattern=r"^[0-9a-f]{64}$",
@@ -735,6 +740,20 @@ class LowVolatilityForwardProgressView(BaseModel):
             or not self.deployment_blockers
             or len(set(self.deployment_blockers)) != len(self.deployment_blockers)
             or (self.daily_signal_hash is not None and self.candidate_approval_hash is None)
+            or self.deployment_contract_status
+            not in {
+                "not_configured",
+                "not_frozen",
+                "frozen_without_activation_authority",
+            }
+            or (
+                self.deployment_contract_hash is None
+                and self.deployment_contract_status == "frozen_without_activation_authority"
+            )
+            or (
+                self.deployment_contract_hash is not None
+                and self.deployment_contract_status != "frozen_without_activation_authority"
+            )
             or self.status
             not in {
                 "backfill_required",

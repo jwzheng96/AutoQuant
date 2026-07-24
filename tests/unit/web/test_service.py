@@ -222,6 +222,7 @@ async def test_forward_progress_exposes_missing_sessions_and_keeps_locks() -> No
             blockers=(LowVolatilityPaperDeploymentBlocker.CANDIDATE_MISSING,),
         )
     )
+    deployment.contract_for_forward_spec = AsyncMock(side_effect=LookupError)
     service = _service(
         operator=MagicMock(),
         control=MagicMock(),
@@ -246,6 +247,8 @@ async def test_forward_progress_exposes_missing_sessions_and_keeps_locks() -> No
     assert progress.compatibility_run_hash is None
     assert progress.execution_timing_compatible is False
     assert progress.deployment_blockers == ("candidate_missing",)
+    assert progress.deployment_contract_hash is None
+    assert progress.deployment_contract_status == "not_frozen"
     assert progress.ready_for_runtime is False
     assert progress.live_trading_locked is True
 
@@ -324,6 +327,7 @@ async def test_forward_progress_exposes_evaluation_without_deploying() -> None:
             ),
         )
     )
+    deployment.contract_for_forward_spec = AsyncMock(return_value=MagicMock(contract_hash="2" * 64))
     service = _service(
         operator=MagicMock(),
         control=MagicMock(),
@@ -351,6 +355,8 @@ async def test_forward_progress_exposes_evaluation_without_deploying() -> None:
     assert progress.execution_timing_compatible is True
     assert progress.candidate_approval_hash == "f" * 64
     assert progress.daily_signal_hash == "1" * 64
+    assert progress.deployment_contract_hash == "2" * 64
+    assert progress.deployment_contract_status == "frozen_without_activation_authority"
     assert progress.deployment_blockers == (
         "candidate_runtime_locked",
         "daily_signal_runtime_locked",

@@ -960,6 +960,8 @@ class ConsoleService:
         compatibility_gate_failures: tuple[str, ...] = ()
         execution_timing_compatible = False
         candidate_approval_hash: str | None = None
+        deployment_contract_hash: str | None = None
+        deployment_contract_status = "not_configured"
         daily_signal_hash: str | None = None
         deployment_blockers: tuple[str, ...] = ("deployment_gate_unavailable",)
         if (
@@ -989,6 +991,15 @@ class ConsoleService:
             deployment = await self._low_volatility_deployment.inspect(
                 session_date=to_shanghai(now).date(),
             )
+            try:
+                deployment_contract = (
+                    await self._low_volatility_deployment.contract_for_forward_spec(spec.spec_hash)
+                )
+            except LookupError:
+                deployment_contract_status = "not_frozen"
+            else:
+                deployment_contract_hash = deployment_contract.contract_hash
+                deployment_contract_status = "frozen_without_activation_authority"
             candidate_approval_hash = deployment.candidate_approval_hash
             daily_signal_hash = deployment.daily_signal_hash
             deployment_blockers = tuple(value.value for value in deployment.blockers)
@@ -1029,6 +1040,8 @@ class ConsoleService:
             compatibility_gate_failures=(compatibility_gate_failures),
             execution_timing_compatible=(execution_timing_compatible),
             candidate_approval_hash=candidate_approval_hash,
+            deployment_contract_hash=(deployment_contract_hash),
+            deployment_contract_status=(deployment_contract_status),
             daily_signal_hash=daily_signal_hash,
             deployment_blockers=deployment_blockers,
             sessions=tuple(

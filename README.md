@@ -115,6 +115,13 @@ carry no runtime authority. `low-volatility-paper-deployment-status` exposes the
 read-only and returns a nonzero exit while blocked. The authenticated research console exposes
 the same compatibility, exact-session signal and deployment blocker fields alongside the
 126-session ledger; it never renders an activation action.
+Schema v50 adds an empty, append-only registry for a pre-terminal paper-deployment contract.
+The contract fixes the evidence order before the outcome is known: a compatible v49 run,
+candidate approval after that run, an exact-session decision-time v2 signal, matching
+point-in-time universe/risk/held-position valuation evidence, an exclusive paper deployment,
+an active kill switch, and a separate fresh runtime unlock. The contract itself permanently
+stores `paper_activation_authority_granted=false`, `runtime_activation_allowed=false`, and
+`live_trading_locked=true`. No official contract row is created automatically.
 PostgreSQL schema v36 adds an append-only, revocable compliance-approval artifact bound to the
 active paper registration and exact promotion policy. No approval is created automatically,
 and even a valid artifact can only satisfy an evidence gate while the code-level live release

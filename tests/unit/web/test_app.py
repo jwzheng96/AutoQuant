@@ -682,6 +682,8 @@ def test_low_volatility_forward_progress_is_authenticated_and_locked() -> None:
     assert progress.json()["compatibility_status"] == "not_configured"
     assert progress.json()["execution_timing_compatible"] is False
     assert progress.json()["deployment_blockers"] == ["deployment_gate_unavailable"]
+    assert progress.json()["deployment_contract_hash"] is None
+    assert progress.json()["deployment_contract_status"] == "not_configured"
     assert progress.json()["ready_for_runtime"] is False
     assert progress.json()["runtime_activation_allowed"] is False
     assert progress.json()["live_trading_locked"] is True

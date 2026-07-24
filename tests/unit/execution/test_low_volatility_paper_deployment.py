@@ -35,6 +35,7 @@ def _approval() -> SimpleNamespace:
 def _gate(
     *,
     candidate: object | None,
+    contract: object | None = None,
     spec: object | None = None,
     run: object | None = None,
     signal: object | None = None,
@@ -46,10 +47,15 @@ def _gate(
     AsyncMock,
 ]:
     candidates = AsyncMock()
+    contracts = AsyncMock()
     specs = AsyncMock()
     runs = AsyncMock()
     signals = AsyncMock()
     candidates.active.return_value = candidate
+    if contract is None:
+        contracts.for_forward_spec.side_effect = LookupError
+    else:
+        contracts.for_forward_spec.return_value = contract
     if spec is None:
         specs.for_forward_spec.side_effect = LookupError
     else:
@@ -64,6 +70,7 @@ def _gate(
             account_id="paper-main",
             strategy_id="low-volatility-paper",
             candidates=cast(Any, candidates),
+            contracts=cast(Any, contracts),
             compatibility_specs=cast(Any, specs),
             compatibility_runs=cast(Any, runs),
             signals=cast(Any, signals),
@@ -95,6 +102,11 @@ async def test_deployment_gate_reports_absent_candidate_without_reads() -> None:
 async def test_deployment_gate_keeps_complete_v49_evidence_locked() -> None:
     approval = _approval()
     spec = SimpleNamespace(spec_hash="f" * 64)
+    contract = SimpleNamespace(
+        forward_spec_hash=approval.forward_spec_hash,
+        source_spec_hash=approval.source_spec_hash,
+        compatibility_spec_hash=spec.spec_hash,
+    )
     run = SimpleNamespace(
         run_hash="1" * 64,
         compatibility_spec_hash=spec.spec_hash,
@@ -118,6 +130,7 @@ async def test_deployment_gate_keeps_complete_v49_evidence_locked() -> None:
     )
     gate, _, _, _, _ = _gate(
         candidate=SimpleNamespace(approval=approval),
+        contract=contract,
         spec=spec,
         run=run,
         signal=signal,
@@ -148,6 +161,7 @@ async def test_deployment_gate_blocks_missing_daily_and_compatibility() -> None:
 
     assert report.blockers == (
         LowVolatilityPaperDeploymentBlocker.CANDIDATE_RUNTIME_LOCKED,
+        LowVolatilityPaperDeploymentBlocker.DEPLOYMENT_CONTRACT_MISSING,
         LowVolatilityPaperDeploymentBlocker.COMPATIBILITY_SPEC_MISSING,
         LowVolatilityPaperDeploymentBlocker.DAILY_SIGNAL_MISSING,
     )
@@ -171,12 +185,14 @@ async def test_deployment_gate_fails_closed_on_candidate_identity() -> None:
 @pytest.mark.asyncio
 async def test_postgres_deployment_reader_owns_and_closes_stores() -> None:
     candidates = AsyncMock()
+    contracts = AsyncMock()
     specs = AsyncMock()
     runs = AsyncMock()
     signals = AsyncMock()
     candidates.active.return_value = None
     reader = PostgresLowVolatilityPaperDeploymentReader(
         candidates=cast(Any, candidates),
+        contracts=cast(Any, contracts),
         compatibility_specs=cast(Any, specs),
         compatibility_runs=cast(Any, runs),
         signals=cast(Any, signals),
@@ -191,4 +207,5 @@ async def test_postgres_deployment_reader_owns_and_closes_stores() -> None:
     signals.close.assert_awaited_once_with()
     runs.close.assert_awaited_once_with()
     specs.close.assert_awaited_once_with()
+    contracts.close.assert_awaited_once_with()
     candidates.close.assert_awaited_once_with()

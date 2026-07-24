@@ -15,6 +15,12 @@ from autoquant.execution.low_volatility_paper_approval_store import (
     LowVolatilityPaperCandidateRecord,
     PostgresLowVolatilityPaperCandidateRepository,
 )
+from autoquant.execution.low_volatility_paper_deployment_contract import (
+    LowVolatilityPaperDeploymentContract,
+)
+from autoquant.execution.low_volatility_paper_deployment_contract_store import (
+    PostgresLowVolatilityPaperDeploymentContractRepository,
+)
 from autoquant.execution.low_volatility_paper_signal import (
     LowVolatilityPaperDailySignal,
 )
@@ -32,6 +38,8 @@ from autoquant.web.low_volatility_execution_compatibility_store import (
 class LowVolatilityPaperDeploymentBlocker(StrEnum):
     CANDIDATE_MISSING = "candidate_missing"
     CANDIDATE_RUNTIME_LOCKED = "candidate_runtime_locked"
+    DEPLOYMENT_CONTRACT_MISSING = "deployment_contract_missing"
+    DEPLOYMENT_CONTRACT_MISMATCH = "deployment_contract_mismatch"
     COMPATIBILITY_SPEC_MISSING = "compatibility_spec_missing"
     COMPATIBILITY_RUN_MISSING = "compatibility_run_missing"
     COMPATIBILITY_EVIDENCE_MISMATCH = "compatibility_evidence_mismatch"
@@ -57,6 +65,13 @@ class LowVolatilityCompatibilitySpecReader(Protocol):
         self,
         forward_spec_hash: str,
     ) -> LowVolatilityExecutionCompatibilitySpec: ...
+
+
+class LowVolatilityDeploymentContractReader(Protocol):
+    async def for_forward_spec(
+        self,
+        forward_spec_hash: str,
+    ) -> LowVolatilityPaperDeploymentContract: ...
 
 
 class LowVolatilityCompatibilityRunReader(Protocol):
@@ -143,6 +158,7 @@ class LowVolatilityPaperDeploymentGate:
         account_id: str,
         strategy_id: str,
         candidates: LowVolatilityCandidateReader,
+        contracts: LowVolatilityDeploymentContractReader,
         compatibility_specs: LowVolatilityCompatibilitySpecReader,
         compatibility_runs: LowVolatilityCompatibilityRunReader,
         signals: LowVolatilityDailySignalReader,
@@ -152,6 +168,7 @@ class LowVolatilityPaperDeploymentGate:
         self._account_id = account_id
         self._strategy_id = strategy_id
         self._candidates = candidates
+        self._contracts = contracts
         self._compatibility_specs = compatibility_specs
         self._compatibility_runs = compatibility_runs
         self._signals = signals
@@ -181,6 +198,17 @@ class LowVolatilityPaperDeploymentGate:
         blockers: list[LowVolatilityPaperDeploymentBlocker] = []
         if not approval.runtime_activation_allowed:
             blockers.append(LowVolatilityPaperDeploymentBlocker.CANDIDATE_RUNTIME_LOCKED)
+        contract: LowVolatilityPaperDeploymentContract | None
+        try:
+            contract = await self._contracts.for_forward_spec(approval.forward_spec_hash)
+        except LookupError:
+            contract = None
+            blockers.append(LowVolatilityPaperDeploymentBlocker.DEPLOYMENT_CONTRACT_MISSING)
+        if contract is not None and (
+            contract.forward_spec_hash != approval.forward_spec_hash
+            or contract.source_spec_hash != approval.source_spec_hash
+        ):
+            blockers.append(LowVolatilityPaperDeploymentBlocker.DEPLOYMENT_CONTRACT_MISMATCH)
 
         spec: LowVolatilityExecutionCompatibilitySpec | None
         try:
@@ -198,6 +226,14 @@ class LowVolatilityPaperDeploymentGate:
         if run is not None:
             if spec is None:
                 raise PersistenceUnavailableError("compatibility run is missing its specification")
+            if (
+                contract is not None
+                and contract.compatibility_spec_hash != spec.spec_hash
+                and (
+                    LowVolatilityPaperDeploymentBlocker.DEPLOYMENT_CONTRACT_MISMATCH not in blockers
+                )
+            ):
+                blockers.append(LowVolatilityPaperDeploymentBlocker.DEPLOYMENT_CONTRACT_MISMATCH)
             if (
                 run.original_evaluation_result_hash != approval.evaluation_result_hash
                 or run.forward_spec_hash != approval.forward_spec_hash
@@ -272,12 +308,13 @@ class LowVolatilityPaperDeploymentGate:
 
 
 class PostgresLowVolatilityPaperDeploymentReader:
-    """Own the four immutable readers used by the deployment gate."""
+    """Own the immutable readers used by the deployment gate."""
 
     def __init__(
         self,
         *,
         candidates: PostgresLowVolatilityPaperCandidateRepository,
+        contracts: (PostgresLowVolatilityPaperDeploymentContractRepository),
         compatibility_specs: (PostgresLowVolatilityExecutionCompatibilityRepository),
         compatibility_runs: (PostgresLowVolatilityExecutionCompatibilityRunRepository),
         signals: PostgresLowVolatilityPaperSignalRepository,
@@ -285,6 +322,7 @@ class PostgresLowVolatilityPaperDeploymentReader:
         strategy_id: str,
     ) -> None:
         self._candidates = candidates
+        self._contracts = contracts
         self._compatibility_specs = compatibility_specs
         self._compatibility_runs = compatibility_runs
         self._signals = signals
@@ -292,6 +330,7 @@ class PostgresLowVolatilityPaperDeploymentReader:
             account_id=account_id,
             strategy_id=strategy_id,
             candidates=candidates,
+            contracts=contracts,
             compatibility_specs=compatibility_specs,
             compatibility_runs=compatibility_runs,
             signals=signals,
@@ -310,6 +349,10 @@ class PostgresLowVolatilityPaperDeploymentReader:
             dsn=dsn,
             schema=schema,
         )
+        contracts = PostgresLowVolatilityPaperDeploymentContractRepository.connect(
+            dsn=dsn,
+            schema=schema,
+        )
         specs = PostgresLowVolatilityExecutionCompatibilityRepository.connect(
             dsn=dsn,
             schema=schema,
@@ -324,6 +367,7 @@ class PostgresLowVolatilityPaperDeploymentReader:
         )
         return cls(
             candidates=candidates,
+            contracts=contracts,
             compatibility_specs=specs,
             compatibility_runs=runs,
             signals=signals,
@@ -335,6 +379,7 @@ class PostgresLowVolatilityPaperDeploymentReader:
         await self._signals.close()
         await self._compatibility_runs.close()
         await self._compatibility_specs.close()
+        await self._contracts.close()
         await self._candidates.close()
 
     async def inspect(
@@ -343,3 +388,9 @@ class PostgresLowVolatilityPaperDeploymentReader:
         session_date: date,
     ) -> LowVolatilityPaperDeploymentReadiness:
         return await self._gate.inspect(session_date=session_date)
+
+    async def contract_for_forward_spec(
+        self,
+        forward_spec_hash: str,
+    ) -> LowVolatilityPaperDeploymentContract:
+        return await self._contracts.for_forward_spec(forward_spec_hash)

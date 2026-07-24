@@ -1274,6 +1274,71 @@ def test_execution_compatibility_freeze_discloses_partial_outcome() -> None:
     freeze.assert_awaited_once()
 
 
+def test_paper_deployment_contract_freeze_requires_confirmation() -> None:
+    freeze = AsyncMock()
+    with patch(
+        "autoquant.cli.freeze_low_volatility_paper_deployment_contract",
+        new=freeze,
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "low-volatility-paper-deployment-contract-freeze",
+                "--forward-spec-hash",
+                "a" * 64,
+                "--requested-by",
+                "risk-operator",
+            ],
+        )
+
+    assert result.exit_code == 2
+    assert freeze.await_count == 0
+
+
+def test_paper_deployment_contract_freeze_is_no_authority() -> None:
+    payload = {
+        "compatibility_spec_hash": "a" * 64,
+        "contract_hash": "b" * 64,
+        "forward_spec_hash": "c" * 64,
+        "live_trading_locked": True,
+        "minimum_forward_sessions": 126,
+        "minimum_paper_sessions": 60,
+        "observed_forward_session_count": 1,
+        "paper_activation_authority_granted": False,
+        "partial_outcome_observed_before_freeze": True,
+        "required_daily_signal_policy_version": ("low-volatility-decision-time-paper-signal-v2"),
+        "required_order_policy_version": ("low-volatility-prior-close-order-intents-v1"),
+        "runtime_activation_allowed": False,
+        "source_spec_hash": "d" * 64,
+        "status": "frozen_without_activation_authority",
+        "terminal_outcome_observed_before_freeze": False,
+    }
+    freeze = AsyncMock(return_value=payload)
+    with patch(
+        "autoquant.cli.freeze_low_volatility_paper_deployment_contract",
+        new=freeze,
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "low-volatility-paper-deployment-contract-freeze",
+                "--forward-spec-hash",
+                "c" * 64,
+                "--requested-by",
+                "risk-operator",
+                "--confirm-no-activation",
+            ],
+            env={"AQ_POSTGRES_DSN": ("postgresql+asyncpg://sensitive")},
+        )
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == payload
+    assert "sensitive" not in result.stdout
+    assert payload["paper_activation_authority_granted"] is False
+    assert payload["runtime_activation_allowed"] is False
+    freeze.assert_awaited_once()
+
+
 def test_execution_compatibility_evaluation_is_redacted_and_locked() -> None:
     payload = {
         "compatibility_run_hash": "a" * 64,

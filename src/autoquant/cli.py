@@ -55,6 +55,7 @@ from autoquant.operations import (
     freeze_fundamental_research_spec,
     freeze_low_volatility_execution_compatibility_spec,
     freeze_low_volatility_forward_evidence_spec,
+    freeze_low_volatility_paper_deployment_contract,
     freeze_low_volatility_research_spec,
     inspect_fundamental_data_backfill,
     inspect_low_volatility_paper_deployment,
@@ -1288,6 +1289,38 @@ def low_volatility_execution_compatibility_freeze(
         )
     except (AutoQuantError, LookupError, ValueError):
         _fail("low-volatility execution compatibility freeze failed closed")
+    _emit(payload)
+
+
+@app.command("low-volatility-paper-deployment-contract-freeze")
+def low_volatility_paper_deployment_contract_freeze(
+    forward_spec_hash: Annotated[
+        str,
+        typer.Option("--forward-spec-hash"),
+    ],
+    requested_by: Annotated[
+        str,
+        typer.Option("--requested-by"),
+    ],
+    confirm_no_activation: Annotated[
+        bool,
+        typer.Option("--confirm-no-activation"),
+    ] = False,
+) -> None:
+    """Freeze future paper gates without granting activation."""
+
+    if not confirm_no_activation:
+        _fail("paper deployment no-activation confirmation is required")
+    try:
+        payload = asyncio.run(
+            freeze_low_volatility_paper_deployment_contract(
+                _settings(),
+                forward_spec_hash=forward_spec_hash,
+                requested_by=requested_by,
+            )
+        )
+    except (AutoQuantError, LookupError, ValueError):
+        _fail("low-volatility paper deployment contract freeze failed closed")
     _emit(payload)
 
 

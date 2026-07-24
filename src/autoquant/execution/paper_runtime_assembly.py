@@ -23,6 +23,9 @@ from autoquant.execution.low_volatility_paper_approval_store import (
 from autoquant.execution.low_volatility_paper_deployment import (
     LowVolatilityPaperDeploymentGate,
 )
+from autoquant.execution.low_volatility_paper_deployment_contract_store import (
+    PostgresLowVolatilityPaperDeploymentContractRepository,
+)
 from autoquant.execution.low_volatility_paper_signal_store import (
     PostgresLowVolatilityPaperSignalRepository,
 )
@@ -184,6 +187,10 @@ async def assemble_paper_runtime(
             dsn=postgres_dsn
         )
         closers.append(low_volatility_candidates.close)
+        low_volatility_contracts = PostgresLowVolatilityPaperDeploymentContractRepository.connect(
+            dsn=postgres_dsn
+        )
+        closers.append(low_volatility_contracts.close)
         low_volatility_compatibility_specs = (
             PostgresLowVolatilityExecutionCompatibilityRepository.connect(dsn=postgres_dsn)
         )
@@ -216,6 +223,7 @@ async def assemble_paper_runtime(
             account_id=settings.paper_account_id,
             strategy_id=settings.paper_strategy_id,
             candidates=low_volatility_candidates,
+            contracts=low_volatility_contracts,
             compatibility_specs=(low_volatility_compatibility_specs),
             compatibility_runs=(low_volatility_compatibility_runs),
             signals=low_volatility_signals,

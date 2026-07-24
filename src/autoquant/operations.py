@@ -136,6 +136,12 @@ from autoquant.execution.low_volatility_paper_approval_store import (
 from autoquant.execution.low_volatility_paper_deployment import (
     LowVolatilityPaperDeploymentGate,
 )
+from autoquant.execution.low_volatility_paper_deployment_contract import (
+    LowVolatilityPaperDeploymentContract,
+)
+from autoquant.execution.low_volatility_paper_deployment_contract_store import (
+    PostgresLowVolatilityPaperDeploymentContractRepository,
+)
 from autoquant.execution.low_volatility_paper_signal import (
     LowVolatilityPaperDailySignal,
 )
@@ -1504,6 +1510,89 @@ def _low_volatility_compatibility_spec_payload(
     }
 
 
+async def freeze_low_volatility_paper_deployment_contract(
+    settings: AppSettings,
+    *,
+    forward_spec_hash: str,
+    requested_by: str,
+) -> dict[str, object]:
+    """Pre-register paper deployment gates without granting authority."""
+
+    if settings.live_trading_enabled:
+        raise MissingCapabilityError("paper deployment contract requires live trading locked")
+    dsn = configured_dsn(
+        settings.postgres_dsn,
+        capability="PostgreSQL",
+    )
+    forward_specs = PostgresLowVolatilityForwardEvidenceSpecRepository.connect(dsn=dsn)
+    sessions = PostgresLowVolatilityForwardSessionRepository.connect(dsn=dsn)
+    compatibility = PostgresLowVolatilityExecutionCompatibilityRepository.connect(dsn=dsn)
+    contracts = PostgresLowVolatilityPaperDeploymentContractRepository.connect(dsn=dsn)
+    control = PostgresControlRepository.connect(dsn=dsn)
+    try:
+        try:
+            existing = await contracts.for_forward_spec(forward_spec_hash)
+        except LookupError:
+            existing = None
+        if existing is not None:
+            return _low_volatility_deployment_contract_payload(
+                existing,
+                status="stored",
+            )
+        forward = (await forward_specs.read(forward_spec_hash)).spec
+        compatibility_spec = await compatibility.for_forward_spec(forward.spec_hash)
+        records = await sessions.list_for_spec(forward_spec_hash=forward.spec_hash)
+        contract = LowVolatilityPaperDeploymentContract(
+            source_spec_hash=forward.source_spec_hash,
+            forward_spec_hash=forward.spec_hash,
+            compatibility_spec_hash=(compatibility_spec.spec_hash),
+            observed_forward_session_count=len(records),
+            frozen_by=requested_by,
+            frozen_at=datetime.now(UTC),
+        )
+        stored = await contracts.save(contract)
+        payload = _low_volatility_deployment_contract_payload(
+            stored,
+            status="frozen_without_activation_authority",
+        )
+        await control.append_audit_event(
+            "research.low_volatility.paper_deployment_contract.frozen",
+            stored.frozen_at,
+            payload,
+        )
+        return payload
+    finally:
+        await control.close()
+        await contracts.close()
+        await compatibility.close()
+        await sessions.close()
+        await forward_specs.close()
+
+
+def _low_volatility_deployment_contract_payload(
+    contract: LowVolatilityPaperDeploymentContract,
+    *,
+    status: str,
+) -> dict[str, object]:
+    return {
+        "compatibility_spec_hash": (contract.compatibility_spec_hash),
+        "contract_hash": contract.contract_hash,
+        "forward_spec_hash": contract.forward_spec_hash,
+        "live_trading_locked": True,
+        "minimum_forward_sessions": (contract.minimum_forward_sessions),
+        "minimum_paper_sessions": (contract.minimum_paper_sessions),
+        "observed_forward_session_count": (contract.observed_forward_session_count),
+        "paper_activation_authority_granted": False,
+        "partial_outcome_observed_before_freeze": (contract.partial_outcome_observed_before_freeze),
+        "required_daily_signal_policy_version": (contract.required_daily_signal_policy_version),
+        "required_order_policy_version": (contract.required_order_policy_version),
+        "runtime_activation_allowed": False,
+        "source_spec_hash": contract.source_spec_hash,
+        "status": status,
+        "terminal_outcome_observed_before_freeze": False,
+    }
+
+
 async def create_low_volatility_forward_session_campaign(
     settings: AppSettings,
     *,
@@ -2714,6 +2803,7 @@ async def inspect_low_volatility_paper_deployment(
         capability="PostgreSQL",
     )
     candidates = PostgresLowVolatilityPaperCandidateRepository.connect(dsn=dsn)
+    contracts = PostgresLowVolatilityPaperDeploymentContractRepository.connect(dsn=dsn)
     compatibility_specs = PostgresLowVolatilityExecutionCompatibilityRepository.connect(dsn=dsn)
     compatibility_runs = PostgresLowVolatilityExecutionCompatibilityRunRepository.connect(dsn=dsn)
     signals = PostgresLowVolatilityPaperSignalRepository.connect(dsn=dsn)
@@ -2722,6 +2812,7 @@ async def inspect_low_volatility_paper_deployment(
             account_id=settings.paper_account_id,
             strategy_id=settings.paper_strategy_id,
             candidates=candidates,
+            contracts=contracts,
             compatibility_specs=compatibility_specs,
             compatibility_runs=compatibility_runs,
             signals=signals,
@@ -2745,6 +2836,7 @@ async def inspect_low_volatility_paper_deployment(
         await signals.close()
         await compatibility_runs.close()
         await compatibility_specs.close()
+        await contracts.close()
         await candidates.close()
 
 
@@ -4374,6 +4466,7 @@ async def inspect_paper_runtime_readiness(
     scheduler_events: PostgresPaperSchedulerRepository | None = None
     registry: PostgresPaperDeploymentRegistry | None = None
     low_volatility_candidates: PostgresLowVolatilityPaperCandidateRepository | None = None
+    low_volatility_contracts: PostgresLowVolatilityPaperDeploymentContractRepository | None = None
     low_volatility_compatibility_specs: (
         PostgresLowVolatilityExecutionCompatibilityRepository | None
     ) = None
@@ -4396,6 +4489,9 @@ async def inspect_paper_runtime_readiness(
         scheduler_events = PostgresPaperSchedulerRepository.connect(dsn=postgres_dsn)
         registry = PostgresPaperDeploymentRegistry.connect(dsn=postgres_dsn)
         low_volatility_candidates = PostgresLowVolatilityPaperCandidateRepository.connect(
+            dsn=postgres_dsn
+        )
+        low_volatility_contracts = PostgresLowVolatilityPaperDeploymentContractRepository.connect(
             dsn=postgres_dsn
         )
         low_volatility_compatibility_specs = (
@@ -4426,6 +4522,7 @@ async def inspect_paper_runtime_readiness(
             account_id=settings.paper_account_id,
             strategy_id=settings.paper_strategy_id,
             candidates=low_volatility_candidates,
+            contracts=low_volatility_contracts,
             compatibility_specs=(low_volatility_compatibility_specs),
             compatibility_runs=(low_volatility_compatibility_runs),
             signals=low_volatility_signals,
@@ -4475,6 +4572,8 @@ async def inspect_paper_runtime_readiness(
             await low_volatility_compatibility_runs.close()
         if low_volatility_compatibility_specs is not None:
             await low_volatility_compatibility_specs.close()
+        if low_volatility_contracts is not None:
+            await low_volatility_contracts.close()
         if low_volatility_candidates is not None:
             await low_volatility_candidates.close()
         if registry is not None:

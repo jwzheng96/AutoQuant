@@ -1123,3 +1123,41 @@ deployment and daily-signal cards are read-only. Confirm that the response conti
 `ready_for_runtime=false`, `runtime_activation_allowed=false`, and
 `live_trading_locked=true`; a green compatibility result by itself must still leave the
 deployment card blocked.
+
+### Paper deployment contract pre-registration
+
+Schema v50 creates the immutable contract registry without creating an official contract row.
+It must be reviewed and frozen before the 126-session terminal evaluation, compatibility run,
+or candidate approval exists:
+
+```bash
+uv run autoquant \
+  low-volatility-paper-deployment-contract-freeze \
+  --forward-spec-hash \
+  ae3d74b1a35d700efea01310bd80e8fd1264eabe6c569f83d9628670a85e34f0 \
+  --requested-by risk-auditor \
+  --confirm-no-activation
+```
+
+The confirmation means exactly that the row grants no activation authority. PostgreSQL checks
+the current frozen-session count, the matching v48 compatibility specification and absence of
+terminal evaluation, compatibility-run and candidate rows. A first freeze at 126 sessions or
+after any terminal evidence is rejected.
+
+The frozen terms require this order:
+
+1. the original 126-session evaluation is a `paper_candidate`;
+2. the v49 decision-time compatibility result is `compatible`;
+3. the explicit candidate approval occurs after compatibility completion;
+4. the exact Shanghai session has a future
+   `low-volatility-decision-time-paper-signal-v2` artifact using the pre-registered order
+   policy;
+5. point-in-time universe, held-position valuation coverage and risk-policy hashes match;
+6. paper deployment is exclusive and the kill switch remains active at authorization;
+7. runtime unlocking separately rechecks a live lease, fresh QMT quotes and converged
+   reconciliation evidence.
+
+The contract keeps `paper_activation_authority_granted=false`,
+`runtime_activation_allowed=false`, and `live_trading_locked=true`. A later authorization
+artifact and deployable v2 signal schema are still required; this contract cannot start the
+scheduler.

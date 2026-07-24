@@ -949,9 +949,17 @@ async function loadLowVolatilityForwardProgress() {
           ? `规格 ${progress.compatibility_spec_hash.slice(0, 12)}…`
           : "没有兼容性规格",
     );
+    const contractLabels = {
+      not_configured: "契约服务未配置",
+      not_frozen: "v50 契约未冻结",
+      frozen_without_activation_authority: "v50 已冻结（不授权）",
+    };
     setText(
       "low-volatility-forward-deployment",
-      progress.ready_for_runtime ? "可启动" : "阻断",
+      `${contractLabels[progress.deployment_contract_status]
+        ?? progress.deployment_contract_status} / ${
+        progress.ready_for_runtime ? "可启动" : "阻断"
+      }`,
     );
     setText(
       "low-volatility-forward-blockers",
