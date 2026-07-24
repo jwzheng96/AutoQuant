@@ -429,6 +429,40 @@ def assess_low_volatility_validation(
     )
 
 
+def run_low_volatility_strategy_interval(
+    *,
+    panel: LowVolatilityExecutablePanel,
+    spec: LowVolatilityResearchSpec,
+    start_index: int,
+    trade_session_count: int,
+) -> BacktestResult:
+    """Run one frozen strategy interval without changing its order policy."""
+
+    return _run_strategy(
+        panel=panel,
+        spec=spec,
+        start_index=start_index,
+        trade_session_count=trade_session_count,
+    )
+
+
+def run_low_volatility_benchmark_interval(
+    *,
+    panel: LowVolatilityExecutablePanel,
+    spec: LowVolatilityResearchSpec,
+    start_index: int,
+    trade_session_count: int,
+) -> BacktestResult:
+    """Run the frozen equal-weight benchmark over the same interval."""
+
+    return _run_benchmark(
+        panel=panel,
+        spec=spec,
+        start_index=start_index,
+        trade_session_count=trade_session_count,
+    )
+
+
 def _run_strategy(
     *,
     panel: LowVolatilityExecutablePanel,
