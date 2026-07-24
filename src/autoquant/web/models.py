@@ -246,9 +246,7 @@ class ResearchUniverseSnapshotView(BaseModel):
         value: datetime,
     ) -> datetime:
         if value.tzinfo is None or value.utcoffset() is None:
-            raise ValueError(
-                "research universe timestamps must be timezone-aware"
-            )
+            raise ValueError("research universe timestamps must be timezone-aware")
         return value.astimezone(UTC)
 
     @model_validator(mode="after")
@@ -338,8 +336,7 @@ class WalkForwardJobRequest(BaseModel):
     @model_validator(mode="after")
     def validate_validation_grid(self) -> Self:
         pairs = tuple(
-            (candidate.fast_sessions, candidate.slow_sessions)
-            for candidate in self.candidates
+            (candidate.fast_sessions, candidate.slow_sessions) for candidate in self.candidates
         )
         if len(set(pairs)) != len(pairs):
             raise ValueError("candidates must be unique")
@@ -381,9 +378,7 @@ class ValidationExperiment(BaseModel):
 
     @field_validator("created_at", "started_at", "completed_at", "as_of")
     @classmethod
-    def require_aware_validation_time(
-        cls, value: datetime | None
-    ) -> datetime | None:
+    def require_aware_validation_time(cls, value: datetime | None) -> datetime | None:
         if value is None:
             return None
         if value.tzinfo is None or value.utcoffset() is None:
@@ -410,6 +405,105 @@ class ValidationFoldView(BaseModel):
 class ValidationExperimentDetail(BaseModel):
     experiment: ValidationExperiment
     folds: tuple[ValidationFoldView, ...]
+
+
+class FundamentalValidationListItemView(BaseModel):
+    result_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    assessment_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    spec_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    strategy_id: str
+    evidence_status: str
+    gate_failures: tuple[str, ...]
+    fold_count: int = Field(ge=1)
+    oos_sessions: int = Field(ge=1)
+    compounded_oos_return: Decimal
+    benchmark_compounded_oos_return: Decimal
+    excess_oos_return: Decimal
+    profitable_fold_rate: Decimal = Field(ge=0, le=1)
+    worst_oos_drawdown: Decimal = Field(ge=0, le=1)
+    train_test_gap: Decimal
+    rejected_order_count: int = Field(ge=0)
+    unresolved_position_count: int = Field(ge=0)
+    requested_by: str
+    completed_at: datetime
+    live_trading_locked: bool = True
+
+    @field_validator("completed_at")
+    @classmethod
+    def require_aware_fundamental_completion(
+        cls,
+        value: datetime,
+    ) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("fundamental validation completion must be timezone-aware")
+        return value.astimezone(UTC)
+
+    @model_validator(mode="after")
+    def require_fundamental_research_lock(self) -> Self:
+        if not self.live_trading_locked or self.evidence_status not in {
+            "research_candidate",
+            "rejected",
+            "insufficient",
+        }:
+            raise ValueError("fundamental validation list item is inconsistent")
+        return self
+
+
+class FundamentalValidationSummaryView(FundamentalValidationListItemView):
+    strategy_unresolved_position_count: int = Field(ge=0)
+    benchmark_unresolved_position_count: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def require_unresolved_position_breakdown(self) -> Self:
+        if (
+            self.unresolved_position_count
+            != self.strategy_unresolved_position_count + self.benchmark_unresolved_position_count
+        ):
+            raise ValueError("fundamental unresolved position breakdown is inconsistent")
+        return self
+
+
+class FundamentalValidationPhaseView(BaseModel):
+    total_return: Decimal
+    max_drawdown: Decimal = Field(ge=0, le=1)
+    ending_equity: Decimal = Field(gt=0)
+    rejected_order_count: int = Field(ge=0)
+    unresolved_position_count: int = Field(ge=0)
+    artifact_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class FundamentalValidationFoldView(BaseModel):
+    sequence: int = Field(ge=1)
+    train_start: date
+    train_end: date
+    test_start: date
+    test_end: date
+    training: FundamentalValidationPhaseView
+    test: FundamentalValidationPhaseView
+    benchmark: FundamentalValidationPhaseView
+    fold_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def require_ordered_fundamental_fold(self) -> Self:
+        if not (self.train_start <= self.train_end < self.test_start <= self.test_end):
+            raise ValueError("fundamental validation fold intervals are invalid")
+        return self
+
+
+class FundamentalValidationDetailView(BaseModel):
+    summary: FundamentalValidationSummaryView
+    folds: tuple[FundamentalValidationFoldView, ...] = Field(min_length=1)
+    integrity_verified: bool = True
+
+    @model_validator(mode="after")
+    def require_verified_fundamental_detail(self) -> Self:
+        if (
+            not self.integrity_verified
+            or len(self.folds) != self.summary.fold_count
+            or tuple(value.sequence for value in self.folds) != tuple(range(1, len(self.folds) + 1))
+        ):
+            raise ValueError("fundamental validation detail is not verified")
+        return self
 
 
 class MomentumCandidateRequest(BaseModel):
@@ -466,9 +560,7 @@ class PortfolioWalkForwardJobRequest(BaseModel):
     def validate_portfolio_manifest_hash(cls, value: str) -> str:
         normalized = value.strip().lower()
         if re.fullmatch(r"[0-9a-f]{64}", normalized) is None:
-            raise ValueError(
-                "manifest_hash must be a lowercase SHA-256 hash"
-            )
+            raise ValueError("manifest_hash must be a lowercase SHA-256 hash")
         return normalized
 
     @field_validator("idempotency_key")
@@ -476,9 +568,7 @@ class PortfolioWalkForwardJobRequest(BaseModel):
     def validate_portfolio_idempotency_key(cls, value: str) -> str:
         normalized = value.strip()
         if _IDEMPOTENCY_KEY.fullmatch(normalized) is None:
-            raise ValueError(
-                "idempotency_key must be 16-128 safe characters"
-            )
+            raise ValueError("idempotency_key must be 16-128 safe characters")
         return normalized
 
     @model_validator(mode="after")
@@ -493,28 +583,18 @@ class PortfolioWalkForwardJobRequest(BaseModel):
         )
         if len(set(candidates)) != len(candidates):
             raise ValueError("portfolio candidates must be unique")
-        if max(value.lookback_sessions for value in self.candidates) >= (
-            self.train_sessions
-        ):
-            raise ValueError(
-                "portfolio candidate lookback must be smaller than training"
-            )
+        if max(value.lookback_sessions for value in self.candidates) >= (self.train_sessions):
+            raise ValueError("portfolio candidate lookback must be smaller than training")
         if any(
-            self.gross_allocation / value.selection_count
-            > Decimal("0.20")
+            self.gross_allocation / value.selection_count > Decimal("0.20")
             or self.initial_cash
             * self.gross_allocation
             / value.selection_count
-            * (
-                Decimal("1")
-                + self.slippage_bps / Decimal("10000")
-            )
+            * (Decimal("1") + self.slippage_bps / Decimal("10000"))
             > self.maximum_order_notional
             for value in self.candidates
         ):
-            raise ValueError(
-                "portfolio candidate allocation exceeds risk limits"
-            )
+            raise ValueError("portfolio candidate allocation exceeds risk limits")
         return self
 
 
@@ -570,9 +650,7 @@ class PortfolioValidationDiagnosticsView(BaseModel):
     @model_validator(mode="after")
     def require_diagnostic_read_only_boundary(self) -> Self:
         if self.oos_tuning_permitted:
-            raise ValueError(
-                "portfolio OOS diagnostics cannot authorize tuning"
-            )
+            raise ValueError("portfolio OOS diagnostics cannot authorize tuning")
         return self
 
 
@@ -603,17 +681,13 @@ class PortfolioValidationExperiment(BaseModel):
         if value is None:
             return None
         if value.tzinfo is None or value.utcoffset() is None:
-            raise ValueError(
-                "portfolio validation timestamps must be timezone-aware"
-            )
+            raise ValueError("portfolio validation timestamps must be timezone-aware")
         return value.astimezone(UTC)
 
     @model_validator(mode="after")
     def require_portfolio_research_lock(self) -> Self:
         if not self.live_trading_locked:
-            raise ValueError(
-                "portfolio validation cannot unlock live trading"
-            )
+            raise ValueError("portfolio validation cannot unlock live trading")
         return self
 
 
@@ -676,8 +750,7 @@ class ValidationCampaignView(BaseModel):
             len(self.components) != len(self.instruments)
             or tuple(value.sequence for value in self.components)
             != tuple(range(1, len(self.components) + 1))
-            or tuple(value.instrument for value in self.components)
-            != self.instruments
+            or tuple(value.instrument for value in self.components) != self.instruments
             or not self.live_trading_locked
         ):
             raise ValueError("validation campaign view is inconsistent")
@@ -743,9 +816,7 @@ class PaperExecutionStatus(BaseModel):
 
     @field_validator("latest_reconciliation_at", "latest_scheduler_at")
     @classmethod
-    def require_aware_reconciliation_time(
-        cls, value: datetime | None
-    ) -> datetime | None:
+    def require_aware_reconciliation_time(cls, value: datetime | None) -> datetime | None:
         if value is None:
             return None
         if value.tzinfo is None or value.utcoffset() is None:
@@ -792,9 +863,7 @@ class QmtReadOnlyStatus(BaseModel):
             self.order_count,
             self.trade_count,
         )
-        if any(value is None for value in details) != all(
-            value is None for value in details
-        ):
+        if any(value is None for value in details) != all(value is None for value in details):
             raise ValueError("QMT evidence summary is incomplete")
         if self.evidence_fresh and self.latest_evidence_hash is None:
             raise ValueError("fresh QMT evidence requires a persisted artifact")
@@ -843,9 +912,7 @@ class PaperPromotionStatus(BaseModel):
         if self.live_trading_ready:
             raise ValueError("operator console cannot mark live trading ready")
         hashes = (self.policy_hash, self.fact_hash, self.report_hash)
-        if any(value is None for value in hashes) != all(
-            value is None for value in hashes
-        ):
+        if any(value is None for value in hashes) != all(value is None for value in hashes):
             raise ValueError("promotion audit hashes are incomplete")
         if self.status not in {"blocked", "unavailable"}:
             raise ValueError("promotion audit status is invalid")
@@ -937,9 +1004,7 @@ class PaperStrategyStatus(BaseModel):
             self.approved_by,
             self.approved_at,
         )
-        if self.active != all(
-            value is not None for value in common_details
-        ):
+        if self.active != all(value is not None for value in common_details):
             raise ValueError("paper strategy status details do not match active state")
         if self.active and self.status != "approved":
             raise ValueError("active paper strategy status must be approved")
@@ -958,9 +1023,7 @@ class PaperStrategyStatus(BaseModel):
             if (
                 len(self.instruments) < 3
                 or len(self.components) < 3
-                or tuple(
-                    sorted(value.instrument for value in self.components)
-                )
+                or tuple(sorted(value.instrument for value in self.components))
                 != tuple(sorted(self.instruments))
                 or self.total_allocation is None
                 or self.valuation_manifest_hash is None
@@ -978,9 +1041,7 @@ class PaperStrategyStatus(BaseModel):
                     )
                 )
             ):
-                raise ValueError(
-                    "paper portfolio status details are inconsistent"
-                )
+                raise ValueError("paper portfolio status details are inconsistent")
         if self.active and self.deployment_kind != "portfolio":
             single_details = (
                 self.experiment_id,
@@ -992,13 +1053,9 @@ class PaperStrategyStatus(BaseModel):
                 self.signal_manifest_hash,
             )
             if not all(value is not None for value in single_details):
-                raise ValueError(
-                    "single paper strategy status details are incomplete"
-                )
+                raise ValueError("single paper strategy status details are incomplete")
             if self.portfolio_oos is not None:
-                raise ValueError(
-                    "single paper strategy cannot contain portfolio OOS data"
-                )
+                raise ValueError("single paper strategy cannot contain portfolio OOS data")
         if (
             self.fast_sessions is not None
             and self.slow_sessions is not None

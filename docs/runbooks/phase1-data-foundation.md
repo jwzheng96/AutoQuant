@@ -146,6 +146,14 @@ uploaded code. Select a manifest, verify its instrument and assumptions, create 
 inspect its daily equity, fills/rejections, fees, and stable failure code. The trading view
 intentionally has no order action.
 
+The research page also lists immutable fixed-factor validations from
+`GET /api/v1/fundamental-validations`. Selecting one reads
+`GET /api/v1/fundamental-validations/{result_hash}`, decodes every stored fold, and verifies the
+result, assessment, fold, and backtest artifact hashes before displaying detail. Strategy and
+benchmark unresolved positions are shown separately for diagnosis. Both endpoints are
+authenticated and read-only; there is no approval, rerun, paper-promotion, or trading mutation
+behind this view.
+
 The trading page and `GET /api/v1/risk` also report the fail-closed pre-trade risk status and
 the count of hash-verified, immutable risk decisions. This is observability only. A risk
 decision marked `accepted` authorizes neither broker submission nor live trading; the paper
@@ -711,3 +719,14 @@ return, profitable-fold, drawdown, train/test-gap, execution-rejection, sample-s
 zero-unresolved-position gates. A rerun for an already stored spec returns the existing
 immutable result. A passing result is only eligible for a separately controlled paper-trading
 stage; it does not unlock paper or live execution.
+
+The frozen v3 run completed with result hash
+`fae7de9eab5868c3e1c9c0fc5ddac1b26a109ea75d35d0d1840d1b12a9b48f59` and was rejected.
+Across 16 folds and 1,008 out-of-sample sessions, the strategy returned
+`0.053454889625941883535723882`, the point-in-time equal-weight benchmark returned
+`0.087692116199324626807795868`, and excess return was
+`-0.034237226573382743272071986`. The profitable-fold rate was `0.5625`, worst test
+drawdown was `0.07933934813208103801632638192`, and no order was rejected. Four unresolved
+end positions belonged to the benchmark, not the strategy. The independent negative-excess
+gate still rejects v3 even if benchmark liquidation diagnostics are separated, so v3 must not
+enter paper trading or be tuned using these out-of-sample results.

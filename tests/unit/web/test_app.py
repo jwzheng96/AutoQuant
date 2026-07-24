@@ -15,6 +15,10 @@ from autoquant.web.models import (
     BacktestRunRequest,
     ControlSummary,
     DailyIngestionJobRequest,
+    FundamentalValidationDetailView,
+    FundamentalValidationFoldView,
+    FundamentalValidationPhaseView,
+    FundamentalValidationSummaryView,
     OperatorJob,
     OperatorJobState,
     OperatorOverview,
@@ -45,10 +49,9 @@ class FakeConsoleService:
         self.backtest_run_id = uuid4()
         self.created_validations: list[WalkForwardJobRequest] = []
         self.validation_experiment_id = uuid4()
-        self.created_portfolio_validations: list[
-            PortfolioWalkForwardJobRequest
-        ] = []
+        self.created_portfolio_validations: list[PortfolioWalkForwardJobRequest] = []
         self.portfolio_validation_experiment_id = uuid4()
+        self.fundamental_result_hash = "f" * 64
         self.kill_switch_activations: list[tuple[str, str, str]] = []
 
     async def start(self) -> None:
@@ -100,9 +103,7 @@ class FakeConsoleService:
         assert 1 <= limit <= 200
         return ()
 
-    async def list_research_manifests(
-        self, *, limit: int = 100
-    ) -> tuple[ResearchManifest, ...]:
+    async def list_research_manifests(self, *, limit: int = 100) -> tuple[ResearchManifest, ...]:
         assert 1 <= limit <= 200
         return (
             ResearchManifest(
@@ -140,9 +141,7 @@ class FakeConsoleService:
         )
         return BacktestRunDetail(run=run, executions=(), snapshots=(), events=())
 
-    async def list_validations(
-        self, *, limit: int = 50
-    ) -> tuple[ValidationExperiment, ...]:
+    async def list_validations(self, *, limit: int = 50) -> tuple[ValidationExperiment, ...]:
         assert 1 <= limit <= 200
         return ()
 
@@ -159,9 +158,7 @@ class FakeConsoleService:
             created_at=datetime(2025, 1, 1, tzinfo=UTC),
         )
 
-    async def validation_detail(
-        self, experiment_id: object
-    ) -> ValidationExperimentDetail:
+    async def validation_detail(self, experiment_id: object) -> ValidationExperimentDetail:
         assert experiment_id == self.validation_experiment_id
         experiment = await self.create_validation(
             WalkForwardJobRequest(
@@ -181,6 +178,70 @@ class FakeConsoleService:
         assert 1 <= limit <= 200
         return ()
 
+    async def list_fundamental_validations(
+        self,
+        *,
+        limit: int = 20,
+    ) -> tuple[FundamentalValidationSummaryView, ...]:
+        assert 1 <= limit <= 200
+        return (self._fundamental_summary(),)
+
+    async def fundamental_validation_detail(
+        self,
+        result_hash: str,
+    ) -> FundamentalValidationDetailView:
+        assert result_hash == self.fundamental_result_hash
+        phase = FundamentalValidationPhaseView(
+            total_return=Decimal("0.01"),
+            max_drawdown=Decimal("0.02"),
+            ending_equity=Decimal("1010000"),
+            rejected_order_count=0,
+            unresolved_position_count=0,
+            artifact_hash="e" * 64,
+        )
+        return FundamentalValidationDetailView(
+            summary=self._fundamental_summary(),
+            folds=(
+                FundamentalValidationFoldView(
+                    sequence=1,
+                    train_start=date(2020, 1, 1),
+                    train_end=date(2021, 12, 31),
+                    test_start=date(2022, 1, 10),
+                    test_end=date(2022, 4, 8),
+                    training=phase,
+                    test=phase,
+                    benchmark=phase,
+                    fold_hash="d" * 64,
+                ),
+            ),
+        )
+
+    def _fundamental_summary(
+        self,
+    ) -> FundamentalValidationSummaryView:
+        return FundamentalValidationSummaryView(
+            result_hash=self.fundamental_result_hash,
+            assessment_hash="a" * 64,
+            spec_hash="b" * 64,
+            strategy_id="dynamic-universe-quality-value-v3",
+            evidence_status="rejected",
+            gate_failures=("nonpositive_excess_return",),
+            fold_count=1,
+            oos_sessions=63,
+            compounded_oos_return=Decimal("0.01"),
+            benchmark_compounded_oos_return=Decimal("0.02"),
+            excess_oos_return=Decimal("-0.01"),
+            profitable_fold_rate=Decimal("1"),
+            worst_oos_drawdown=Decimal("0.02"),
+            train_test_gap=Decimal("0"),
+            rejected_order_count=0,
+            unresolved_position_count=0,
+            strategy_unresolved_position_count=0,
+            benchmark_unresolved_position_count=0,
+            requested_by="operator",
+            completed_at=datetime(2026, 7, 23, tzinfo=UTC),
+        )
+
     async def create_portfolio_validation(
         self,
         request: PortfolioWalkForwardJobRequest,
@@ -191,9 +252,7 @@ class FakeConsoleService:
         return PortfolioValidationExperiment(
             experiment_id=self.portfolio_validation_experiment_id,
             state=OperatorJobState.QUEUED,
-            validator_id=(
-                "cross_sectional_momentum_walk_forward_v1"
-            ),
+            validator_id=("cross_sectional_momentum_walk_forward_v1"),
             request=request,
             requested_by=requested_by,
             created_at=datetime(2025, 1, 1, tzinfo=UTC),
@@ -203,10 +262,7 @@ class FakeConsoleService:
         self,
         experiment_id: object,
     ) -> PortfolioValidationExperimentDetail:
-        assert (
-            experiment_id
-            == self.portfolio_validation_experiment_id
-        )
+        assert experiment_id == self.portfolio_validation_experiment_id
         experiment = await self.create_portfolio_validation(
             PortfolioWalkForwardJobRequest(
                 manifest_hash="a" * 64,
@@ -438,6 +494,31 @@ def test_bar_query_requires_point_in_time_as_of() -> None:
     assert valid.json()["items"][0]["instrument"] == "000001.XSHE"
 
 
+def test_fundamental_validation_endpoints_are_authenticated_and_read_only() -> None:
+    service = FakeConsoleService()
+    app = create_app(_settings(), service=service)
+
+    with TestClient(app) as client:
+        denied = client.get("/api/v1/fundamental-validations")
+        listed = client.get(
+            "/api/v1/fundamental-validations",
+            auth=_auth(),
+        )
+        detail = client.get(
+            (f"/api/v1/fundamental-validations/{service.fundamental_result_hash}"),
+            auth=_auth(),
+        )
+
+    assert denied.status_code == 401
+    assert listed.status_code == 200
+    assert listed.json()["items"][0]["evidence_status"] == "rejected"
+    assert listed.json()["items"][0]["live_trading_locked"] is True
+    assert detail.status_code == 200
+    assert detail.json()["integrity_verified"] is True
+    assert detail.json()["folds"][0]["benchmark"]["artifact_hash"] == "e" * 64
+    assert "approve" not in detail.text.casefold()
+
+
 def test_trading_endpoint_is_explicitly_unavailable() -> None:
     app = create_app(_settings(), service=FakeConsoleService())
 
@@ -546,9 +627,7 @@ def test_kill_switch_activation_is_authenticated_and_csrf_protected() -> None:
     assert denied.status_code == 403
     assert accepted.status_code == 200
     assert accepted.json()["kill_switch_active"] is True
-    assert service.kill_switch_activations == [
-        ("web-kill-switch-test-0001", "manual", "operator")
-    ]
+    assert service.kill_switch_activations == [("web-kill-switch-test-0001", "manual", "operator")]
 
 
 def test_backtest_creation_is_csrf_protected_and_strategy_is_server_selected() -> None:
@@ -675,12 +754,6 @@ def test_portfolio_validation_is_csrf_protected_and_risk_bounded() -> None:
     assert denied.status_code == 403
     assert accepted.status_code == 202
     assert accepted.json()["live_trading_locked"] is True
-    assert (
-        accepted.json()["validator_id"]
-        == "cross_sectional_momentum_walk_forward_v1"
-    )
+    assert accepted.json()["validator_id"] == "cross_sectional_momentum_walk_forward_v1"
     assert rejected.status_code == 422
-    assert (
-        service.created_portfolio_validations[0].gross_allocation
-        == Decimal("0.29")
-    )
+    assert service.created_portfolio_validations[0].gross_allocation == Decimal("0.29")

@@ -56,6 +56,9 @@ from autoquant.execution.simulated_broker import PersistentSimulatedBroker
 from autoquant.execution.store import PostgresPaperExecutionRepository
 from autoquant.operations import configured_dsn
 from autoquant.web.backtest_store import PostgresBacktestRepository
+from autoquant.web.fundamental_validation_store import (
+    PostgresFundamentalValidationRepository,
+)
 from autoquant.web.models import (
     BacktestRunRequest,
     DailyIngestionJobRequest,
@@ -245,14 +248,8 @@ def create_app(
         limit: Annotated[int, Query(ge=1, le=200)] = 50,
         _: str = Depends(authenticated_user),
     ) -> dict[str, object]:
-        items = await active_service(
-            request
-        ).list_research_universes(limit=limit)
-        return {
-            "items": [
-                item.model_dump(mode="json") for item in items
-            ]
-        }
+        items = await active_service(request).list_research_universes(limit=limit)
+        return {"items": [item.model_dump(mode="json") for item in items]}
 
     @app.get("/api/v1/research/universes/{snapshot_hash}")
     async def research_universe_detail(
@@ -264,9 +261,7 @@ def create_app(
         _: str = Depends(authenticated_user),
     ) -> dict[str, object]:
         try:
-            detail = await active_service(
-                request
-            ).research_universe_detail(snapshot_hash)
+            detail = await active_service(request).research_universe_detail(snapshot_hash)
         except LookupError:
             raise HTTPException(
                 status_code=404,
@@ -291,9 +286,7 @@ def create_app(
         _: None = Depends(csrf_protected),
     ) -> dict[str, object]:
         try:
-            run = await active_service(request).create_backtest(
-                payload, requested_by=user
-            )
+            run = await active_service(request).create_backtest(payload, requested_by=user)
         except ValueError as error:
             raise HTTPException(status_code=422, detail=str(error)) from None
         return run.model_dump(mode="json")
@@ -327,9 +320,7 @@ def create_app(
         _: None = Depends(csrf_protected),
     ) -> dict[str, object]:
         try:
-            experiment = await active_service(request).create_validation(
-                payload, requested_by=user
-            )
+            experiment = await active_service(request).create_validation(payload, requested_by=user)
         except ValueError as error:
             raise HTTPException(status_code=422, detail=str(error)) from None
         return experiment.model_dump(mode="json")
@@ -343,9 +334,7 @@ def create_app(
         try:
             detail = await active_service(request).validation_detail(experiment_id)
         except LookupError:
-            raise HTTPException(
-                status_code=404, detail="validation experiment not found"
-            ) from None
+            raise HTTPException(status_code=404, detail="validation experiment not found") from None
         return detail.model_dump(mode="json")
 
     @app.get("/api/v1/validation-campaigns")
@@ -354,12 +343,35 @@ def create_app(
         limit: Annotated[int, Query(ge=1, le=200)] = 50,
         _: str = Depends(authenticated_user),
     ) -> dict[str, object]:
-        items = await active_service(request).list_validation_campaigns(
-            limit=limit
-        )
-        return {
-            "items": [item.model_dump(mode="json") for item in items]
-        }
+        items = await active_service(request).list_validation_campaigns(limit=limit)
+        return {"items": [item.model_dump(mode="json") for item in items]}
+
+    @app.get("/api/v1/fundamental-validations")
+    async def fundamental_validations(
+        request: Request,
+        limit: Annotated[int, Query(ge=1, le=200)] = 20,
+        _: str = Depends(authenticated_user),
+    ) -> dict[str, object]:
+        items = await active_service(request).list_fundamental_validations(limit=limit)
+        return {"items": [item.model_dump(mode="json") for item in items]}
+
+    @app.get("/api/v1/fundamental-validations/{result_hash}")
+    async def fundamental_validation_detail(
+        request: Request,
+        result_hash: Annotated[
+            str,
+            ApiPath(pattern=r"^[0-9a-f]{64}$"),
+        ],
+        _: str = Depends(authenticated_user),
+    ) -> dict[str, object]:
+        try:
+            detail = await active_service(request).fundamental_validation_detail(result_hash)
+        except LookupError:
+            raise HTTPException(
+                status_code=404,
+                detail="fundamental validation not found",
+            ) from None
+        return detail.model_dump(mode="json")
 
     @app.get("/api/v1/portfolio-validations")
     async def portfolio_validations(
@@ -367,14 +379,8 @@ def create_app(
         limit: Annotated[int, Query(ge=1, le=200)] = 50,
         _: str = Depends(authenticated_user),
     ) -> dict[str, object]:
-        items = await active_service(
-            request
-        ).list_portfolio_validations(limit=limit)
-        return {
-            "items": [
-                item.model_dump(mode="json") for item in items
-            ]
-        }
+        items = await active_service(request).list_portfolio_validations(limit=limit)
+        return {"items": [item.model_dump(mode="json") for item in items]}
 
     @app.post("/api/v1/portfolio-validations", status_code=202)
     async def create_portfolio_validation(
@@ -384,9 +390,7 @@ def create_app(
         _: None = Depends(csrf_protected),
     ) -> dict[str, object]:
         try:
-            experiment = await active_service(
-                request
-            ).create_portfolio_validation(
+            experiment = await active_service(request).create_portfolio_validation(
                 payload,
                 requested_by=user,
             )
@@ -397,18 +401,14 @@ def create_app(
             ) from None
         return experiment.model_dump(mode="json")
 
-    @app.get(
-        "/api/v1/portfolio-validations/{experiment_id}"
-    )
+    @app.get("/api/v1/portfolio-validations/{experiment_id}")
     async def portfolio_validation_detail(
         request: Request,
         experiment_id: UUID,
         _: str = Depends(authenticated_user),
     ) -> dict[str, object]:
         try:
-            detail = await active_service(
-                request
-            ).portfolio_validation_detail(experiment_id)
+            detail = await active_service(request).portfolio_validation_detail(experiment_id)
         except LookupError:
             raise HTTPException(
                 status_code=404,
@@ -511,32 +511,19 @@ async def _production_service(settings: AppSettings) -> ConsoleService:
     operators = PostgresOperatorRepository.connect(dsn=postgres_dsn)
     backtests = PostgresBacktestRepository.connect(dsn=postgres_dsn)
     validations = PostgresValidationRepository.connect(dsn=postgres_dsn)
-    portfolio_validations = (
-        PostgresPortfolioValidationRepository.connect(
-            dsn=postgres_dsn
-        )
-    )
-    universes = PostgresResearchUniverseRepository.connect(
-        dsn=postgres_dsn
-    )
-    validation_campaigns = PostgresValidationCampaignRepository.connect(
-        dsn=postgres_dsn
-    )
+    portfolio_validations = PostgresPortfolioValidationRepository.connect(dsn=postgres_dsn)
+    universes = PostgresResearchUniverseRepository.connect(dsn=postgres_dsn)
+    validation_campaigns = PostgresValidationCampaignRepository.connect(dsn=postgres_dsn)
+    fundamental_validations = PostgresFundamentalValidationRepository.connect(dsn=postgres_dsn)
     risks = PostgresRiskDecisionRepository.connect(dsn=postgres_dsn)
     executions = PostgresPaperExecutionRepository.connect(dsn=postgres_dsn)
     execution_controls = PostgresExecutionControlRepository.connect(dsn=postgres_dsn)
     simulated_broker = PersistentSimulatedBroker.connect(dsn=postgres_dsn)
     scheduler = PostgresPaperSchedulerRepository.connect(dsn=postgres_dsn)
-    strategy_registry = PostgresPaperDeploymentRegistry.connect(
-        dsn=postgres_dsn
-    )
-    qmt_acceptances = PostgresQmtReadOnlyAcceptanceRepository.connect(
-        dsn=postgres_dsn
-    )
+    strategy_registry = PostgresPaperDeploymentRegistry.connect(dsn=postgres_dsn)
+    qmt_acceptances = PostgresQmtReadOnlyAcceptanceRepository.connect(dsn=postgres_dsn)
     qmt_sessions = PostgresQmtSessionLeaseRepository.connect(dsn=postgres_dsn)
-    promotions = PostgresPaperPromotionFactRepository.connect(
-        dsn=postgres_dsn
-    )
+    promotions = PostgresPaperPromotionFactRepository.connect(dsn=postgres_dsn)
     control = PostgresControlRepository.connect(dsn=postgres_dsn)
     try:
         market = await ClickHouseDailyRepository.connect(dsn=clickhouse_dsn, source="tushare")
@@ -547,6 +534,7 @@ async def _production_service(settings: AppSettings) -> ConsoleService:
         await portfolio_validations.close()
         await universes.close()
         await validation_campaigns.close()
+        await fundamental_validations.close()
         await risks.close()
         await executions.close()
         await execution_controls.close()
@@ -587,6 +575,7 @@ async def _production_service(settings: AppSettings) -> ConsoleService:
         portfolio_validation_runner=portfolio_validation_runner,
         universe_repository=universes,
         validation_campaign_repository=validation_campaigns,
+        fundamental_validation_repository=fundamental_validations,
         risk_repository=risks,
         execution_repository=executions,
         execution_control_repository=execution_controls,

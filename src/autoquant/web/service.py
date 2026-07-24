@@ -8,7 +8,14 @@ from uuid import UUID, uuid4
 
 from autoquant.adapters.clickhouse_daily import ClickHouseDailyRepository
 from autoquant.adapters.postgres import PostgresControlRepository
-from autoquant.backtest.models import BacktestResult
+from autoquant.backtest.fundamental_portfolio import (
+    FUNDAMENTAL_PORTFOLIO_STRATEGY_ID,
+)
+from autoquant.backtest.models import (
+    BacktestResult,
+    ExecutionState,
+    backtest_artifact_hash,
+)
 from autoquant.backtest.portfolio_validation import (
     PortfolioWalkForwardConfig,
     PortfolioWalkForwardResult,
@@ -41,12 +48,22 @@ from autoquant.execution.validated_sma_portfolio import (
 )
 from autoquant.operations import run_daily_ingestion
 from autoquant.web.backtest_store import PostgresBacktestRepository
+from autoquant.web.fundamental_validation_store import (
+    FundamentalValidationIndexRecord,
+    FundamentalValidationRecord,
+    PostgresFundamentalValidationRepository,
+)
 from autoquant.web.models import (
     BacktestRun,
     BacktestRunDetail,
     BacktestRunRequest,
     DailyIngestionJobRequest,
     DataCoverage,
+    FundamentalValidationDetailView,
+    FundamentalValidationFoldView,
+    FundamentalValidationListItemView,
+    FundamentalValidationPhaseView,
+    FundamentalValidationSummaryView,
     OperatorJob,
     OperatorOverview,
     PaperExecutionStatus,
@@ -171,6 +188,14 @@ class ConsoleServicePort(Protocol):
         self, *, limit: int = 50
     ) -> tuple[ValidationCampaignView, ...]: ...
 
+    async def list_fundamental_validations(
+        self, *, limit: int = 20
+    ) -> tuple[FundamentalValidationListItemView, ...]: ...
+
+    async def fundamental_validation_detail(
+        self, result_hash: str
+    ) -> FundamentalValidationDetailView: ...
+
     async def risk_status(self) -> RiskControlStatus: ...
 
     async def execution_status(self) -> PaperExecutionStatus: ...
@@ -207,31 +232,20 @@ class ConsoleService:
         backtest_runner: BacktestRunnerPort | None = None,
         validation_repository: PostgresValidationRepository | None = None,
         validation_runner: WalkForwardRunnerPort | None = None,
-        portfolio_validation_repository: (
-            PostgresPortfolioValidationRepository | None
-        ) = None,
-        portfolio_validation_runner: (
-            PortfolioWalkForwardRunnerPort | None
-        ) = None,
-        validation_campaign_repository: (
-            PostgresValidationCampaignRepository | None
-        ) = None,
-        universe_repository: (
-            PostgresResearchUniverseRepository | None
-        ) = None,
+        portfolio_validation_repository: (PostgresPortfolioValidationRepository | None) = None,
+        portfolio_validation_runner: (PortfolioWalkForwardRunnerPort | None) = None,
+        validation_campaign_repository: (PostgresValidationCampaignRepository | None) = None,
+        fundamental_validation_repository: (PostgresFundamentalValidationRepository | None) = None,
+        universe_repository: (PostgresResearchUniverseRepository | None) = None,
         risk_repository: PostgresRiskDecisionRepository | None = None,
         execution_repository: PostgresPaperExecutionRepository | None = None,
         execution_control_repository: PostgresExecutionControlRepository | None = None,
         simulated_broker: PersistentSimulatedBroker | None = None,
         scheduler_repository: PostgresPaperSchedulerRepository | None = None,
         strategy_registry: PostgresPaperDeploymentRegistry | None = None,
-        qmt_acceptance_repository: (
-            PostgresQmtReadOnlyAcceptanceRepository | None
-        ) = None,
+        qmt_acceptance_repository: (PostgresQmtReadOnlyAcceptanceRepository | None) = None,
         qmt_session_repository: PostgresQmtSessionLeaseRepository | None = None,
-        promotion_repository: (
-            PostgresPaperPromotionFactRepository | None
-        ) = None,
+        promotion_repository: (PostgresPaperPromotionFactRepository | None) = None,
         ingestion_runner: IngestionRunner = run_daily_ingestion,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
         poll_interval: float = 1.0,
@@ -248,16 +262,14 @@ class ConsoleService:
             raise ValueError("validation repository and runner must be configured together")
         self._validations = validation_repository
         self._validation_runner = validation_runner
-        if (portfolio_validation_repository is None) != (
-            portfolio_validation_runner is None
-        ):
+        if (portfolio_validation_repository is None) != (portfolio_validation_runner is None):
             raise ValueError(
-                "portfolio validation repository and runner "
-                "must be configured together"
+                "portfolio validation repository and runner must be configured together"
             )
         self._portfolio_validations = portfolio_validation_repository
         self._portfolio_validation_runner = portfolio_validation_runner
         self._validation_campaigns = validation_campaign_repository
+        self._fundamental_validations = fundamental_validation_repository
         self._universes = universe_repository
         self._risk = risk_repository
         self._execution = execution_repository
@@ -265,12 +277,8 @@ class ConsoleService:
         self._simulated_broker = simulated_broker
         self._scheduler = scheduler_repository
         self._strategy_registry = strategy_registry
-        if (qmt_acceptance_repository is None) != (
-            qmt_session_repository is None
-        ):
-            raise ValueError(
-                "QMT acceptance and session repositories must be configured together"
-            )
+        if (qmt_acceptance_repository is None) != (qmt_session_repository is None):
+            raise ValueError("QMT acceptance and session repositories must be configured together")
         self._qmt_acceptances = qmt_acceptance_repository
         self._qmt_sessions = qmt_session_repository
         self._promotion = promotion_repository
@@ -320,9 +328,7 @@ class ConsoleService:
                 raise
         if self._scheduler is not None:
             try:
-                await self._scheduler.replay(
-                    account_id=self._settings.paper_account_id
-                )
+                await self._scheduler.replay(account_id=self._settings.paper_account_id)
             except Exception:
                 if self._execution_controls is not None:
                     await self._execution_controls.activate(
@@ -356,12 +362,8 @@ class ConsoleService:
                     logical_account_id=self._settings.paper_account_id
                 )
                 if self._qmt_sessions is None:
-                    raise PersistenceUnavailableError(
-                        "QMT session repository is unavailable"
-                    )
-                await self._qmt_sessions.active_session_ids(
-                    now=self._now()
-                )
+                    raise PersistenceUnavailableError("QMT session repository is unavailable")
+                await self._qmt_sessions.active_session_ids(now=self._now())
             except Exception:
                 if self._execution_controls is not None:
                     await self._execution_controls.activate(
@@ -390,9 +392,7 @@ class ConsoleService:
                     self._validation_work_loop(), name="validation-experiment-worker"
                 )
         if self._portfolio_validations is not None:
-            await self._portfolio_validations.interrupt_running_experiments(
-                now=self._now()
-            )
+            await self._portfolio_validations.interrupt_running_experiments(now=self._now())
             if self._portfolio_validation_worker is None:
                 self._portfolio_validation_worker = asyncio.create_task(
                     self._portfolio_validation_work_loop(),
@@ -440,6 +440,8 @@ class ConsoleService:
             await self._portfolio_validations.close()
         if self._validation_campaigns is not None:
             await self._validation_campaigns.close()
+        if self._fundamental_validations is not None:
+            await self._fundamental_validations.close()
         if self._universes is not None:
             await self._universes.close()
         if self._risk is not None:
@@ -537,9 +539,7 @@ class ConsoleService:
         limit: int = 50,
     ) -> tuple[ResearchUniverseSnapshotView, ...]:
         if self._universes is None:
-            raise PersistenceUnavailableError(
-                "Research universe service is unavailable"
-            )
+            raise PersistenceUnavailableError("Research universe service is unavailable")
         return await self._universes.list(limit=limit)
 
     async def research_universe_detail(
@@ -547,9 +547,7 @@ class ConsoleService:
         snapshot_hash: str,
     ) -> ResearchUniverseSnapshotDetail:
         if self._universes is None:
-            raise PersistenceUnavailableError(
-                "Research universe service is unavailable"
-            )
+            raise PersistenceUnavailableError("Research universe service is unavailable")
         return await self._universes.detail(snapshot_hash)
 
     async def create_backtest(
@@ -645,25 +643,17 @@ class ConsoleService:
         requested_by: str,
     ) -> PortfolioValidationExperiment:
         repository, _ = self._require_portfolio_validations()
-        manifest = await self._control.read_manifest(
-            request.manifest_hash
-        )
+        manifest = await self._control.read_manifest(request.manifest_hash)
         if not manifest.production_complete:
-            raise ValueError(
-                "portfolio validation requires a "
-                "production-complete manifest"
-            )
+            raise ValueError("portfolio validation requires a production-complete manifest")
         if len(manifest.instruments) < 3:
-            raise ValueError(
-                "portfolio validation requires at least three instruments"
-            )
+            raise ValueError("portfolio validation requires at least three instruments")
         if any(
             candidate.selection_count > len(manifest.instruments)
             for candidate in request.candidates
         ):
             raise ValueError(
-                "portfolio candidate selects more instruments "
-                "than the manifest contains"
+                "portfolio candidate selects more instruments than the manifest contains"
             )
         experiment = await repository.create_experiment(
             request,
@@ -688,9 +678,7 @@ class ConsoleService:
                 now=self._now(),
                 queued=True,
             )
-            raise PersistenceUnavailableError(
-                "Operator audit is unavailable"
-            ) from None
+            raise PersistenceUnavailableError("Operator audit is unavailable") from None
         self._portfolio_validation_wake.set()
         return experiment
 
@@ -710,6 +698,43 @@ class ConsoleService:
             return ()
         values = await self._validation_campaigns.list_campaigns(limit=limit)
         return tuple(_validation_campaign_view(value) for value in values)
+
+    async def list_fundamental_validations(
+        self,
+        *,
+        limit: int = 20,
+    ) -> tuple[FundamentalValidationListItemView, ...]:
+        if self._fundamental_validations is None:
+            return ()
+        records = await self._fundamental_validations.list_recent(
+            limit=limit,
+        )
+        return tuple(_fundamental_validation_list_item(value) for value in records)
+
+    async def fundamental_validation_detail(
+        self,
+        result_hash: str,
+    ) -> FundamentalValidationDetailView:
+        if self._fundamental_validations is None:
+            raise LookupError("fundamental validation service is unavailable")
+        record = await self._fundamental_validations.read(result_hash)
+        return FundamentalValidationDetailView(
+            summary=_fundamental_validation_summary(record),
+            folds=tuple(
+                FundamentalValidationFoldView(
+                    sequence=fold.sequence,
+                    train_start=fold.train_start,
+                    train_end=fold.train_end,
+                    test_start=fold.test_start,
+                    test_end=fold.test_end,
+                    training=_fundamental_validation_phase(fold.training_result),
+                    test=_fundamental_validation_phase(fold.test_result),
+                    benchmark=_fundamental_validation_phase(fold.benchmark_result),
+                    fold_hash=fold.fold_hash,
+                )
+                for fold in record.result.folds
+            ),
+        )
 
     async def risk_status(self) -> RiskControlStatus:
         if self._risk is None:
@@ -818,17 +843,13 @@ class ConsoleService:
             ),
             scheduler_evidence_available=scheduler_summary is not None,
             scheduler_recovery_verified=(
-                False
-                if scheduler_summary is None
-                else scheduler_summary.recovery_verified
+                False if scheduler_summary is None else scheduler_summary.recovery_verified
             ),
             scheduler_cycle_count=(
                 0 if scheduler_summary is None else scheduler_summary.event_count
             ),
             latest_scheduler_at=(
-                None
-                if scheduler_summary is None
-                else scheduler_summary.latest_evaluated_at
+                None if scheduler_summary is None else scheduler_summary.latest_evaluated_at
             ),
             remaining_gates=(
                 "external_realtime_quote_adapter",
@@ -889,43 +910,25 @@ class ConsoleService:
                         fast_sessions=value.fast_sessions,
                         slow_sessions=value.slow_sessions,
                         allocation=value.allocation,
-                        validation_result_hash=(
-                            value.validation_result_hash
-                        ),
-                        signal_manifest_hash=(
-                            value.signal_manifest_hash
-                        ),
+                        validation_result_hash=(value.validation_result_hash),
+                        signal_manifest_hash=(value.signal_manifest_hash),
                     )
                     for value in registration.components
                 ),
                 total_allocation=registration.total_allocation,
-                valuation_manifest_hash=(
-                    registration.valuation_manifest_hash
-                ),
+                valuation_manifest_hash=(registration.valuation_manifest_hash),
                 portfolio_oos=PaperPortfolioOosStatus(
-                    assessment_hash=(
-                        registration.oos_assessment.assessment_hash
-                    ),
-                    policy_hash=(
-                        registration.oos_assessment.policy_hash
-                    ),
+                    assessment_hash=(registration.oos_assessment.assessment_hash),
+                    policy_hash=(registration.oos_assessment.policy_hash),
                     fold_count=registration.oos_assessment.fold_count,
-                    compounded_return=(
-                        registration.oos_assessment.compounded_return
-                    ),
-                    profitable_fold_rate=(
-                        registration.oos_assessment.profitable_fold_rate
-                    ),
-                    maximum_drawdown=(
-                        registration.oos_assessment.maximum_drawdown
-                    ),
+                    compounded_return=(registration.oos_assessment.compounded_return),
+                    profitable_fold_rate=(registration.oos_assessment.profitable_fold_rate),
+                    maximum_drawdown=(registration.oos_assessment.maximum_drawdown),
                     maximum_pairwise_correlation=(
-                        registration.oos_assessment
-                        .maximum_pairwise_correlation
+                        registration.oos_assessment.maximum_pairwise_correlation
                     ),
                     maximum_component_contribution=(
-                        registration.oos_assessment
-                        .maximum_component_contribution
+                        registration.oos_assessment.maximum_component_contribution
                     ),
                 ),
                 approved_by=registration.approved_by,
@@ -955,9 +958,7 @@ class ConsoleService:
             approved_at=registration.approved_at,
             instruments=registration.instruments,
             total_allocation=registration.total_allocation,
-            valuation_manifest_hash=(
-                registration.valuation_manifest_hash
-            ),
+            valuation_manifest_hash=(registration.valuation_manifest_hash),
             remaining_gates=(
                 "resident_scheduler_runtime",
                 "windows_qmt_readonly_reconciliation",
@@ -983,23 +984,16 @@ class ConsoleService:
         control = (
             None
             if self._execution_controls is None
-            else await self._execution_controls.replay(
-                account_id=self._settings.paper_account_id
-            )
+            else await self._execution_controls.replay(account_id=self._settings.paper_account_id)
         )
-        active_session_ids = await self._qmt_sessions.active_session_ids(
-            now=self._now()
-        )
+        active_session_ids = await self._qmt_sessions.active_session_ids(now=self._now())
         readiness = inspect_qmt_readiness(
             self._settings,
-            kill_switch_active=(
-                None if control is None else control.active
-            ),
+            kill_switch_active=(None if control is None else control.active),
             active_session_ids=active_session_ids,
         )
         checks = {
-            check.code.value: "pass" if check.passed else "blocked"
-            for check in readiness.checks
+            check.code.value: "pass" if check.passed else "blocked" for check in readiness.checks
         }
         evidence = await self._qmt_acceptances.latest(
             logical_account_id=self._settings.paper_account_id
@@ -1194,9 +1188,7 @@ class ConsoleService:
         repository, _ = self._require_portfolio_validations()
         while True:
             try:
-                experiment = await repository.claim_next_experiment(
-                    now=self._now()
-                )
+                experiment = await repository.claim_next_experiment(now=self._now())
             except AutoQuantError:
                 await asyncio.sleep(self._poll_interval)
                 continue
@@ -1382,9 +1374,7 @@ class ConsoleService:
             except AutoQuantError:
                 if attempt == maximum_attempts:
                     raise
-                await asyncio.sleep(
-                    self._poll_interval * attempt
-                )
+                await asyncio.sleep(self._poll_interval * attempt)
         raise AssertionError("validation retry loop exhausted")
 
     async def _run_portfolio_validation_with_retry(
@@ -1398,17 +1388,13 @@ class ConsoleService:
             try:
                 return await runner.run(
                     manifest_hash=experiment.request.manifest_hash,
-                    config=portfolio_validation_config(
-                        experiment.request
-                    ),
+                    config=portfolio_validation_config(experiment.request),
                 )
             except AutoQuantError:
                 if attempt == maximum_attempts:
                     raise
                 await asyncio.sleep(self._poll_interval * attempt)
-        raise AssertionError(
-            "portfolio validation retry loop exhausted"
-        )
+        raise AssertionError("portfolio validation retry loop exhausted")
 
     async def _run_job(self, job: OperatorJob) -> None:
         try:
@@ -1498,13 +1484,8 @@ class ConsoleService:
         PostgresPortfolioValidationRepository,
         PortfolioWalkForwardRunnerPort,
     ]:
-        if (
-            self._portfolio_validations is None
-            or self._portfolio_validation_runner is None
-        ):
-            raise PersistenceUnavailableError(
-                "Portfolio validation service is unavailable"
-            )
+        if self._portfolio_validations is None or self._portfolio_validation_runner is None:
+            raise PersistenceUnavailableError("Portfolio validation service is unavailable")
         return (
             self._portfolio_validations,
             self._portfolio_validation_runner,
@@ -1537,6 +1518,82 @@ def _validation_campaign_view(
             )
             for component in value.components
         ),
+    )
+
+
+def _fundamental_validation_summary(
+    record: FundamentalValidationRecord,
+) -> FundamentalValidationSummaryView:
+    result = record.result
+    strategy_unresolved = sum(
+        len(run.snapshots[-1].positions)
+        for fold in result.folds
+        for run in (fold.training_result, fold.test_result)
+    )
+    benchmark_unresolved = sum(
+        len(fold.benchmark_result.snapshots[-1].positions) for fold in result.folds
+    )
+    return FundamentalValidationSummaryView(
+        result_hash=result.result_hash,
+        assessment_hash=record.evidence.assessment_hash,
+        spec_hash=result.spec_hash,
+        strategy_id=result.folds[0].test_result.strategy_id,
+        evidence_status=record.evidence.evidence_status,
+        gate_failures=record.evidence.gate_failures,
+        fold_count=len(result.folds),
+        oos_sessions=record.evidence.oos_sessions,
+        compounded_oos_return=result.compounded_oos_return,
+        benchmark_compounded_oos_return=(result.benchmark_compounded_oos_return),
+        excess_oos_return=result.excess_oos_return,
+        profitable_fold_rate=result.profitable_fold_rate,
+        worst_oos_drawdown=result.worst_oos_drawdown,
+        train_test_gap=result.train_test_gap,
+        rejected_order_count=result.rejected_order_count,
+        unresolved_position_count=result.unresolved_position_count,
+        strategy_unresolved_position_count=strategy_unresolved,
+        benchmark_unresolved_position_count=benchmark_unresolved,
+        requested_by=record.requested_by,
+        completed_at=record.completed_at,
+    )
+
+
+def _fundamental_validation_list_item(
+    record: FundamentalValidationIndexRecord,
+) -> FundamentalValidationListItemView:
+    return FundamentalValidationListItemView(
+        result_hash=record.result_hash,
+        assessment_hash=record.evidence.assessment_hash,
+        spec_hash=record.spec_hash,
+        strategy_id=FUNDAMENTAL_PORTFOLIO_STRATEGY_ID,
+        evidence_status=record.evidence.evidence_status,
+        gate_failures=record.evidence.gate_failures,
+        fold_count=record.evidence.fold_count,
+        oos_sessions=record.evidence.oos_sessions,
+        compounded_oos_return=record.compounded_oos_return,
+        benchmark_compounded_oos_return=(record.benchmark_compounded_oos_return),
+        excess_oos_return=record.excess_oos_return,
+        profitable_fold_rate=record.profitable_fold_rate,
+        worst_oos_drawdown=record.worst_oos_drawdown,
+        train_test_gap=record.train_test_gap,
+        rejected_order_count=record.evidence.rejected_order_count,
+        unresolved_position_count=(record.evidence.unresolved_position_count),
+        requested_by=record.requested_by,
+        completed_at=record.completed_at,
+    )
+
+
+def _fundamental_validation_phase(
+    result: BacktestResult,
+) -> FundamentalValidationPhaseView:
+    return FundamentalValidationPhaseView(
+        total_return=result.total_return,
+        max_drawdown=result.max_drawdown,
+        ending_equity=result.snapshots[-1].equity,
+        rejected_order_count=sum(
+            value.state is ExecutionState.REJECTED for value in result.reports
+        ),
+        unresolved_position_count=len(result.snapshots[-1].positions),
+        artifact_hash=backtest_artifact_hash(result),
     )
 
 

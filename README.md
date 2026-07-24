@@ -19,6 +19,12 @@ read is bounded by both vendor availability and local ingestion time. The five-f
 rebalance cadence, holding count, costs, risk caps, and evidence gates are immutable; this adds a
 testable research path, not a profitability claim or trading permission.
 
+The frozen v3 validation is retained as rejected evidence: its compounded out-of-sample return
+was 5.345% versus 8.769% for the point-in-time equal-weight benchmark, for -3.424% excess return.
+The Web research console exposes this immutable summary and hash-verified fold detail through
+read-only endpoints. Rejected evidence cannot be approved or overwritten from the console, and
+live trading remains locked.
+
 The repository also contains a deterministic A-share research ledger with versioned board
 rules, T+1 sellability, lot-size validation, conservative daily-open fills, liquidity caps,
 configurable commission/slippage, sell-side stamp duty, bilateral transfer fees, and a

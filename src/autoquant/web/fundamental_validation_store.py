@@ -57,6 +57,49 @@ class FundamentalValidationRecord:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class FundamentalValidationIndexRecord:
+    result_hash: str
+    spec_hash: str
+    evidence: FundamentalValidationEvidence
+    compounded_oos_return: Decimal
+    benchmark_compounded_oos_return: Decimal
+    excess_oos_return: Decimal
+    profitable_fold_rate: Decimal
+    worst_oos_drawdown: Decimal
+    train_test_gap: Decimal
+    requested_by: str
+    completed_at: datetime
+    live_trading_locked: bool = True
+
+    def __post_init__(self) -> None:
+        _require_lowercase_sha256(
+            self.result_hash,
+            name="fundamental validation result hash",
+        )
+        _require_lowercase_sha256(
+            self.spec_hash,
+            name="fundamental validation spec hash",
+        )
+        if (
+            self.evidence.result_hash != self.result_hash
+            or not Decimal("0") <= self.profitable_fold_rate <= Decimal("1")
+            or not Decimal("0") <= self.worst_oos_drawdown <= Decimal("1")
+            or not self.requested_by.strip()
+            or self.requested_by != self.requested_by.strip()
+            or len(self.requested_by) > 128
+            or self.completed_at.tzinfo is None
+            or self.completed_at.utcoffset() is None
+            or not self.live_trading_locked
+        ):
+            raise ValueError("fundamental validation index is inconsistent")
+        object.__setattr__(
+            self,
+            "completed_at",
+            self.completed_at.astimezone(UTC),
+        )
+
+
 class PostgresFundamentalValidationRepository:
     def __init__(
         self,
@@ -292,6 +335,36 @@ class PostgresFundamentalValidationRepository:
             return None
         return await self.read(str(row["result_hash"]))
 
+    async def list_recent(
+        self,
+        *,
+        limit: int = 20,
+    ) -> tuple[FundamentalValidationIndexRecord, ...]:
+        if not 1 <= limit <= 200:
+            raise ValueError("fundamental validation limit must be between 1 and 200")
+        try:
+            async with self._engine.connect() as connection:
+                rows = (
+                    (
+                        await connection.execute(
+                            text(
+                                f"""
+                                SELECT *
+                                FROM {self._schema}.fundamental_validation_runs
+                                ORDER BY completed_at DESC, result_hash DESC
+                                LIMIT :limit
+                                """
+                            ),
+                            {"limit": limit},
+                        )
+                    )
+                    .mappings()
+                    .all()
+                )
+        except Exception:
+            raise PersistenceUnavailableError("fundamental validation list failed") from None
+        return tuple(_index(row) for row in rows)
+
 
 def _run_parameters(
     record: FundamentalValidationRecord,
@@ -401,6 +474,59 @@ def _record(
     except (KeyError, TypeError, ValueError):
         raise PersistenceUnavailableError(
             "stored fundamental validation failed integrity"
+        ) from None
+
+
+def _index(
+    run: RowMapping,
+) -> FundamentalValidationIndexRecord:
+    try:
+        summary = _object(run["summary_payload"])
+        assessment = _object(run["assessment_payload"])
+        result_hash = str(run["result_hash"])
+        evidence = FundamentalValidationEvidence(
+            result_hash=result_hash,
+            policy_hash=str(assessment["policy_hash"]),
+            fold_count=int(str(assessment["fold_count"])),
+            oos_sessions=int(str(assessment["oos_sessions"])),
+            rejected_order_count=int(str(assessment["rejected_order_count"])),
+            unresolved_position_count=int(str(assessment["unresolved_position_count"])),
+            evidence_status=str(assessment["evidence_status"]),
+            gate_failures=_string_array(
+                assessment["gate_failures"],
+            ),
+            version=str(run["assessment_version"]),
+        )
+        compounded = Decimal(str(summary["compounded_oos_return"]))
+        benchmark = Decimal(str(summary["benchmark_compounded_oos_return"]))
+        index = FundamentalValidationIndexRecord(
+            result_hash=result_hash,
+            spec_hash=str(run["spec_hash"]),
+            evidence=evidence,
+            compounded_oos_return=compounded,
+            benchmark_compounded_oos_return=benchmark,
+            excess_oos_return=Decimal(str(summary["excess_oos_return"])),
+            profitable_fold_rate=Decimal(str(summary["profitable_fold_rate"])),
+            worst_oos_drawdown=Decimal(str(summary["worst_oos_drawdown"])),
+            train_test_gap=Decimal(str(summary["train_test_gap"])),
+            requested_by=str(run["requested_by"]),
+            completed_at=run["completed_at"],
+        )
+        if (
+            evidence.assessment_hash != str(run["assessment_hash"])
+            or evidence.evidence_status != str(run["evidence_status"])
+            or evidence.fold_count != int(run["fold_count"])
+            or evidence.oos_sessions != int(run["oos_sessions"])
+            or evidence.rejected_order_count != int(run["rejected_order_count"])
+            or evidence.unresolved_position_count != int(run["unresolved_position_count"])
+            or index.excess_oos_return != compounded - benchmark
+            or run["live_trading_locked"] is not True
+        ):
+            raise ValueError("stored fundamental validation index mismatch")
+        return index
+    except (KeyError, TypeError, ValueError):
+        raise PersistenceUnavailableError(
+            "stored fundamental validation index failed integrity"
         ) from None
 
 

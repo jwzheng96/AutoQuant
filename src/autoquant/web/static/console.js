@@ -561,6 +561,113 @@ async function loadValidationCampaigns() {
   } catch (error) { showToast(`验证活动读取失败：${error.message}`); }
 }
 
+async function loadFundamentalValidationDetail(resultHash) {
+  try {
+    const detail = await requestJson(`/api/v1/fundamental-validations/${resultHash}`);
+    const summary = detail.summary;
+    document.getElementById("fundamental-validation-detail").hidden = false;
+    setText("fundamental-oos-return", formatPercent(summary.compounded_oos_return));
+    setText(
+      "fundamental-benchmark-return",
+      formatPercent(summary.benchmark_compounded_oos_return),
+    );
+    setText("fundamental-excess-return", formatPercent(summary.excess_oos_return));
+    setText("fundamental-evidence-status", summary.evidence_status);
+    setText(
+      "fundamental-gate-failures",
+      summary.gate_failures.length
+        ? summary.gate_failures.join(", ")
+        : "研究门槛通过仍不等于模拟盘或实盘批准",
+    );
+    setText("fundamental-worst-drawdown", formatPercent(summary.worst_oos_drawdown));
+    setText("fundamental-profitable-rate", formatPercent(summary.profitable_fold_rate));
+    setText("fundamental-train-test-gap", formatPercent(summary.train_test_gap));
+    setText("fundamental-oos-sessions", summary.oos_sessions);
+    setText(
+      "fundamental-strategy-open",
+      summary.strategy_unresolved_position_count,
+    );
+    setText(
+      "fundamental-benchmark-open",
+      summary.benchmark_unresolved_position_count,
+    );
+    setText("fundamental-rejections", summary.rejected_order_count);
+    setText(
+      "fundamental-integrity",
+      detail.integrity_verified ? "哈希复验通过" : "未验证",
+    );
+    const table = document.getElementById("fundamental-validation-folds-table");
+    table.replaceChildren();
+    detail.folds.forEach(fold => {
+      const row = document.createElement("tr");
+      [
+        fold.sequence,
+        `${fold.train_start} — ${fold.train_end}`,
+        `${fold.test_start} — ${fold.test_end}`,
+        formatPercent(fold.training.total_return),
+        formatPercent(fold.test.total_return),
+        formatPercent(fold.benchmark.total_return),
+        formatPercent(fold.test.max_drawdown),
+        `${fold.training.unresolved_position_count + fold.test.unresolved_position_count}/${fold.benchmark.unresolved_position_count}`,
+      ].forEach(value => {
+        const cell = document.createElement("td");
+        cell.textContent = value;
+        row.append(cell);
+      });
+      table.append(row);
+    });
+  } catch (error) {
+    showToast(`基本面验证明细读取失败：${error.message}`);
+  }
+}
+
+async function loadFundamentalValidations() {
+  try {
+    const data = await requestJson("/api/v1/fundamental-validations?limit=20");
+    const table = document.getElementById("fundamental-validations-table");
+    table.replaceChildren();
+    data.items.forEach(summary => {
+      const row = document.createElement("tr");
+      row.className = "selectable-row";
+      row.tabIndex = 0;
+      [
+        new Date(summary.completed_at).toLocaleString(),
+        summary.strategy_id,
+      ].forEach(value => {
+        const cell = document.createElement("td");
+        cell.textContent = value;
+        row.append(cell);
+      });
+      const stateCell = document.createElement("td");
+      const badge = document.createElement("span");
+      statusPill(badge, summary.evidence_status);
+      stateCell.append(badge);
+      row.append(stateCell);
+      [
+        formatPercent(summary.compounded_oos_return),
+        formatPercent(summary.benchmark_compounded_oos_return),
+        formatPercent(summary.excess_oos_return),
+        summary.gate_failures.length ? summary.gate_failures.join(", ") : "—",
+      ].forEach(value => {
+        const cell = document.createElement("td");
+        cell.textContent = value;
+        row.append(cell);
+      });
+      const open = () => loadFundamentalValidationDetail(summary.result_hash);
+      row.addEventListener("click", open);
+      row.addEventListener("keydown", event => {
+        if (event.key === "Enter" || event.key === " ") open();
+      });
+      table.append(row);
+    });
+    if (data.items.length) {
+      await loadFundamentalValidationDetail(data.items[0].result_hash);
+    }
+  } catch (error) {
+    showToast(`基本面验证证据读取失败：${error.message}`);
+  }
+}
+
 async function loadPortfolioValidationDetail(experimentId) {
   try {
     const detail = await requestJson(`/api/v1/portfolio-validations/${experimentId}`);
@@ -802,6 +909,10 @@ if (page === "/") {
     "click",
     loadPortfolioValidations,
   );
+  document.getElementById("refresh-fundamental-validations").addEventListener(
+    "click",
+    loadFundamentalValidations,
+  );
   document.getElementById("refresh-validations").addEventListener(
     "click",
     () => Promise.all([loadValidations(), loadValidationCampaigns()]),
@@ -812,6 +923,7 @@ if (page === "/") {
     loadValidations(),
     loadValidationCampaigns(),
     loadPortfolioValidations(),
+    loadFundamentalValidations(),
     loadResearchUniverses(),
   ]));
 } else {

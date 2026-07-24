@@ -158,6 +158,32 @@
             <p class="form-help">活动由受控 CLI 创建，统一数据清单、资金和切点；控制台仅展示不可变活动及各组件证据状态。</p>
             <div class="table-wrap"><table><thead><tr><th>创建时间</th><th>活动</th><th>标的数</th><th>状态</th><th>完成进度</th><th>失败门禁</th></tr></thead><tbody id="validation-campaigns-table"></tbody></table></div>
           </article>
+          <div class="section-heading research-section-heading"><div><p class="eyebrow">FROZEN FACTOR EVIDENCE</p><h2>基本面策略正式验证</h2></div><button id="refresh-fundamental-validations" class="secondary-button" type="button">刷新证据</button></div>
+          <article class="panel">
+            <div class="panel-title"><div><p class="eyebrow">IMMUTABLE RESULTS</p><h3>冻结样本外结果</h3></div><span class="pill warning">实盘锁定</span></div>
+            <p class="form-help">这里只读展示完整落库且哈希复验通过的正式结果。研究候选也不能直接解锁实盘；拒绝结果不能在控制台覆盖或批准。</p>
+            <div class="table-wrap"><table><thead><tr><th>完成时间</th><th>策略</th><th>状态</th><th>样本外收益</th><th>基准</th><th>超额</th><th>失败门禁</th></tr></thead><tbody id="fundamental-validations-table"></tbody></table></div>
+          </article>
+          <section id="fundamental-validation-detail" class="research-detail" hidden>
+            <div class="metric-grid">
+              <article class="metric"><span>样本外复合收益</span><strong id="fundamental-oos-return">—</strong><small>16 个独立测试折叠顺序复合</small></article>
+              <article class="metric"><span>等权基准收益</span><strong id="fundamental-benchmark-return">—</strong><small>同一时点股票池与执行规则</small></article>
+              <article class="metric"><span>样本外超额</span><strong id="fundamental-excess-return">—</strong><small>策略减等权基准</small></article>
+              <article class="metric"><span>证据状态</span><strong id="fundamental-evidence-status">—</strong><small id="fundamental-gate-failures">尚未读取</small></article>
+              <article class="metric"><span>最差测试回撤</span><strong id="fundamental-worst-drawdown">—</strong><small>测试折叠最大值</small></article>
+              <article class="metric"><span>盈利折叠比例</span><strong id="fundamental-profitable-rate">—</strong><small>不代表未来盈利保证</small></article>
+              <article class="metric"><span>训练/测试差距</span><strong id="fundamental-train-test-gap">—</strong><small>固定策略，无参数搜索</small></article>
+              <article class="metric"><span>样本外交易日</span><strong id="fundamental-oos-sessions">—</strong><small>独立测试证据规模</small></article>
+              <article class="metric"><span>策略未平仓</span><strong id="fundamental-strategy-open">—</strong><small>训练与测试策略账本</small></article>
+              <article class="metric"><span>基准未平仓</span><strong id="fundamental-benchmark-open">—</strong><small>单独呈现基准可交易性</small></article>
+              <article class="metric"><span>拒单数</span><strong id="fundamental-rejections">—</strong><small>策略与基准全部账本</small></article>
+              <article class="metric"><span>完整性</span><strong id="fundamental-integrity">—</strong><small>不可变账本重新解码与哈希复验</small></article>
+            </div>
+            <article class="panel">
+              <div class="panel-title"><div><p class="eyebrow">FIXED WALK-FORWARD AUDIT</p><h3>基本面验证折叠</h3></div></div>
+              <div class="table-wrap"><table><thead><tr><th>#</th><th>训练区间</th><th>测试区间</th><th>训练收益</th><th>测试收益</th><th>基准收益</th><th>测试回撤</th><th>策略/基准未平仓</th></tr></thead><tbody id="fundamental-validation-folds-table"></tbody></table></div>
+            </article>
+          </section>
           <div class="section-heading research-section-heading"><div><p class="eyebrow">CROSS-SECTIONAL PORTFOLIO</p><h2>组合级嵌套走步验证</h2></div><button id="refresh-portfolio-validations" class="secondary-button" type="button">刷新组合实验</button></div>
           <article class="panel">
             <form id="portfolio-validation-form" class="research-form">
