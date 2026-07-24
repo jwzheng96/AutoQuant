@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -17,9 +18,21 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from autoquant.adapters.postgres import PostgresControlRepository
 from autoquant.backtest.models import OrderSide
 from autoquant.errors import BrokerStateUnknownError, QmtSessionLeaseLostError
-from autoquant.execution.qmt_canary_contract import QmtCanaryOrderCandidate
+from autoquant.execution.qmt_callback_inbox import (
+    QmtCallbackInboxEvent,
+    sanitize_qmt_callback,
+)
+from autoquant.execution.qmt_callback_processor import (
+    QmtPersistedAsyncResponseBinder,
+)
+from autoquant.execution.qmt_callback_store import PostgresQmtCallbackInbox
+from autoquant.execution.qmt_canary_contract import (
+    QmtCanaryOrderCandidate,
+    qmt_canary_order_remark,
+)
 from autoquant.execution.qmt_canary_recovery import QmtCanaryRemarkRecovery
 from autoquant.execution.qmt_canary_store import PostgresQmtCanaryOrderLedger
+from autoquant.execution.qmt_gateway import QmtCallbackBuffer, QmtCallbackKind
 from autoquant.execution.qmt_session_store import (
     PostgresQmtSessionLeaseRepository,
 )
@@ -123,6 +136,7 @@ async def ledger_fixture() -> AsyncIterator[
             "migrations/postgres/037_qmt_canary_order_ledger.sql",
             "migrations/postgres/038_qmt_canary_order_staging.sql",
             "migrations/postgres/039_qmt_canary_remark_recovery.sql",
+            "migrations/postgres/040_qmt_callback_inbox.sql",
         )
     )
     try:
@@ -196,6 +210,8 @@ async def test_qmt_canary_ledger_is_idempotent_and_restart_recoverable(
     )
     bound_at = datetime.now(UTC)
     bound = await ledger.bind(
+        account_id=candidate.account_id,
+        broker_order_remark=qmt_canary_order_remark(candidate.candidate_hash),
         gateway_holder_id=candidate.gateway_holder_id,
         qmt_session_id=candidate.qmt_session_id,
         qmt_lease_generation=candidate.qmt_lease_generation,
@@ -205,6 +221,8 @@ async def test_qmt_canary_ledger_is_idempotent_and_restart_recoverable(
         bound_at=bound_at,
     )
     repeated_binding = await ledger.bind(
+        account_id=candidate.account_id,
+        broker_order_remark=qmt_canary_order_remark(candidate.candidate_hash),
         gateway_holder_id=candidate.gateway_holder_id,
         qmt_session_id=candidate.qmt_session_id,
         qmt_lease_generation=candidate.qmt_lease_generation,
@@ -257,6 +275,8 @@ async def test_qmt_canary_ledger_is_idempotent_and_restart_recoverable(
         reserved_at=next_created_at,
     )
     await ledger.bind(
+        account_id=next_generation.account_id,
+        broker_order_remark=qmt_canary_order_remark(next_generation.candidate_hash),
         gateway_holder_id=next_generation.gateway_holder_id,
         qmt_session_id=next_generation.qmt_session_id,
         qmt_lease_generation=next_generation.qmt_lease_generation,
@@ -291,6 +311,82 @@ async def test_qmt_canary_ledger_is_idempotent_and_restart_recoverable(
     assert bound == repeated_binding
     assert restored.broker_mapping() == {88001: candidate.decision.order.client_order_id}
     assert next_restored.broker_mapping() == {88001: next_generation.decision.order.client_order_id}
+
+
+@pytest.mark.asyncio
+async def test_persisted_async_callback_binds_exact_staged_remark_and_replays(
+    ledger_fixture: tuple[
+        PostgresQmtCanaryOrderLedger,
+        PostgresQmtSessionLeaseRepository,
+        SecretStr,
+        AsyncEngine,
+        str,
+    ],
+) -> None:
+    ledger, _, lease_token, engine, schema = ledger_fixture
+    candidate = _candidate(
+        client_order_id="canary-durable-callback-0001",
+        created_at=datetime.now(UTC),
+    )
+    stage = await ledger.stage(
+        candidate,
+        lease_token=lease_token,
+        staged_at=datetime.now(UTC),
+    )
+    await ledger.reserve(
+        candidate,
+        lease_token=lease_token,
+        async_request_id=41,
+        reserved_at=datetime.now(UTC),
+    )
+    envelope = QmtCallbackBuffer().capture(
+        QmtCallbackKind.ASYNC_ORDER_RESPONSE,
+        {
+            "account_id": "integration-broker-account",
+            "order_id": 99041,
+            "order_remark": stage.broker_order_remark,
+            "seq": 41,
+        },
+        received_at=datetime.now(UTC),
+    )
+    callback = sanitize_qmt_callback(
+        envelope,
+        expected_broker_account_id="integration-broker-account",
+        logical_account_id=candidate.account_id,
+    )
+    inbox = PostgresQmtCallbackInbox(engine=engine, schema=schema)
+    durable = await inbox.append(
+        callback,
+        gateway_holder_id=candidate.gateway_holder_id,
+        qmt_session_id=candidate.qmt_session_id,
+        qmt_lease_generation=candidate.qmt_lease_generation,
+        lease_token=lease_token,
+    )
+    binder = QmtPersistedAsyncResponseBinder(inbox=inbox, ledger=ledger)
+
+    bound = await binder.bind(durable, lease_token=lease_token)
+    assert await binder.bind(durable, lease_token=lease_token) == bound
+    assert bound.async_request_id == 41
+    assert bound.broker_order_id == "99041"
+    assert bound.client_order_id == candidate.decision.order.client_order_id
+
+    unpersisted = QmtCallbackInboxEvent(
+        callback=replace(
+            callback,
+            local_sequence=2,
+            received_at=datetime.now(UTC),
+            redacted_payload={
+                **dict(callback.redacted_payload),
+                "order_id": 99042,
+            },
+        ),
+        gateway_holder_id=durable.gateway_holder_id,
+        qmt_session_id=durable.qmt_session_id,
+        qmt_lease_generation=durable.qmt_lease_generation,
+        previous_hash=durable.event_hash,
+    )
+    with pytest.raises(BrokerStateUnknownError, match="must be durable"):
+        await binder.bind(unpersisted, lease_token=lease_token)
 
 
 @pytest.mark.asyncio
@@ -352,6 +448,8 @@ async def test_qmt_canary_ledger_rejects_conflicts_and_mutation(
         )
     with pytest.raises(BrokerStateUnknownError, match="no durable"):
         await ledger.bind(
+            account_id=candidate.account_id,
+            broker_order_remark=qmt_canary_order_remark(candidate.candidate_hash),
             gateway_holder_id=candidate.gateway_holder_id,
             qmt_session_id=candidate.qmt_session_id,
             qmt_lease_generation=candidate.qmt_lease_generation,
@@ -360,7 +458,33 @@ async def test_qmt_canary_ledger_rejects_conflicts_and_mutation(
             broker_order_id="88099",
             bound_at=datetime.now(UTC),
         )
+    with pytest.raises(BrokerStateUnknownError, match="order_remark"):
+        await ledger.bind(
+            account_id=candidate.account_id,
+            broker_order_remark="Z" * 24,
+            gateway_holder_id=candidate.gateway_holder_id,
+            qmt_session_id=candidate.qmt_session_id,
+            qmt_lease_generation=candidate.qmt_lease_generation,
+            lease_token=lease_token,
+            async_request_id=17,
+            broker_order_id="88001",
+            bound_at=datetime.now(UTC),
+        )
+    with pytest.raises(BrokerStateUnknownError, match="staged account"):
+        await ledger.bind(
+            account_id="another-canary-account",
+            broker_order_remark=qmt_canary_order_remark(candidate.candidate_hash),
+            gateway_holder_id=candidate.gateway_holder_id,
+            qmt_session_id=candidate.qmt_session_id,
+            qmt_lease_generation=candidate.qmt_lease_generation,
+            lease_token=lease_token,
+            async_request_id=17,
+            broker_order_id="88001",
+            bound_at=datetime.now(UTC),
+        )
     await ledger.bind(
+        account_id=candidate.account_id,
+        broker_order_remark=qmt_canary_order_remark(candidate.candidate_hash),
         gateway_holder_id=candidate.gateway_holder_id,
         qmt_session_id=candidate.qmt_session_id,
         qmt_lease_generation=candidate.qmt_lease_generation,
@@ -371,6 +495,8 @@ async def test_qmt_canary_ledger_rejects_conflicts_and_mutation(
     )
     with pytest.raises(BrokerStateUnknownError, match="conflicts"):
         await ledger.bind(
+            account_id=candidate.account_id,
+            broker_order_remark=qmt_canary_order_remark(candidate.candidate_hash),
             gateway_holder_id=candidate.gateway_holder_id,
             qmt_session_id=candidate.qmt_session_id,
             qmt_lease_generation=candidate.qmt_lease_generation,
@@ -452,6 +578,8 @@ async def test_qmt_canary_ledger_requires_active_bearer_lease_for_every_operatio
     ) == ()
     with pytest.raises(BrokerStateUnknownError, match="fresh same-session callback"):
         await ledger.bind(
+            account_id=candidate.account_id,
+            broker_order_remark=qmt_canary_order_remark(candidate.candidate_hash),
             gateway_holder_id=candidate.gateway_holder_id,
             qmt_session_id=candidate.qmt_session_id,
             qmt_lease_generation=candidate.qmt_lease_generation,
@@ -480,6 +608,8 @@ async def test_qmt_canary_ledger_requires_active_bearer_lease_for_every_operatio
         )
     with pytest.raises(QmtSessionLeaseLostError, match="active bearer"):
         await ledger.bind(
+            account_id=candidate.account_id,
+            broker_order_remark=qmt_canary_order_remark(candidate.candidate_hash),
             gateway_holder_id=candidate.gateway_holder_id,
             qmt_session_id=candidate.qmt_session_id,
             qmt_lease_generation=candidate.qmt_lease_generation,
@@ -513,6 +643,8 @@ async def test_qmt_canary_ledger_requires_active_bearer_lease_for_every_operatio
     )
     with pytest.raises(QmtSessionLeaseLostError, match="active bearer"):
         await ledger.bind(
+            account_id=candidate.account_id,
+            broker_order_remark=qmt_canary_order_remark(candidate.candidate_hash),
             gateway_holder_id=candidate.gateway_holder_id,
             qmt_session_id=candidate.qmt_session_id,
             qmt_lease_generation=candidate.qmt_lease_generation,

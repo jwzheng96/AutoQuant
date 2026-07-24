@@ -456,14 +456,33 @@ class PostgresQmtCanaryOrderLedger:
     async def bind(
         self,
         *,
+        account_id: str,
         gateway_holder_id: str,
         qmt_session_id: int,
         qmt_lease_generation: int,
         lease_token: SecretStr,
         async_request_id: int,
         broker_order_id: str,
+        broker_order_remark: str,
         bound_at: datetime,
     ) -> QmtOrderCorrelation:
+        _require_nonblank(account_id, name="QMT canary account_id")
+        if account_id != account_id.strip() or len(account_id) > 128:
+            raise ValueError(
+                "QMT canary account_id must be trimmed and at most 128 characters"
+            )
+        _require_nonblank(
+            broker_order_remark,
+            name="QMT broker_order_remark",
+        )
+        if (
+            len(broker_order_remark) != 24
+            or not broker_order_remark.isascii()
+            or not broker_order_remark.isalnum()
+        ):
+            raise ValueError(
+                "QMT broker_order_remark must be exactly 24 ASCII alphanumeric characters"
+            )
         _require_scope(
             gateway_holder_id=gateway_holder_id,
             qmt_session_id=qmt_session_id,
@@ -513,14 +532,19 @@ class PostgresQmtCanaryOrderLedger:
                         await connection.execute(
                             text(
                                 f"""
-                                SELECT *
+                                SELECT r.*,
+                                       c.account_id AS candidate_account_id,
+                                       c.broker_order_remark
                                 FROM
-                                    {self._schema}.qmt_order_correlation_reservations
-                                WHERE gateway_holder_id = :gateway_holder_id
-                                  AND qmt_session_id = :qmt_session_id
-                                  AND qmt_lease_generation =
+                                    {self._schema}.qmt_order_correlation_reservations r
+                                JOIN
+                                    {self._schema}.qmt_canary_order_candidates c
+                                  ON c.candidate_hash = r.candidate_hash
+                                WHERE r.gateway_holder_id = :gateway_holder_id
+                                  AND r.qmt_session_id = :qmt_session_id
+                                  AND r.qmt_lease_generation =
                                       :qmt_lease_generation
-                                  AND async_request_id = :async_request_id
+                                  AND r.async_request_id = :async_request_id
                                 """
                             ),
                             {
@@ -536,6 +560,13 @@ class PostgresQmtCanaryOrderLedger:
                 )
                 if reservation_row is None:
                     raise BrokerStateUnknownError("QMT async response has no durable reservation")
+                if (
+                    str(reservation_row["candidate_account_id"]) != account_id
+                    or str(reservation_row["broker_order_remark"]) != broker_order_remark
+                ):
+                    raise BrokerStateUnknownError(
+                        "QMT async response conflicts with its staged account or order_remark"
+                    )
                 reservation = _reservation_from_row(reservation_row)
                 proposed = QmtOrderCorrelation(
                     candidate_hash=reservation.candidate_hash,

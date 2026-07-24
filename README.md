@@ -94,6 +94,10 @@ generation and Shanghai date are hash-chained under the matching active bearer l
 must reach PostgreSQL within five seconds; exact retries are idempotent, while gaps, conflicting
 duplicates, cross-scope replay or a lost lease fail closed. The inbox cannot call the broker and
 every row commits `broker_mutation_allowed=false`.
+An asynchronous order response may update the correlation ledger only after the complete inbox
+chain proves that exact callback is durable. Its logical account, XtQuant `seq`, broker
+`order_id`, and 24-character `order_remark` must all resolve to the same staged candidate;
+restart replay is idempotent and any mismatch remains broker-state-unknown.
 Request and broker identifiers are scoped by QMT session-lease generation, so vendor counters may
 restart without ever joining a new process callback to an old process order.
 Candidate reservation, asynchronous broker-order binding and restart recovery also require the
