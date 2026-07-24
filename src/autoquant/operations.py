@@ -136,6 +136,10 @@ from autoquant.execution.promotion_audit import (
     PaperPromotionPolicy,
     PostgresPaperPromotionFactRepository,
 )
+from autoquant.execution.qmt_lease_guard import (
+    QmtSessionLeaseGuard,
+    run_fenced_blocking,
+)
 from autoquant.execution.qmt_preflight import inspect_qmt_readiness
 from autoquant.execution.qmt_quote_runtime import (
     ImportedXtDataClient,
@@ -3666,9 +3670,9 @@ async def run_qmt_readonly_acceptance(
     controls: PostgresExecutionControlRepository | None = None
     leases: PostgresQmtSessionLeaseRepository | None = None
     acceptances: PostgresQmtReadOnlyAcceptanceRepository | None = None
-    acquired = False
+    lease_guard: QmtSessionLeaseGuard | None = None
     completed = False
-    release_failed = False
+    lease_guard_failed = False
     try:
         controls = PostgresExecutionControlRepository.connect(dsn=postgres_dsn)
         leases = PostgresQmtSessionLeaseRepository.connect(dsn=postgres_dsn)
@@ -3684,15 +3688,16 @@ async def run_qmt_readonly_acceptance(
         if not readiness.read_only_ready:
             blockers = ",".join(check.code.value for check in readiness.checks if not check.passed)
             raise MissingCapabilityError(f"QMT read-only preflight is blocked: {blockers}")
-        lease = await leases.acquire(
+        bindings = await asyncio.to_thread(QmtVendorBindings.load)
+        lease_guard = QmtSessionLeaseGuard(
+            repository=leases,
             session_id=session_id,
             holder_id=credentials.holder_id,
             token=credentials.lease_token,
-            now=datetime.now(UTC),
             ttl=timedelta(seconds=settings.qmt_lease_ttl_seconds),
+            now=lambda: datetime.now(UTC),
         )
-        acquired = True
-        bindings = QmtVendorBindings.load()
+        await lease_guard.start()
 
         def query_once() -> QmtReadOnlyAcceptance:
             qmt = QmtReadOnlyWindowsSession(
@@ -3708,13 +3713,8 @@ async def run_qmt_readonly_acceptance(
             finally:
                 qmt.close()
 
-        acceptance = await asyncio.to_thread(query_once)
-        lease = await leases.verify_owner(
-            session_id=session_id,
-            holder_id=credentials.holder_id,
-            token=credentials.lease_token,
-            now=datetime.now(UTC),
-        )
+        acceptance = await run_fenced_blocking(query_once)
+        lease = await lease_guard.verify()
         latest_control = await controls.replay(account_id=settings.paper_account_id)
         if not latest_control.active:
             raise MissingCapabilityError("QMT acceptance requires the kill switch to remain active")
@@ -3738,17 +3738,12 @@ async def run_qmt_readonly_acceptance(
             "trade_count": evidence.trade_count,
         }
     finally:
-        if acquired and leases is not None and session_id is not None:
+        if lease_guard is not None:
             try:
-                await leases.release(
-                    session_id=session_id,
-                    holder_id=credentials.holder_id,
-                    token=credentials.lease_token,
-                    now=datetime.now(UTC),
-                )
+                await lease_guard.close()
             except Exception:
                 completed = False
-                release_failed = True
+                lease_guard_failed = True
         if not completed and controls is not None:
             try:
                 state = await controls.replay(account_id=settings.paper_account_id)
@@ -3768,8 +3763,8 @@ async def run_qmt_readonly_acceptance(
             await leases.close()
         if controls is not None:
             await controls.close()
-        if release_failed:
-            raise PersistenceUnavailableError("QMT session lease release failed")
+        if lease_guard_failed:
+            raise PersistenceUnavailableError("QMT session lease guard failed")
 
 
 async def run_trading_calendar_refresh(
