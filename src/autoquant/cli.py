@@ -44,6 +44,7 @@ from autoquant.operations import (
     create_compliance_approval,
     create_low_volatility_forward_evaluation_campaign,
     create_low_volatility_forward_session_campaign,
+    create_low_volatility_paper_signal_campaign,
     create_portfolio_validation,
     create_research_data_campaign,
     create_research_universe_snapshot,
@@ -62,6 +63,7 @@ from autoquant.operations import (
     inspect_research_data_campaign,
     inspect_research_input_shard,
     inspect_validation_campaign,
+    prepare_low_volatility_paper_signal,
     retry_research_data_campaign_item,
     revoke_compliance_approval,
     revoke_low_volatility_paper_candidate,
@@ -1503,6 +1505,88 @@ def revoke_paper_low_volatility_candidate(
         )
     except (AutoQuantError, LookupError, ValueError):
         _fail("low-volatility paper candidate revocation failed closed")
+    _emit(payload)
+
+
+@app.command("low-volatility-paper-signal-data-create")
+def low_volatility_paper_signal_data_create(
+    session_date: Annotated[
+        str,
+        typer.Option("--session-date"),
+    ],
+    snapshot_hash: Annotated[
+        str,
+        typer.Option("--snapshot-hash"),
+    ],
+    requested_by: Annotated[
+        str,
+        typer.Option("--requested-by"),
+    ],
+    confirm_paper_only: Annotated[
+        bool,
+        typer.Option("--confirm-paper-only"),
+    ] = False,
+) -> None:
+    """Create prior-close signal data; runtime remains blocked."""
+
+    if not confirm_paper_only:
+        _fail("paper-only signal data confirmation is required")
+    try:
+        payload = asyncio.run(
+            create_low_volatility_paper_signal_campaign(
+                _settings(),
+                session_date=_parse_date(
+                    session_date,
+                    name="session-date",
+                ),
+                snapshot_hash=snapshot_hash,
+                requested_by=requested_by,
+            )
+        )
+    except (AutoQuantError, LookupError, ValueError):
+        _fail("low-volatility paper signal data failed closed")
+    _emit(payload)
+    if payload["status"] == "failed":
+        raise typer.Exit(code=2)
+
+
+@app.command("low-volatility-paper-signal-prepare")
+def low_volatility_paper_signal_prepare(
+    session_date: Annotated[
+        str,
+        typer.Option("--session-date"),
+    ],
+    dataset_manifest_hash: Annotated[
+        str,
+        typer.Option("--dataset-manifest-hash"),
+    ],
+    prepared_by: Annotated[
+        str,
+        typer.Option("--prepared-by"),
+    ],
+    confirm_observation_only: Annotated[
+        bool,
+        typer.Option("--confirm-observation-only"),
+    ] = False,
+) -> None:
+    """Freeze daily observations without granting runtime authority."""
+
+    if not confirm_observation_only:
+        _fail("observation-only signal confirmation is required")
+    try:
+        payload = asyncio.run(
+            prepare_low_volatility_paper_signal(
+                _settings(),
+                session_date=_parse_date(
+                    session_date,
+                    name="session-date",
+                ),
+                dataset_manifest_hash=dataset_manifest_hash,
+                prepared_by=prepared_by,
+            )
+        )
+    except (AutoQuantError, LookupError, ValueError):
+        _fail("low-volatility paper signal preparation failed closed")
     _emit(payload)
 
 

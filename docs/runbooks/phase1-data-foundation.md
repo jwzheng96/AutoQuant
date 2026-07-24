@@ -994,3 +994,47 @@ Allowed reasons are `evidence_invalidated`, `risk_changed`, `runtime_design_chan
 `operator_safety_action`. Revocation appends a second immutable artifact and performs no broker
 operation. Do not attempt candidate approval before a passing 126-session evaluation exists;
 the command exits nonzero without creating an approval.
+
+### Daily paper observation evidence
+
+After candidate approval, create data for a future open session before 09:30 Asia/Shanghai. The
+snapshot must use the frozen universe policy, have a reference date strictly before the target
+session, and contain only instruments inside the candidate's approved risk universe:
+
+```bash
+uv run autoquant low-volatility-paper-signal-data-create \
+  --session-date 2026-07-27 \
+  --snapshot-hash <point-in-time-universe-snapshot-hash> \
+  --requested-by paper-operator \
+  --confirm-paper-only
+```
+
+The command derives the last 253 open sessions from hash-backed Tushare calendar evidence. Its
+campaign includes the current point-in-time members plus any selection carried from the prior
+paper session, so removed holdings keep valuation coverage. Run the returned campaign with
+`research-data-run` until it produces an aggregate dataset manifest.
+
+Then freeze the observation:
+
+```bash
+uv run autoquant low-volatility-paper-signal-prepare \
+  --session-date 2026-07-27 \
+  --dataset-manifest-hash <completed-signal-dataset-manifest-hash> \
+  --prepared-by paper-operator \
+  --confirm-observation-only
+```
+
+Schema v47 reconstructs every exact shard, requires one shared 253-session calendar, calculates
+the unchanged 252-return trailing volatility only from dates before the target session, binds
+prior-close valuations and exact current-session reference rules, and appends a hash chain with
+a fixed 21-session rebalance cadence. Fewer than 60 eligible members produces an empty
+selection; otherwise a rebalance row contains exactly 20 names.
+
+This is intentionally an observation-only stage. The historical execution simulator uses the
+completed execution day's volume and high/low path to model participation, limit locks and fill
+prices. Those values are legitimate ex-post simulation inputs but are not available to a
+pre-open paper decision. Every v47 row therefore hard-codes
+`execution_timing_compatible=false`, `runtime_activation_allowed=false`, and
+`live_trading_locked=true`. Do not treat a prepared signal as a scheduler deployment. A
+separately versioned, decision-time execution model must be validated before that lock can be
+changed in a later schema.

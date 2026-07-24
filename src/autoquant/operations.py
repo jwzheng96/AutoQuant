@@ -69,7 +69,7 @@ from autoquant.backtest.validation import (
     SmaParameters,
     compile_common_calendar_markets,
 )
-from autoquant.clock import to_shanghai
+from autoquant.clock import SHANGHAI, to_shanghai
 from autoquant.config import AppSettings, RuntimeEnvironment
 from autoquant.data.calendar_refresh import TradingCalendarRefreshService
 from autoquant.data.daily_ingestion import (
@@ -126,6 +126,15 @@ from autoquant.execution.low_volatility_paper_approval import (
 )
 from autoquant.execution.low_volatility_paper_approval_store import (
     PostgresLowVolatilityPaperCandidateRepository,
+)
+from autoquant.execution.low_volatility_paper_signal import (
+    LowVolatilityPaperDailySignal,
+)
+from autoquant.execution.low_volatility_paper_signal_compiler import (
+    LowVolatilityPaperSignalCompiler,
+)
+from autoquant.execution.low_volatility_paper_signal_store import (
+    PostgresLowVolatilityPaperSignalRepository,
 )
 from autoquant.execution.paper_deployment import (
     PostgresPaperDeploymentRegistry,
@@ -2235,6 +2244,440 @@ async def revoke_low_volatility_paper_candidate(
         await control.close()
         await controls.close()
         await candidates.close()
+
+
+async def create_low_volatility_paper_signal_campaign(
+    settings: AppSettings,
+    *,
+    session_date: date,
+    snapshot_hash: str,
+    requested_by: str,
+) -> dict[str, object]:
+    """Create the exact 253-session prior-close data campaign."""
+
+    if settings.environment is not RuntimeEnvironment.PAPER:
+        raise MissingCapabilityError(
+            "paper environment is not configured"
+        )
+    if settings.live_trading_enabled:
+        raise MissingCapabilityError(
+            "live trading must remain hard-locked"
+        )
+    dsn = configured_dsn(
+        settings.postgres_dsn,
+        capability="PostgreSQL",
+    )
+    candidates = (
+        PostgresLowVolatilityPaperCandidateRepository.connect(
+            dsn=dsn
+        )
+    )
+    signals = PostgresLowVolatilityPaperSignalRepository.connect(
+        dsn=dsn
+    )
+    specs = PostgresLowVolatilityResearchSpecRepository.connect(
+        dsn=dsn
+    )
+    universes = PostgresResearchUniverseRepository.connect(dsn=dsn)
+    campaigns = PostgresResearchDataCampaignRepository.connect(
+        dsn=dsn
+    )
+    controls = PostgresExecutionControlRepository.connect(dsn=dsn)
+    control = PostgresControlRepository.connect(dsn=dsn)
+    market: ClickHouseDailyRepository | None = None
+    try:
+        fence = await controls.replay(
+            account_id=settings.paper_account_id
+        )
+        if not fence.active:
+            raise MissingCapabilityError(
+                "paper signal campaign requires the kill switch "
+                "to remain active"
+            )
+        active = await candidates.active(
+            account_id=settings.paper_account_id,
+            strategy_id=settings.paper_strategy_id,
+        )
+        if active is None:
+            raise LookupError(
+                "low-volatility paper candidate is not active"
+            )
+        candidate = active.approval
+        if (
+            candidate.risk_policy_hash
+            != default_paper_policy(
+                candidate.instruments
+            ).policy_hash
+        ):
+            raise ValueError(
+                "paper candidate risk policy is inconsistent"
+            )
+        existing = await signals.for_session(
+            candidate_approval_hash=candidate.approval_hash,
+            session_date=session_date,
+        )
+        if existing is not None:
+            raise ValueError(
+                "paper signal already exists for the session"
+            )
+        previous = await signals.latest(
+            candidate_approval_hash=candidate.approval_hash
+        )
+        if (
+            previous is not None
+            and previous.session_date >= session_date
+        ):
+            raise ValueError(
+                "paper signal sessions must be prepared in order"
+            )
+        spec = (
+            await specs.read(candidate.source_spec_hash)
+        ).spec
+        detail = await universes.detail(snapshot_hash)
+        created_at = datetime.now(UTC)
+        session_open = datetime.combine(
+            session_date,
+            datetime.min.time().replace(
+                hour=9,
+                minute=30,
+            ),
+            tzinfo=SHANGHAI,
+        ).astimezone(UTC)
+        members = tuple(
+            value.instrument for value in detail.members
+        )
+        evidence_instruments = tuple(
+            sorted(
+                set(members)
+                | (
+                    set()
+                    if previous is None
+                    else set(previous.selected_instruments)
+                )
+            )
+        )
+        if (
+            detail.snapshot.snapshot_hash != snapshot_hash
+            or detail.snapshot.policy_hash != spec.policy_hash
+            or detail.snapshot.reference_date >= session_date
+            or detail.snapshot.knowledge_as_of > created_at
+            or created_at >= session_open
+            or not set(evidence_instruments)
+            <= set(candidate.instruments)
+        ):
+            raise ValueError(
+                "paper signal universe is outside approved evidence"
+            )
+        market = await ClickHouseDailyRepository.connect(
+            dsn=configured_dsn(
+                settings.clickhouse_dsn,
+                capability="ClickHouse",
+            ),
+            source="tushare",
+        )
+        coverage = await market.query_coverage_as_of(
+            (evidence_instruments[0],),
+            session_date - timedelta(days=550),
+            session_date,
+            created_at,
+        )
+        calendar_rows = tuple(
+            value
+            for value in coverage.sessions
+            if value.source == "tushare"
+        )
+        if (
+            not calendar_rows
+            or len(
+                {
+                    value.session_date
+                    for value in calendar_rows
+                }
+            )
+            != len(calendar_rows)
+            or any(
+                value.available_at > created_at
+                for value in calendar_rows
+            )
+        ):
+            raise ValueError(
+                "paper signal calendar evidence is incomplete"
+            )
+        current = tuple(
+            value
+            for value in calendar_rows
+            if value.session_date == session_date
+        )
+        prior_open = tuple(
+            value
+            for value in calendar_rows
+            if value.is_open
+            and value.session_date < session_date
+        )
+        if (
+            len(current) != 1
+            or not current[0].is_open
+            or len(prior_open)
+            < spec.minimum_history_sessions
+        ):
+            raise ValueError(
+                "paper signal session or history is unavailable"
+            )
+        window = prior_open[
+            -spec.minimum_history_sessions :
+        ]
+        evidence = await asyncio.gather(
+            *(
+                control.read_source_evidence(value)
+                for value in sorted(
+                    {
+                        item.response_hash
+                        for item in (*window, current[0])
+                    }
+                )
+            )
+        )
+        if any(
+            value.source != "tushare"
+            or value.method != "trade_cal"
+            or value.requested_at > created_at
+            for value in evidence
+        ):
+            raise ValueError(
+                "paper signal calendar provenance is invalid"
+            )
+        campaign_spec = ResearchDataCampaignSpec(
+            campaign_key=(
+                "low-vol-paper-signal:"
+                f"{candidate.approval_hash[:12]}:"
+                f"{session_date:%Y%m%d}"
+            ),
+            policy_hash=spec.policy_hash,
+            snapshot_hashes=(snapshot_hash,),
+            instruments=evidence_instruments,
+            start_date=window[0].session_date,
+            end_date=window[-1].session_date,
+            requested_by=requested_by,
+        )
+        status = await campaigns.create(
+            campaign_spec,
+            created_at=created_at,
+        )
+        payload: dict[str, object] = {
+            "campaign_hash": campaign_spec.campaign_hash,
+            "candidate_approval_hash": (
+                candidate.approval_hash
+            ),
+            "end_date": campaign_spec.end_date.isoformat(),
+            "execution_timing_compatible": False,
+            "instrument_count": len(evidence_instruments),
+            "live_trading_locked": True,
+            "runtime_activation_allowed": False,
+            "session_count": len(window),
+            "session_date": session_date.isoformat(),
+            "snapshot_hash": snapshot_hash,
+            "start_date": campaign_spec.start_date.isoformat(),
+            "status": status.status,
+        }
+        await control.append_audit_event(
+            "research.low_volatility.paper_signal_data.created",
+            created_at,
+            {
+                **payload,
+                "requested_by": requested_by,
+            },
+        )
+        return payload
+    finally:
+        if market is not None:
+            await market.client.close()
+        await control.close()
+        await controls.close()
+        await campaigns.close()
+        await universes.close()
+        await specs.close()
+        await signals.close()
+        await candidates.close()
+
+
+async def prepare_low_volatility_paper_signal(
+    settings: AppSettings,
+    *,
+    session_date: date,
+    dataset_manifest_hash: str,
+    prepared_by: str,
+) -> dict[str, object]:
+    """Freeze prior-close selection evidence without runtime authority."""
+
+    if settings.environment is not RuntimeEnvironment.PAPER:
+        raise MissingCapabilityError(
+            "paper environment is not configured"
+        )
+    if settings.live_trading_enabled:
+        raise MissingCapabilityError(
+            "live trading must remain hard-locked"
+        )
+    dsn = configured_dsn(
+        settings.postgres_dsn,
+        capability="PostgreSQL",
+    )
+    candidates = (
+        PostgresLowVolatilityPaperCandidateRepository.connect(
+            dsn=dsn
+        )
+    )
+    signals = PostgresLowVolatilityPaperSignalRepository.connect(
+        dsn=dsn
+    )
+    specs = PostgresLowVolatilityResearchSpecRepository.connect(
+        dsn=dsn
+    )
+    universes = PostgresResearchUniverseRepository.connect(dsn=dsn)
+    campaigns = PostgresResearchDataCampaignRepository.connect(
+        dsn=dsn
+    )
+    controls = PostgresExecutionControlRepository.connect(dsn=dsn)
+    control = PostgresControlRepository.connect(dsn=dsn)
+    market: ClickHouseDailyRepository | None = None
+    try:
+        fence = await controls.replay(
+            account_id=settings.paper_account_id
+        )
+        if not fence.active:
+            raise MissingCapabilityError(
+                "paper signal preparation requires the kill switch "
+                "to remain active"
+            )
+        active = await candidates.active(
+            account_id=settings.paper_account_id,
+            strategy_id=settings.paper_strategy_id,
+        )
+        if active is None:
+            raise LookupError(
+                "low-volatility paper candidate is not active"
+            )
+        candidate = active.approval
+        existing = await signals.for_session(
+            candidate_approval_hash=candidate.approval_hash,
+            session_date=session_date,
+        )
+        if existing is not None:
+            return _low_volatility_paper_signal_payload(
+                existing,
+                status="stored",
+            )
+        previous = await signals.latest(
+            candidate_approval_hash=candidate.approval_hash
+        )
+        if (
+            previous is not None
+            and previous.session_date >= session_date
+        ):
+            raise ValueError(
+                "paper signal sessions must be prepared in order"
+            )
+        spec = (
+            await specs.read(candidate.source_spec_hash)
+        ).spec
+        manifest = await campaigns.read_manifest(
+            dataset_manifest_hash
+        )
+        if len(manifest.snapshot_hashes) != 1:
+            raise ValueError(
+                "paper signal data requires one universe snapshot"
+            )
+        snapshot_hash = manifest.snapshot_hashes[0]
+        detail = await universes.detail(snapshot_hash)
+        members = tuple(
+            value.instrument for value in detail.members
+        )
+        prepared_at = datetime.now(UTC)
+        market = await ClickHouseDailyRepository.connect(
+            dsn=configured_dsn(
+                settings.clickhouse_dsn,
+                capability="ClickHouse",
+            ),
+            source="tushare",
+        )
+        rule_set = await ExactSessionRuleReader(
+            market_repository=market,
+            control_repository=control,
+        ).read(
+            instruments=manifest.instruments,
+            session_date=session_date,
+            as_of=prepared_at,
+        )
+        reader = ExactManifestResearchDatasetReader(
+            plan=manifest,
+            control_reader=control,
+            record_reader=market,
+            batch_size=4,
+        )
+        signal = await LowVolatilityPaperSignalCompiler(
+            reader=reader
+        ).compile(
+            candidate=candidate,
+            spec=spec,
+            manifest=manifest,
+            snapshot_hash=snapshot_hash,
+            universe_members=members,
+            rule_set=rule_set,
+            session_date=session_date,
+            previous=previous,
+            prepared_by=prepared_by,
+            prepared_at=prepared_at,
+        )
+        stored = await signals.save(signal)
+        payload = _low_volatility_paper_signal_payload(
+            stored,
+            status="prepared_observation_only",
+        )
+        await control.append_audit_event(
+            "research.low_volatility.paper_signal.prepared",
+            stored.prepared_at,
+            payload,
+        )
+        return payload
+    finally:
+        if market is not None:
+            await market.client.close()
+        await control.close()
+        await controls.close()
+        await campaigns.close()
+        await universes.close()
+        await specs.close()
+        await signals.close()
+        await candidates.close()
+
+
+def _low_volatility_paper_signal_payload(
+    signal: LowVolatilityPaperDailySignal,
+    *,
+    status: str,
+) -> dict[str, object]:
+    if not isinstance(signal, LowVolatilityPaperDailySignal):
+        raise TypeError(
+            "paper signal payload requires daily signal evidence"
+        )
+    return {
+        "candidate_approval_hash": (
+            signal.candidate_approval_hash
+        ),
+        "dataset_manifest_hash": signal.dataset_manifest_hash,
+        "eligible_instrument_count": len(signal.observations),
+        "execution_timing_compatible": False,
+        "live_trading_locked": True,
+        "rebalance_due": signal.rebalance_due,
+        "runtime_activation_allowed": False,
+        "selected_instrument_count": len(
+            signal.selected_instruments
+        ),
+        "session_date": signal.session_date.isoformat(),
+        "session_sequence": signal.session_sequence,
+        "signal_date": signal.signal_date.isoformat(),
+        "signal_hash": signal.signal_hash,
+        "status": status,
+    }
 
 
 async def inspect_fundamental_data_backfill(

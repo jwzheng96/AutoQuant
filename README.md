@@ -83,6 +83,14 @@ database-bound to the exact forward result, assessment, source specification and
 dataset. It explicitly stores `runtime_activation_allowed=false`,
 `daily_signal_evidence_required=true` and `live_trading_locked=true`; therefore approval records
 a governance decision but cannot start the scheduler or unlock either paper or live trading.
+Schema v47 adds a chained daily observation ledger over exactly 253 prior trading sessions.
+Each row binds one active candidate, one point-in-time universe, one complete hash-addressed
+dataset, exact current-session rules, adjusted prior closes and the lowest-volatility selection.
+It must be prepared before 09:30 Asia/Shanghai. The artifact deliberately records
+`execution_timing_compatible=false` and `runtime_activation_allowed=false`: the frozen research
+execution model uses completed execution-day OHLCV for fill simulation, while a paper decision
+can only use information visible at decision time. This difference must be resolved and
+revalidated before the resident scheduler may consume these signals.
 PostgreSQL schema v36 adds an append-only, revocable compliance-approval artifact bound to the
 active paper registration and exact promotion policy. No approval is created automatically,
 and even a valid artifact can only satisfy an evidence gate while the code-level live release

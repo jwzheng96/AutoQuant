@@ -1338,6 +1338,147 @@ def test_low_volatility_candidate_revocation_is_redacted() -> None:
     assert revocation.await_args.kwargs["reason"].value == "operator_safety_action"
 
 
+def test_low_volatility_signal_data_requires_confirmation() -> None:
+    creation = AsyncMock()
+    with patch(
+        "autoquant.cli.create_low_volatility_paper_signal_campaign",
+        new=creation,
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "low-volatility-paper-signal-data-create",
+                "--session-date",
+                "2026-07-27",
+                "--snapshot-hash",
+                "a" * 64,
+                "--requested-by",
+                "paper-operator",
+            ],
+        )
+
+    assert result.exit_code == 2
+    assert creation.await_count == 0
+
+
+def test_low_volatility_signal_data_is_runtime_locked() -> None:
+    payload = {
+        "campaign_hash": "a" * 64,
+        "candidate_approval_hash": "b" * 64,
+        "end_date": "2026-07-24",
+        "execution_timing_compatible": False,
+        "instrument_count": 300,
+        "live_trading_locked": True,
+        "runtime_activation_allowed": False,
+        "session_count": 253,
+        "session_date": "2026-07-27",
+        "snapshot_hash": "c" * 64,
+        "start_date": "2025-07-17",
+        "status": "queued",
+    }
+    creation = AsyncMock(return_value=payload)
+    with patch(
+        "autoquant.cli.create_low_volatility_paper_signal_campaign",
+        new=creation,
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "low-volatility-paper-signal-data-create",
+                "--session-date",
+                "2026-07-27",
+                "--snapshot-hash",
+                "c" * 64,
+                "--requested-by",
+                "paper-operator",
+                "--confirm-paper-only",
+            ],
+            env={
+                "AQ_ENVIRONMENT": "paper",
+                "AQ_POSTGRES_DSN": (
+                    "postgresql+asyncpg://sensitive"
+                ),
+            },
+        )
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == payload
+    assert "sensitive" not in result.stdout
+    creation.assert_awaited_once()
+
+
+def test_low_volatility_signal_prepare_requires_confirmation() -> None:
+    preparation = AsyncMock()
+    with patch(
+        "autoquant.cli.prepare_low_volatility_paper_signal",
+        new=preparation,
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "low-volatility-paper-signal-prepare",
+                "--session-date",
+                "2026-07-27",
+                "--dataset-manifest-hash",
+                "a" * 64,
+                "--prepared-by",
+                "paper-operator",
+            ],
+        )
+
+    assert result.exit_code == 2
+    assert preparation.await_count == 0
+
+
+def test_low_volatility_signal_prepare_is_observation_only() -> None:
+    payload = {
+        "candidate_approval_hash": "a" * 64,
+        "dataset_manifest_hash": "b" * 64,
+        "eligible_instrument_count": 280,
+        "execution_timing_compatible": False,
+        "live_trading_locked": True,
+        "rebalance_due": True,
+        "runtime_activation_allowed": False,
+        "selected_instrument_count": 20,
+        "session_date": "2026-07-27",
+        "session_sequence": 1,
+        "signal_date": "2026-07-24",
+        "signal_hash": "c" * 64,
+        "status": "prepared_observation_only",
+    }
+    preparation = AsyncMock(return_value=payload)
+    with patch(
+        "autoquant.cli.prepare_low_volatility_paper_signal",
+        new=preparation,
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "low-volatility-paper-signal-prepare",
+                "--session-date",
+                "2026-07-27",
+                "--dataset-manifest-hash",
+                "b" * 64,
+                "--prepared-by",
+                "paper-operator",
+                "--confirm-observation-only",
+            ],
+            env={
+                "AQ_ENVIRONMENT": "paper",
+                "AQ_POSTGRES_DSN": (
+                    "postgresql+asyncpg://sensitive"
+                ),
+            },
+        )
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == payload
+    assert payload["execution_timing_compatible"] is False
+    assert payload["runtime_activation_allowed"] is False
+    assert "sensitive" not in result.stdout
+    preparation.assert_awaited_once()
+
+
 def test_forward_evaluation_data_campaign_is_bounded_and_locked() -> None:
     payload = {
         "campaign_hash": "b" * 64,
