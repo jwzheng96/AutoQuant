@@ -216,6 +216,34 @@ class PostgresLowVolatilityForwardEvidenceSpecRepository:
         except Exception:
             raise PersistenceUnavailableError("forward evidence lookup failed") from None
 
+    async def latest(
+        self,
+    ) -> LowVolatilityForwardEvidenceSpecRecord | None:
+        try:
+            async with self._engine.connect() as connection:
+                row = (
+                    (
+                        await connection.execute(
+                            text(
+                                f"""
+                                SELECT *
+                                FROM
+                                    {self._schema}.low_volatility_forward_evidence_specs
+                                ORDER BY created_at DESC, spec_hash DESC
+                                LIMIT 1
+                                """
+                            )
+                        )
+                    )
+                    .mappings()
+                    .one_or_none()
+                )
+            return None if row is None else _record(row)
+        except PersistenceUnavailableError:
+            raise
+        except Exception:
+            raise PersistenceUnavailableError("forward evidence lookup failed") from None
+
 
 def _record(
     row: RowMapping,

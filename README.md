@@ -57,6 +57,9 @@ themselves.
 The first official 2026-07-23 binding is frozen as
 `2ef9a973f10b9c5c54a8589b600bd12336a3f9d1d136224d4e7671056a66557d` (1 of 126 required
 forward sessions).
+The authenticated research console and
+`GET /api/v1/low-volatility-forward-progress` expose this ledger, safe cutoff, missing sessions
+and calendar conflicts read-only while both paper and live trading remain locked.
 
 The repository also contains a deterministic A-share research ledger with versioned board
 rules, T+1 sellability, lot-size validation, conservative daily-open fills, liquidity caps,

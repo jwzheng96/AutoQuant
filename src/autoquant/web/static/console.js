@@ -792,6 +792,78 @@ async function loadLowVolatilityValidations() {
   }
 }
 
+async function loadLowVolatilityForwardProgress() {
+  try {
+    const progress = await requestJson(
+      "/api/v1/low-volatility-forward-progress",
+    );
+    const labels = {
+      backfill_required: "存在待补交易日",
+      calendar_conflict: "日历修订冲突",
+      collecting_forward_sessions: "积累前瞻交易日",
+      session_gate_complete_awaiting_evaluation: "交易日数量达标，等待评估",
+    };
+    setText(
+      "low-volatility-forward-status",
+      labels[progress.status] ?? progress.status,
+    );
+    setText(
+      "low-volatility-forward-completed",
+      `${progress.completed_required_sessions}/${progress.minimum_forward_sessions}`,
+    );
+    setText(
+      "low-volatility-forward-remaining",
+      progress.remaining_required_sessions,
+    );
+    setText(
+      "low-volatility-forward-observed",
+      progress.observed_open_sessions,
+    );
+    setText(
+      "low-volatility-forward-cutoff",
+      `安全截止日 ${progress.safe_cutoff_date}`,
+    );
+    setText(
+      "low-volatility-forward-missing",
+      progress.calendar_conflict_dates.length
+        ? `冲突 ${progress.calendar_conflict_dates.join(", ")}`
+        : progress.missing_session_dates.length
+          ? progress.missing_session_dates.join(", ")
+          : "0",
+    );
+    setText(
+      "low-volatility-forward-paper",
+      `${progress.minimum_paper_sessions} 日（未解锁）`,
+    );
+    const table = document.getElementById(
+      "low-volatility-forward-sessions-table",
+    );
+    table.replaceChildren();
+    progress.sessions.forEach(session => {
+      const row = document.createElement("tr");
+      [
+        session.session_date,
+        session.snapshot_reference_date,
+        session.instrument_count,
+        new Date(session.completed_at).toLocaleString(),
+        `${session.binding_hash.slice(0, 12)}…`,
+        `${session.dataset_manifest_hash.slice(0, 12)}…`,
+      ].forEach((value, index) => {
+        const cell = document.createElement("td");
+        cell.textContent = value;
+        if (index === 4) cell.title = session.binding_hash;
+        if (index === 5) {
+          cell.title = session.dataset_manifest_hash;
+        }
+        row.append(cell);
+      });
+      table.append(row);
+    });
+  } catch (error) {
+    showToast(`前瞻交易日进度读取失败：${error.message}`);
+  }
+}
+
 async function loadPortfolioValidationDetail(experimentId) {
   try {
     const detail = await requestJson(`/api/v1/portfolio-validations/${experimentId}`);
@@ -1040,6 +1112,9 @@ if (page === "/") {
   document.getElementById(
     "refresh-low-volatility-validations",
   ).addEventListener("click", loadLowVolatilityValidations);
+  document.getElementById(
+    "refresh-low-volatility-forward",
+  ).addEventListener("click", loadLowVolatilityForwardProgress);
   document.getElementById("refresh-validations").addEventListener(
     "click",
     () => Promise.all([loadValidations(), loadValidationCampaigns()]),
@@ -1052,6 +1127,7 @@ if (page === "/") {
     loadPortfolioValidations(),
     loadFundamentalValidations(),
     loadLowVolatilityValidations(),
+    loadLowVolatilityForwardProgress(),
     loadResearchUniverses(),
   ]));
 } else {

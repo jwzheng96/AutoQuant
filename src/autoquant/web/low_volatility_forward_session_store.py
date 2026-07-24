@@ -247,6 +247,49 @@ class PostgresLowVolatilityForwardSessionRepository:
         except Exception:
             raise PersistenceUnavailableError("forward session lookup failed") from None
 
+    async def list_for_spec(
+        self,
+        *,
+        forward_spec_hash: str,
+        limit: int = 1000,
+    ) -> tuple[LowVolatilityForwardSessionRecord, ...]:
+        _require_lowercase_sha256(
+            forward_spec_hash,
+            name="forward session spec hash",
+        )
+        if limit < 1 or limit > 1000:
+            raise ValueError("forward session limit must be between 1 and 1000")
+        try:
+            async with self._engine.connect() as connection:
+                rows = (
+                    (
+                        await connection.execute(
+                            text(
+                                f"""
+                                SELECT *
+                                FROM
+                                    {self._schema}.low_volatility_forward_sessions
+                                WHERE forward_spec_hash =
+                                        :forward_spec_hash
+                                ORDER BY session_date ASC
+                                LIMIT :limit
+                                """
+                            ),
+                            {
+                                "forward_spec_hash": (forward_spec_hash),
+                                "limit": limit,
+                            },
+                        )
+                    )
+                    .mappings()
+                    .all()
+                )
+            return tuple(_record(row) for row in rows)
+        except PersistenceUnavailableError:
+            raise
+        except Exception:
+            raise PersistenceUnavailableError("forward session listing failed") from None
+
 
 def _record(
     row: RowMapping,

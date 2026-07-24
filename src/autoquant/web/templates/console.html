@@ -209,6 +209,20 @@
               <div class="table-wrap"><table><thead><tr><th>#</th><th>训练区间</th><th>测试区间</th><th>训练收益</th><th>测试收益</th><th>基准收益</th><th>测试回撤</th><th>策略/基准未平仓</th></tr></thead><tbody id="low-volatility-validation-folds-table"></tbody></table></div>
             </article>
           </section>
+          <div class="section-heading research-section-heading"><div><p class="eyebrow">FUTURE-ONLY EVIDENCE</p><h2>前瞻交易日证据进度</h2></div><button id="refresh-low-volatility-forward" class="secondary-button" type="button">刷新进度</button></div>
+          <article class="panel">
+            <div class="panel-title"><div><p class="eyebrow">IMMUTABLE V5 SESSION LEDGER</p><h3>126 个新交易日门槛</h3></div><span class="pill warning">模拟盘与实盘锁定</span></div>
+            <p class="form-help">每一日都必须绑定前一交易日股票池、精确日历证据和全部生产级行情分片。历史 v4 结果不能追认；完成 126 日后仍需重新评估并累计至少 60 个模拟盘交易日。</p>
+            <div class="metric-grid">
+              <article class="metric"><span>当前状态</span><strong id="low-volatility-forward-status">—</strong><small>只读证据状态</small></article>
+              <article class="metric"><span>已封存/要求</span><strong id="low-volatility-forward-completed">—</strong><small>不可变交易日绑定</small></article>
+              <article class="metric"><span>尚缺交易日</span><strong id="low-volatility-forward-remaining">—</strong><small>含尚未发生的未来交易日</small></article>
+              <article class="metric"><span>已观察开市日</span><strong id="low-volatility-forward-observed">—</strong><small id="low-volatility-forward-cutoff">安全截止日 —</small></article>
+              <article class="metric"><span>待补历史交易日</span><strong id="low-volatility-forward-missing">—</strong><small>必须按时间顺序补齐</small></article>
+              <article class="metric"><span>模拟盘后续门槛</span><strong id="low-volatility-forward-paper">—</strong><small>前瞻评估通过后才开始</small></article>
+            </div>
+            <div class="table-wrap"><table><thead><tr><th>交易日</th><th>股票池日</th><th>标的数</th><th>完成时间</th><th>绑定哈希</th><th>数据清单</th></tr></thead><tbody id="low-volatility-forward-sessions-table"></tbody></table></div>
+          </article>
           <div class="section-heading research-section-heading"><div><p class="eyebrow">CROSS-SECTIONAL PORTFOLIO</p><h2>组合级嵌套走步验证</h2></div><button id="refresh-portfolio-validations" class="secondary-button" type="button">刷新组合实验</button></div>
           <article class="panel">
             <form id="portfolio-validation-form" class="research-form">

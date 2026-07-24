@@ -19,6 +19,8 @@ from autoquant.web.models import (
     FundamentalValidationFoldView,
     FundamentalValidationPhaseView,
     FundamentalValidationSummaryView,
+    LowVolatilityForwardProgressView,
+    LowVolatilityForwardSessionView,
     LowVolatilityValidationDetailView,
     LowVolatilityValidationFoldView,
     LowVolatilityValidationListItemView,
@@ -283,6 +285,39 @@ class FakeConsoleService:
                     fold_hash="3" * 64,
                 ),
             ),
+        )
+
+    async def low_volatility_forward_progress(
+        self,
+    ) -> LowVolatilityForwardProgressView:
+        session = LowVolatilityForwardSessionView(
+            binding_hash="6" * 64,
+            dataset_manifest_hash="7" * 64,
+            session_date=date(2026, 7, 23),
+            snapshot_hash="8" * 64,
+            snapshot_reference_date=date(2026, 7, 22),
+            instrument_count=300,
+            completed_at=datetime(
+                2026,
+                7,
+                24,
+                tzinfo=UTC,
+            ),
+        )
+        return LowVolatilityForwardProgressView(
+            spec_hash="9" * 64,
+            forward_start_date=date(2026, 7, 23),
+            safe_cutoff_date=date(2026, 7, 23),
+            minimum_forward_sessions=126,
+            minimum_paper_sessions=60,
+            observed_open_sessions=1,
+            completed_sessions=1,
+            completed_required_sessions=1,
+            remaining_required_sessions=125,
+            missing_session_dates=(),
+            calendar_conflict_dates=(),
+            status="collecting_forward_sessions",
+            sessions=(session,),
         )
 
     def _low_volatility_summary(
@@ -593,37 +628,45 @@ def test_low_volatility_validation_endpoints_are_authenticated_and_read_only() -
     app = create_app(_settings(), service=service)
 
     with TestClient(app) as client:
-        denied = client.get(
-            "/api/v1/low-volatility-validations"
-        )
+        denied = client.get("/api/v1/low-volatility-validations")
         listed = client.get(
             "/api/v1/low-volatility-validations",
             auth=_auth(),
         )
         detail = client.get(
-            (
-                "/api/v1/low-volatility-validations/"
-                f"{service.low_volatility_result_hash}"
-            ),
+            (f"/api/v1/low-volatility-validations/{service.low_volatility_result_hash}"),
             auth=_auth(),
         )
 
     assert denied.status_code == 401
     assert listed.status_code == 200
-    assert (
-        listed.json()["items"][0]["gate_failures"]
-        == ["train_test_gap"]
-    )
+    assert listed.json()["items"][0]["gate_failures"] == ["train_test_gap"]
     assert listed.json()["items"][0]["live_trading_locked"] is True
     assert detail.status_code == 200
     assert detail.json()["integrity_verified"] is True
-    assert (
-        detail.json()["summary"][
-            "benchmark_unresolved_position_count"
-        ]
-        == 1
-    )
+    assert detail.json()["summary"]["benchmark_unresolved_position_count"] == 1
     assert "approve" not in detail.text.casefold()
+
+
+def test_low_volatility_forward_progress_is_authenticated_and_locked() -> None:
+    app = create_app(_settings(), service=FakeConsoleService())
+
+    with TestClient(app) as client:
+        denied = client.get("/api/v1/low-volatility-forward-progress")
+        progress = client.get(
+            "/api/v1/low-volatility-forward-progress",
+            auth=_auth(),
+        )
+        research = client.get("/research", auth=_auth())
+
+    assert denied.status_code == 401
+    assert progress.status_code == 200
+    assert progress.json()["completed_required_sessions"] == 1
+    assert progress.json()["remaining_required_sessions"] == 125
+    assert progress.json()["paper_trading_unlocked"] is False
+    assert progress.json()["live_trading_locked"] is True
+    assert "approve" not in progress.text.casefold()
+    assert "low-volatility-forward-sessions-table" in research.text
 
 
 def test_trading_endpoint_is_explicitly_unavailable() -> None:

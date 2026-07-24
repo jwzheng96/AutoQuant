@@ -848,6 +848,13 @@ dataset manifest
 snapshot `28e2fe1da8855c67bb0503f25d39f6fbb093bcd1ebedf0c2b2f10a632640ed9b`. It is session 1
 of the required 126; live trading remains locked.
 
+The authenticated operator console exposes the same ledger read-only at
+`GET /api/v1/low-volatility-forward-progress` and on the research page. It reports the latest
+safe Shanghai cutoff, completed bindings, missing already-open sessions, calendar revisions,
+the remaining forward-session count, and the still-locked 60-session paper gate. At the first
+binding the verified state is `collecting_forward_sessions`, `1/126`, with no missing session
+or calendar conflict.
+
 ## Future-only low-volatility evidence correction
 
 After schema v34 is applied, freeze the methodology correction once:

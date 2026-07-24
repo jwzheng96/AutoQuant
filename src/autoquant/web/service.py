@@ -24,6 +24,7 @@ from autoquant.backtest.portfolio_validation import (
     PortfolioWalkForwardResult,
 )
 from autoquant.backtest.validation import WalkForwardConfig, WalkForwardResult
+from autoquant.clock import to_shanghai
 from autoquant.config import AppSettings
 from autoquant.errors import AutoQuantError, PersistenceUnavailableError
 from autoquant.execution.control import KillSwitchReason
@@ -56,6 +57,12 @@ from autoquant.web.fundamental_validation_store import (
     FundamentalValidationRecord,
     PostgresFundamentalValidationRepository,
 )
+from autoquant.web.low_volatility_forward_session_store import (
+    PostgresLowVolatilityForwardSessionRepository,
+)
+from autoquant.web.low_volatility_forward_store import (
+    PostgresLowVolatilityForwardEvidenceSpecRepository,
+)
 from autoquant.web.low_volatility_validation_store import (
     LowVolatilityValidationRecord,
     PostgresLowVolatilityValidationRepository,
@@ -71,6 +78,8 @@ from autoquant.web.models import (
     FundamentalValidationListItemView,
     FundamentalValidationPhaseView,
     FundamentalValidationSummaryView,
+    LowVolatilityForwardProgressView,
+    LowVolatilityForwardSessionView,
     LowVolatilityValidationDetailView,
     LowVolatilityValidationFoldView,
     LowVolatilityValidationListItemView,
@@ -215,6 +224,10 @@ class ConsoleServicePort(Protocol):
         self, result_hash: str
     ) -> LowVolatilityValidationDetailView: ...
 
+    async def low_volatility_forward_progress(
+        self,
+    ) -> LowVolatilityForwardProgressView: ...
+
     async def risk_status(self) -> RiskControlStatus: ...
 
     async def execution_status(self) -> PaperExecutionStatus: ...
@@ -258,6 +271,12 @@ class ConsoleService:
         low_volatility_validation_repository: (
             PostgresLowVolatilityValidationRepository | None
         ) = None,
+        low_volatility_forward_spec_repository: (
+            PostgresLowVolatilityForwardEvidenceSpecRepository | None
+        ) = None,
+        low_volatility_forward_session_repository: (
+            PostgresLowVolatilityForwardSessionRepository | None
+        ) = None,
         universe_repository: (PostgresResearchUniverseRepository | None) = None,
         risk_repository: PostgresRiskDecisionRepository | None = None,
         execution_repository: PostgresPaperExecutionRepository | None = None,
@@ -292,9 +311,15 @@ class ConsoleService:
         self._portfolio_validation_runner = portfolio_validation_runner
         self._validation_campaigns = validation_campaign_repository
         self._fundamental_validations = fundamental_validation_repository
-        self._low_volatility_validations = (
-            low_volatility_validation_repository
-        )
+        self._low_volatility_validations = low_volatility_validation_repository
+        if (low_volatility_forward_spec_repository is None) != (
+            low_volatility_forward_session_repository is None
+        ):
+            raise ValueError(
+                "forward evidence and session repositories must be configured together"
+            )
+        self._low_volatility_forward_specs = low_volatility_forward_spec_repository
+        self._low_volatility_forward_sessions = low_volatility_forward_session_repository
         self._universes = universe_repository
         self._risk = risk_repository
         self._execution = execution_repository
@@ -469,6 +494,10 @@ class ConsoleService:
             await self._fundamental_validations.close()
         if self._low_volatility_validations is not None:
             await self._low_volatility_validations.close()
+        if self._low_volatility_forward_sessions is not None:
+            await self._low_volatility_forward_sessions.close()
+        if self._low_volatility_forward_specs is not None:
+            await self._low_volatility_forward_specs.close()
         if self._universes is not None:
             await self._universes.close()
         if self._risk is not None:
@@ -773,22 +802,15 @@ class ConsoleService:
         records = await self._low_volatility_validations.list_recent(
             limit=limit,
         )
-        return tuple(
-            _low_volatility_validation_summary(value)
-            for value in records
-        )
+        return tuple(_low_volatility_validation_summary(value) for value in records)
 
     async def low_volatility_validation_detail(
         self,
         result_hash: str,
     ) -> LowVolatilityValidationDetailView:
         if self._low_volatility_validations is None:
-            raise LookupError(
-                "low-volatility validation service is unavailable"
-            )
-        record = await self._low_volatility_validations.read(
-            result_hash
-        )
+            raise LookupError("low-volatility validation service is unavailable")
+        record = await self._low_volatility_validations.read(result_hash)
         return LowVolatilityValidationDetailView(
             summary=_low_volatility_validation_summary(record),
             folds=tuple(
@@ -798,18 +820,87 @@ class ConsoleService:
                     train_end=fold.train_end,
                     test_start=fold.test_start,
                     test_end=fold.test_end,
-                    training=_low_volatility_validation_phase(
-                        fold.training_result
-                    ),
-                    test=_low_volatility_validation_phase(
-                        fold.test_result
-                    ),
-                    benchmark=_low_volatility_validation_phase(
-                        fold.benchmark_result
-                    ),
+                    training=_low_volatility_validation_phase(fold.training_result),
+                    test=_low_volatility_validation_phase(fold.test_result),
+                    benchmark=_low_volatility_validation_phase(fold.benchmark_result),
                     fold_hash=fold.fold_hash,
                 )
                 for fold in record.result.folds
+            ),
+        )
+
+    async def low_volatility_forward_progress(
+        self,
+    ) -> LowVolatilityForwardProgressView:
+        if (
+            self._low_volatility_forward_specs is None
+            or self._low_volatility_forward_sessions is None
+        ):
+            raise LookupError("low-volatility forward progress is unavailable")
+        specification = await self._low_volatility_forward_specs.latest()
+        if specification is None:
+            raise LookupError("low-volatility forward specification does not exist")
+        spec = specification.spec
+        records = await self._low_volatility_forward_sessions.list_for_spec(
+            forward_spec_hash=spec.spec_hash,
+        )
+        now = self._now()
+        safe_cutoff = to_shanghai(now).date() - timedelta(days=1)
+        calendar = (
+            ()
+            if safe_cutoff < spec.forward_start_date
+            else await self._market.query_sessions_as_of(
+                spec.forward_start_date,
+                safe_cutoff,
+                now,
+            )
+        )
+        open_dates = tuple(session.session_date for session in calendar if session.is_open)
+        required_window = open_dates[: spec.minimum_forward_sessions]
+        bound_dates = tuple(record.binding.session_date for record in records)
+        bound_set = set(bound_dates)
+        open_set = set(open_dates)
+        required_set = set(required_window)
+        missing = tuple(value for value in required_window if value not in bound_set)
+        conflicts = tuple(value for value in bound_dates if value not in open_set)
+        completed_required = len(bound_set.intersection(required_set))
+        if conflicts:
+            status = "calendar_conflict"
+        elif missing:
+            status = "backfill_required"
+        elif len(required_window) < (spec.minimum_forward_sessions):
+            status = "collecting_forward_sessions"
+        else:
+            status = "session_gate_complete_awaiting_evaluation"
+        return LowVolatilityForwardProgressView(
+            spec_hash=spec.spec_hash,
+            forward_start_date=spec.forward_start_date,
+            safe_cutoff_date=safe_cutoff,
+            minimum_forward_sessions=(spec.minimum_forward_sessions),
+            minimum_paper_sessions=spec.minimum_paper_sessions,
+            observed_open_sessions=len(open_dates),
+            completed_sessions=len(records),
+            completed_required_sessions=completed_required,
+            remaining_required_sessions=(spec.minimum_forward_sessions - completed_required),
+            missing_session_dates=missing,
+            calendar_conflict_dates=conflicts,
+            required_window_end=(
+                required_window[-1]
+                if len(required_window) == spec.minimum_forward_sessions
+                else None
+            ),
+            status=status,
+            sessions=tuple(
+                LowVolatilityForwardSessionView(
+                    binding_hash=record.binding.binding_hash,
+                    dataset_manifest_hash=(record.binding.dataset_manifest_hash),
+                    session_date=record.binding.session_date,
+                    snapshot_hash=(record.binding.snapshot_hash),
+                    snapshot_reference_date=(record.binding.snapshot_reference_date),
+                    instrument_count=len(record.binding.instruments),
+                    completed_at=record.completed_at,
+                )
+                for record in records
             ),
         )
 
@@ -1689,25 +1780,15 @@ def _low_volatility_validation_summary(
         fold_count=evidence.fold_count,
         oos_sessions=evidence.oos_sessions,
         compounded_oos_return=result.compounded_oos_return,
-        benchmark_compounded_oos_return=(
-            result.benchmark_compounded_oos_return
-        ),
+        benchmark_compounded_oos_return=(result.benchmark_compounded_oos_return),
         excess_oos_return=result.excess_oos_return,
         profitable_fold_rate=result.profitable_fold_rate,
         worst_oos_drawdown=result.worst_oos_drawdown,
         train_test_gap=result.train_test_gap,
-        strategy_rejected_order_count=(
-            result.strategy_rejected_order_count
-        ),
-        benchmark_rejected_order_count=(
-            result.benchmark_rejected_order_count
-        ),
-        strategy_unresolved_position_count=(
-            result.strategy_unresolved_position_count
-        ),
-        benchmark_unresolved_position_count=(
-            result.benchmark_unresolved_position_count
-        ),
+        strategy_rejected_order_count=(result.strategy_rejected_order_count),
+        benchmark_rejected_order_count=(result.benchmark_rejected_order_count),
+        strategy_unresolved_position_count=(result.strategy_unresolved_position_count),
+        benchmark_unresolved_position_count=(result.benchmark_unresolved_position_count),
         requested_by=record.requested_by,
         completed_at=record.completed_at,
     )
@@ -1721,12 +1802,9 @@ def _low_volatility_validation_phase(
         max_drawdown=result.max_drawdown,
         ending_equity=result.snapshots[-1].equity,
         rejected_order_count=sum(
-            value.state is ExecutionState.REJECTED
-            for value in result.reports
+            value.state is ExecutionState.REJECTED for value in result.reports
         ),
-        unresolved_position_count=len(
-            result.snapshots[-1].positions
-        ),
+        unresolved_position_count=len(result.snapshots[-1].positions),
         artifact_hash=backtest_artifact_hash(result),
     )
 

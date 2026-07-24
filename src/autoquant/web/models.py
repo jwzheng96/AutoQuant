@@ -536,9 +536,7 @@ class LowVolatilityValidationListItemView(BaseModel):
         value: datetime,
     ) -> datetime:
         if value.tzinfo is None or value.utcoffset() is None:
-            raise ValueError(
-                "low-volatility validation completion must be timezone-aware"
-            )
+            raise ValueError("low-volatility validation completion must be timezone-aware")
         return value.astimezone(UTC)
 
     @model_validator(mode="after")
@@ -548,15 +546,11 @@ class LowVolatilityValidationListItemView(BaseModel):
             "rejected",
             "insufficient",
         }:
-            raise ValueError(
-                "low-volatility validation item is inconsistent"
-            )
+            raise ValueError("low-volatility validation item is inconsistent")
         return self
 
 
-class LowVolatilityValidationPhaseView(
-    FundamentalValidationPhaseView
-):
+class LowVolatilityValidationPhaseView(FundamentalValidationPhaseView):
     pass
 
 
@@ -573,23 +567,14 @@ class LowVolatilityValidationFoldView(BaseModel):
 
     @model_validator(mode="after")
     def require_ordered_low_volatility_fold(self) -> Self:
-        if not (
-            self.train_start
-            <= self.train_end
-            < self.test_start
-            <= self.test_end
-        ):
-            raise ValueError(
-                "low-volatility validation fold intervals are invalid"
-            )
+        if not (self.train_start <= self.train_end < self.test_start <= self.test_end):
+            raise ValueError("low-volatility validation fold intervals are invalid")
         return self
 
 
 class LowVolatilityValidationDetailView(BaseModel):
     summary: LowVolatilityValidationListItemView
-    folds: tuple[LowVolatilityValidationFoldView, ...] = Field(
-        min_length=1
-    )
+    folds: tuple[LowVolatilityValidationFoldView, ...] = Field(min_length=1)
     integrity_verified: bool = True
 
     @model_validator(mode="after")
@@ -597,12 +582,86 @@ class LowVolatilityValidationDetailView(BaseModel):
         if (
             not self.integrity_verified
             or len(self.folds) != self.summary.fold_count
-            or tuple(value.sequence for value in self.folds)
-            != tuple(range(1, len(self.folds) + 1))
+            or tuple(value.sequence for value in self.folds) != tuple(range(1, len(self.folds) + 1))
         ):
-            raise ValueError(
-                "low-volatility validation detail is not verified"
-            )
+            raise ValueError("low-volatility validation detail is not verified")
+        return self
+
+
+class LowVolatilityForwardSessionView(BaseModel):
+    binding_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    dataset_manifest_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    session_date: date
+    snapshot_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    snapshot_reference_date: date
+    instrument_count: int = Field(ge=1, le=1000)
+    completed_at: datetime
+    live_trading_locked: bool = True
+
+    @field_validator("completed_at")
+    @classmethod
+    def require_aware_forward_session_completion(
+        cls,
+        value: datetime,
+    ) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("forward session completion must be timezone-aware")
+        return value.astimezone(UTC)
+
+    @model_validator(mode="after")
+    def require_prior_snapshot_and_lock(
+        self,
+    ) -> Self:
+        if self.snapshot_reference_date >= self.session_date or not self.live_trading_locked:
+            raise ValueError("forward session view is inconsistent")
+        return self
+
+
+class LowVolatilityForwardProgressView(BaseModel):
+    spec_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    forward_start_date: date
+    safe_cutoff_date: date
+    minimum_forward_sessions: int = Field(ge=1)
+    minimum_paper_sessions: int = Field(ge=1)
+    observed_open_sessions: int = Field(ge=0)
+    completed_sessions: int = Field(ge=0)
+    completed_required_sessions: int = Field(ge=0)
+    remaining_required_sessions: int = Field(ge=0)
+    missing_session_dates: tuple[date, ...]
+    calendar_conflict_dates: tuple[date, ...]
+    required_window_end: date | None = None
+    status: str
+    sessions: tuple[LowVolatilityForwardSessionView, ...]
+    historical_result_eligible_for_promotion: bool = False
+    paper_trading_unlocked: bool = False
+    live_trading_locked: bool = True
+
+    @model_validator(mode="after")
+    def require_forward_progress_consistency(
+        self,
+    ) -> Self:
+        session_dates = tuple(value.session_date for value in self.sessions)
+        if (
+            self.completed_sessions != len(self.sessions)
+            or session_dates != tuple(sorted(session_dates))
+            or len(set(session_dates)) != len(session_dates)
+            or self.completed_required_sessions > self.minimum_forward_sessions
+            or self.remaining_required_sessions
+            != self.minimum_forward_sessions - self.completed_required_sessions
+            or self.missing_session_dates != tuple(sorted(self.missing_session_dates))
+            or self.calendar_conflict_dates != tuple(sorted(self.calendar_conflict_dates))
+            or self.historical_result_eligible_for_promotion
+            or self.paper_trading_unlocked
+            or not self.live_trading_locked
+            or self.status
+            not in {
+                "backfill_required",
+                "calendar_conflict",
+                "collecting_forward_sessions",
+                "session_gate_complete_awaiting_evaluation",
+            }
+        ):
+            raise ValueError("low-volatility forward progress is inconsistent")
         return self
 
 

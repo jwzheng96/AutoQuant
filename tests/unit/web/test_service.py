@@ -76,8 +76,11 @@ def _service(
     strategy_registry: MagicMock | None = None,
     qmt_acceptances: MagicMock | None = None,
     qmt_sessions: MagicMock | None = None,
+    forward_specs: MagicMock | None = None,
+    forward_sessions: MagicMock | None = None,
+    market: MagicMock | None = None,
 ) -> ConsoleService:
-    market = MagicMock()
+    market = MagicMock() if market is None else market
     market.client = MagicMock()
     return ConsoleService(
         settings=AppSettings(_env_file=None, tushare_token="configured-token"),
@@ -99,6 +102,8 @@ def _service(
         strategy_registry=strategy_registry,
         qmt_acceptance_repository=qmt_acceptances,
         qmt_session_repository=qmt_sessions,
+        low_volatility_forward_spec_repository=(forward_specs),
+        low_volatility_forward_session_repository=(forward_sessions),
         now=lambda: NOW,
         poll_interval=0.01,
     )
@@ -150,14 +155,67 @@ def _portfolio_validation_experiment() -> PortfolioValidationExperiment:
         validator_id="cross_sectional_momentum_walk_forward_v1",
         request=PortfolioWalkForwardJobRequest(
             manifest_hash="a" * 64,
-            idempotency_key=(
-                "service-portfolio-validation-0001"
-            ),
+            idempotency_key=("service-portfolio-validation-0001"),
         ),
         requested_by="operator",
         created_at=NOW,
         started_at=NOW,
     )
+
+
+@pytest.mark.asyncio
+async def test_forward_progress_exposes_missing_sessions_and_keeps_locks() -> None:
+    specification = MagicMock()
+    specification.spec = MagicMock(
+        spec_hash="a" * 64,
+        forward_start_date=date(2025, 1, 1),
+        minimum_forward_sessions=126,
+        minimum_paper_sessions=60,
+    )
+    forward_specs = MagicMock()
+    forward_specs.latest = AsyncMock(return_value=specification)
+    binding = MagicMock(
+        binding_hash="b" * 64,
+        dataset_manifest_hash="c" * 64,
+        session_date=date(2025, 1, 1),
+        snapshot_hash="d" * 64,
+        snapshot_reference_date=date(2024, 12, 31),
+        instruments=("000001.XSHE",),
+    )
+    forward_sessions = MagicMock()
+    forward_sessions.list_for_spec = AsyncMock(
+        return_value=(MagicMock(binding=binding, completed_at=NOW),)
+    )
+    market = MagicMock()
+    market.query_sessions_as_of = AsyncMock(
+        return_value=(
+            MagicMock(
+                session_date=date(2025, 1, 1),
+                is_open=True,
+            ),
+            MagicMock(
+                session_date=date(2025, 1, 2),
+                is_open=True,
+            ),
+        )
+    )
+    service = _service(
+        operator=MagicMock(),
+        control=MagicMock(),
+        runner=AsyncMock(),
+        forward_specs=forward_specs,
+        forward_sessions=forward_sessions,
+        market=market,
+    )
+
+    progress = await service.low_volatility_forward_progress()
+
+    assert progress.status == "backfill_required"
+    assert progress.completed_required_sessions == 1
+    assert progress.remaining_required_sessions == 125
+    assert progress.missing_session_dates == (date(2025, 1, 2),)
+    assert progress.paper_trading_unlocked is False
+    assert progress.live_trading_locked is True
 
 
 @pytest.mark.asyncio
@@ -347,9 +405,7 @@ async def test_strategy_status_exposes_portfolio_components() -> None:
             tuple(
                 PortfolioOosComponentEvidence(
                     experiment_id=component.experiment_id,
-                    validation_result_hash=(
-                        component.validation_result_hash
-                    ),
+                    validation_result_hash=(component.validation_result_hash),
                     instrument=component.instrument,
                     allocation=component.allocation,
                     folds=tuple(
@@ -428,9 +484,7 @@ async def test_strategy_status_exposes_portfolio_components() -> None:
 @pytest.mark.asyncio
 async def test_strategy_registry_recovery_failure_aborts_startup() -> None:
     registry = MagicMock()
-    registry.active = AsyncMock(
-        side_effect=PersistenceUnavailableError("strategy chain mismatch")
-    )
+    registry.active = AsyncMock(side_effect=PersistenceUnavailableError("strategy chain mismatch"))
     controls = MagicMock()
     controls.ensure_fail_closed = AsyncMock()
     controls.activate = AsyncMock()
@@ -465,9 +519,7 @@ async def test_qmt_status_reports_fresh_redacted_evidence_and_host_blockers() ->
     sessions = MagicMock()
     sessions.active_session_ids = AsyncMock(return_value=())
     controls = MagicMock()
-    controls.replay = AsyncMock(
-        return_value=MagicMock(active=True)
-    )
+    controls.replay = AsyncMock(return_value=MagicMock(active=True))
     service = _service(
         operator=MagicMock(),
         control=MagicMock(),
@@ -787,16 +839,12 @@ async def test_portfolio_validation_worker_retries_and_audits_hashes() -> None:
     runner = MagicMock()
     runner.run = AsyncMock(
         side_effect=(
-            PersistenceUnavailableError(
-                "temporary portfolio dependency failure"
-            ),
+            PersistenceUnavailableError("temporary portfolio dependency failure"),
             result,
         )
     )
     control = MagicMock()
-    control.append_audit_event = AsyncMock(
-        return_value="d" * 64
-    )
+    control.append_audit_event = AsyncMock(return_value="d" * 64)
     service = _service(
         operator=MagicMock(),
         control=control,
