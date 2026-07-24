@@ -18,6 +18,7 @@ from autoquant.errors import (
 )
 from autoquant.operations import (
     _month_intervals,
+    _next_low_volatility_forward_session,
     _RecyclingDailyDatasetReader,
     _validate_campaign_dataset,
     approve_paper_sma_strategy,
@@ -47,6 +48,39 @@ def test_universe_backfill_months_are_bounded_and_exact() -> None:
         _month_intervals(
             date(2026, 1, 2),
             date(2026, 2, 1),
+        )
+
+
+def test_forward_cycle_selects_earliest_missing_required_session() -> None:
+    open_dates = tuple(date(2026, 7, day) for day in (23, 24, 27, 28))
+
+    assert _next_low_volatility_forward_session(
+        open_dates=open_dates,
+        bound_dates=(
+            date(2026, 7, 23),
+            date(2026, 7, 27),
+        ),
+        minimum_sessions=3,
+    ) == date(2026, 7, 24)
+    assert (
+        _next_low_volatility_forward_session(
+            open_dates=open_dates,
+            bound_dates=open_dates[:3],
+            minimum_sessions=3,
+        )
+        is None
+    )
+
+
+def test_forward_cycle_rejects_ambiguous_session_order() -> None:
+    with pytest.raises(ValueError, match="session inputs"):
+        _next_low_volatility_forward_session(
+            open_dates=(
+                date(2026, 7, 24),
+                date(2026, 7, 23),
+            ),
+            bound_dates=(),
+            minimum_sessions=126,
         )
 
 
@@ -172,12 +206,8 @@ async def test_daily_dataset_reader_recycles_clickhouse_connections() -> None:
 
     assert connect.await_count == 2
     market_one.client.close.assert_awaited_once()
-    market_one.client.command.assert_awaited_once_with(
-        "SYSTEM JEMALLOC PURGE"
-    )
-    market_two.client.command.assert_awaited_once_with(
-        "SYSTEM JEMALLOC PURGE"
-    )
+    market_one.client.command.assert_awaited_once_with("SYSTEM JEMALLOC PURGE")
+    market_two.client.command.assert_awaited_once_with("SYSTEM JEMALLOC PURGE")
     market_two.client.close.assert_awaited_once()
 
 
@@ -190,9 +220,7 @@ async def test_daily_dataset_reader_drops_failed_clickhouse_connection() -> None
     market_two.client.close = AsyncMock()
     market_two.client.command = AsyncMock()
     reader_one = MagicMock()
-    reader_one.query = AsyncMock(
-        side_effect=PersistenceUnavailableError("malformed response")
-    )
+    reader_one.query = AsyncMock(side_effect=PersistenceUnavailableError("malformed response"))
     reader_two = MagicMock()
     reader_two.query = AsyncMock(return_value="recovered")
     with (
@@ -220,12 +248,8 @@ async def test_daily_dataset_reader_drops_failed_clickhouse_connection() -> None
 
     assert connect.await_count == 2
     market_one.client.close.assert_awaited_once()
-    market_one.client.command.assert_awaited_once_with(
-        "SYSTEM JEMALLOC PURGE"
-    )
-    market_two.client.command.assert_awaited_once_with(
-        "SYSTEM JEMALLOC PURGE"
-    )
+    market_one.client.command.assert_awaited_once_with("SYSTEM JEMALLOC PURGE")
+    market_two.client.command.assert_awaited_once_with("SYSTEM JEMALLOC PURGE")
     market_two.client.close.assert_awaited_once()
 
 
@@ -236,9 +260,7 @@ async def test_approval_stops_before_research_when_kill_switch_is_inactive() -> 
     control = MagicMock()
     control.close = AsyncMock()
     execution_controls = MagicMock()
-    execution_controls.replay = AsyncMock(
-        return_value=MagicMock(active=False)
-    )
+    execution_controls.replay = AsyncMock(return_value=MagicMock(active=False))
     execution_controls.close = AsyncMock()
     validations = MagicMock()
     validations.detail = AsyncMock()

@@ -60,6 +60,7 @@ from autoquant.operations import (
     run_fundamental_data_backfill,
     run_fundamental_ingestion,
     run_fundamental_validation,
+    run_low_volatility_forward_cycle,
     run_low_volatility_validation,
     run_qmt_readonly_acceptance,
     run_research_data_campaign,
@@ -1194,6 +1195,47 @@ def low_volatility_forward_session_finalize(
     except (AutoQuantError, LookupError, ValueError):
         _fail("low-volatility forward session finalization failed")
     _emit(payload)
+
+
+@app.command("low-volatility-forward-cycle-run")
+def low_volatility_forward_cycle_run(
+    forward_spec_hash: Annotated[
+        str,
+        typer.Option("--forward-spec-hash"),
+    ],
+    requested_by: Annotated[
+        str,
+        typer.Option("--requested-by"),
+    ],
+    max_items: Annotated[
+        int,
+        typer.Option("--max-items", min=1, max=25),
+    ] = 10,
+    pause_seconds: Annotated[
+        str,
+        typer.Option("--pause-seconds"),
+    ] = "1.25",
+) -> None:
+    """Advance one bounded future-only evidence cycle."""
+
+    try:
+        payload = asyncio.run(
+            run_low_volatility_forward_cycle(
+                _settings(),
+                forward_spec_hash=forward_spec_hash,
+                requested_by=requested_by,
+                max_items=max_items,
+                pause_seconds=_parse_decimal(
+                    pause_seconds,
+                    name="pause-seconds",
+                ),
+            )
+        )
+    except (AutoQuantError, LookupError, ValueError):
+        _fail("low-volatility forward cycle failed")
+    _emit(payload)
+    if payload["status"] == "failed":
+        raise typer.Exit(code=2)
 
 
 @app.command("fundamental-data-run")

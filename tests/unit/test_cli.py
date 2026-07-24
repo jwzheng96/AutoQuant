@@ -980,6 +980,45 @@ def test_low_volatility_forward_session_finalize_is_redacted() -> None:
     finalization.assert_awaited_once()
 
 
+def test_low_volatility_forward_cycle_is_bounded_and_redacted() -> None:
+    payload = {
+        "completed_required_sessions": 1,
+        "forward_spec_hash": "a" * 64,
+        "live_trading_locked": True,
+        "minimum_forward_sessions": 126,
+        "remaining_required_sessions": 125,
+        "safe_cutoff_date": "2026-07-23",
+        "status": "waiting_for_completed_session",
+    }
+    cycle = AsyncMock(return_value=payload)
+    with patch(
+        "autoquant.cli.run_low_volatility_forward_cycle",
+        new=cycle,
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "low-volatility-forward-cycle-run",
+                "--forward-spec-hash",
+                "a" * 64,
+                "--requested-by",
+                "operator",
+                "--max-items",
+                "10",
+                "--pause-seconds",
+                "1.25",
+            ],
+            env={"AQ_POSTGRES_DSN": ("postgresql+asyncpg://sensitive")},
+        )
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == payload
+    assert "sensitive" not in result.stdout
+    cycle.assert_awaited_once()
+    assert cycle.await_args.kwargs["max_items"] == 10
+    assert cycle.await_args.kwargs["pause_seconds"] == Decimal("1.25")
+
+
 def test_research_input_plan_compilation_stays_live_locked_and_redacted() -> None:
     payload = {
         "activation_rule": "session_date>snapshot.reference_date",

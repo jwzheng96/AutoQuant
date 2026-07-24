@@ -60,6 +60,9 @@ forward sessions).
 The authenticated research console and
 `GET /api/v1/low-volatility-forward-progress` expose this ledger, safe cutoff, missing sessions
 and calendar conflicts read-only while both paper and live trading remain locked.
+The bounded `low-volatility-forward-cycle-run` command advances only the earliest missing
+eligible session, automatically freezes a fully completed session, and stops fail-closed on
+calendar conflicts or terminal data failures.
 
 The repository also contains a deterministic A-share research ledger with versioned board
 rules, T+1 sellability, lot-size validation, conservative daily-open fills, liquidity caps,

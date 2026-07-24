@@ -1594,6 +1594,129 @@ async def finalize_low_volatility_forward_session(
         await forward_specs.close()
 
 
+async def run_low_volatility_forward_cycle(
+    settings: AppSettings,
+    *,
+    forward_spec_hash: str,
+    requested_by: str,
+    max_items: int,
+    pause_seconds: Decimal,
+) -> dict[str, object]:
+    """Advance the earliest missing completed forward session once."""
+
+    if settings.live_trading_enabled:
+        raise MissingCapabilityError("forward cycle requires live trading locked")
+    if not requested_by.strip() or requested_by != requested_by.strip() or len(requested_by) > 128:
+        raise ValueError("requested_by must contain 1-128 trimmed characters")
+    if max_items < 1 or max_items > 25:
+        raise ValueError("max_items must be between 1 and 25")
+    if pause_seconds < 0 or pause_seconds > Decimal("60"):
+        raise ValueError("pause_seconds must be between 0 and 60")
+    postgres_dsn = configured_dsn(
+        settings.postgres_dsn,
+        capability="PostgreSQL",
+    )
+    forward_specs = PostgresLowVolatilityForwardEvidenceSpecRepository.connect(dsn=postgres_dsn)
+    sessions = PostgresLowVolatilityForwardSessionRepository.connect(dsn=postgres_dsn)
+    market: ClickHouseDailyRepository | None = None
+    try:
+        forward = (await forward_specs.read(forward_spec_hash)).spec
+        records = await sessions.list_for_spec(forward_spec_hash=forward.spec_hash)
+        now = datetime.now(UTC)
+        safe_cutoff = to_shanghai(now).date() - timedelta(days=1)
+        market = await ClickHouseDailyRepository.connect(
+            dsn=configured_dsn(
+                settings.clickhouse_dsn,
+                capability="ClickHouse",
+            ),
+            source="tushare",
+        )
+        calendar = (
+            ()
+            if safe_cutoff < forward.forward_start_date
+            else await market.query_sessions_as_of(
+                forward.forward_start_date,
+                safe_cutoff,
+                now,
+            )
+        )
+        open_dates = tuple(value.session_date for value in calendar if value.is_open)
+        bound_dates = tuple(value.binding.session_date for value in records)
+        conflicts = tuple(value for value in bound_dates if value not in set(open_dates))
+        if conflicts:
+            raise ValueError("forward cycle found a calendar conflict")
+        target = _next_low_volatility_forward_session(
+            open_dates=open_dates,
+            bound_dates=bound_dates,
+            minimum_sessions=(forward.minimum_forward_sessions),
+        )
+        completed_required = len(
+            set(bound_dates).intersection(open_dates[: forward.minimum_forward_sessions])
+        )
+        base: dict[str, object] = {
+            "completed_required_sessions": (completed_required),
+            "forward_spec_hash": forward.spec_hash,
+            "live_trading_locked": True,
+            "minimum_forward_sessions": (forward.minimum_forward_sessions),
+            "remaining_required_sessions": (forward.minimum_forward_sessions - completed_required),
+            "safe_cutoff_date": safe_cutoff.isoformat(),
+        }
+        if target is None:
+            base["status"] = (
+                "session_gate_complete_awaiting_evaluation"
+                if len(open_dates) >= forward.minimum_forward_sessions
+                else "waiting_for_completed_session"
+            )
+            return base
+    finally:
+        if market is not None:
+            await market.client.close()
+        await sessions.close()
+        await forward_specs.close()
+
+    creation = await create_low_volatility_forward_session_campaign(
+        settings,
+        forward_spec_hash=forward_spec_hash,
+        session_date=target,
+        requested_by=requested_by,
+    )
+    campaign_hash = str(creation["campaign_hash"])
+    batch = await run_research_data_campaign(
+        settings,
+        campaign_hash=campaign_hash,
+        max_items=max_items,
+        pause_seconds=pause_seconds,
+    )
+    payload = {
+        **base,
+        "campaign_hash": campaign_hash,
+        "item_counts": batch["item_counts"],
+        "manifest_hash": batch["manifest_hash"],
+        "session_date": target.isoformat(),
+        "status": "batch_progress",
+    }
+    if batch["status"] == "completed" and isinstance(batch["manifest_hash"], str):
+        frozen = await finalize_low_volatility_forward_session(
+            settings,
+            forward_spec_hash=forward_spec_hash,
+            dataset_manifest_hash=batch["manifest_hash"],
+            requested_by=requested_by,
+        )
+        payload.update(
+            {
+                "binding_hash": frozen["binding_hash"],
+                "completed_required_sessions": (completed_required + 1),
+                "remaining_required_sessions": (
+                    forward.minimum_forward_sessions - completed_required - 1
+                ),
+                "status": "session_frozen",
+            }
+        )
+    elif batch["status"] == "failed":
+        payload["status"] = "failed"
+    return payload
+
+
 async def inspect_fundamental_data_backfill(
     settings: AppSettings,
     *,
@@ -2683,6 +2806,27 @@ def _research_data_campaign_payload(
         "start_date": status.spec.start_date.isoformat(),
         "status": status.status,
     }
+
+
+def _next_low_volatility_forward_session(
+    *,
+    open_dates: tuple[date, ...],
+    bound_dates: tuple[date, ...],
+    minimum_sessions: int,
+) -> date | None:
+    if (
+        minimum_sessions < 1
+        or open_dates != tuple(sorted(open_dates))
+        or len(set(open_dates)) != len(open_dates)
+        or bound_dates != tuple(sorted(bound_dates))
+        or len(set(bound_dates)) != len(bound_dates)
+    ):
+        raise ValueError("forward cycle session inputs are invalid")
+    bound = set(bound_dates)
+    return next(
+        (value for value in open_dates[:minimum_sessions] if value not in bound),
+        None,
+    )
 
 
 async def create_validation_campaign(
