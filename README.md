@@ -75,6 +75,10 @@ and broker-order binding as three append-only ledgers. A Windows gateway can rec
 client/request/broker identity after restart, while unknown or conflicting callbacks fail closed.
 Request and broker identifiers are scoped by QMT session-lease generation, so vendor counters may
 restart without ever joining a new process callback to an old process order.
+Candidate reservation, asynchronous broker-order binding and restart recovery also require the
+current lease bearer token and recheck the active holder/generation against database time while
+holding the lease row. A released, expired or superseded process therefore cannot append or
+recover broker identity, even if it retained the old session metadata.
 The ledger contains no XtQuant mutation call and every stored candidate still commits
 `broker_mutation_allowed=false`.
 

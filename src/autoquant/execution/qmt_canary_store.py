@@ -4,6 +4,7 @@ import json
 import re
 from datetime import datetime
 
+from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.engine import RowMapping
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
@@ -19,6 +20,7 @@ from autoquant.execution.qmt_canary_contract import (
     QmtOrderCorrelation,
     QmtOrderCorrelationBook,
 )
+from autoquant.execution.qmt_session_store import qmt_session_token_hash
 
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 
@@ -89,11 +91,13 @@ class PostgresQmtCanaryOrderLedger:
         self,
         candidate: QmtCanaryOrderCandidate,
         *,
+        lease_token: SecretStr,
         async_request_id: int,
         reserved_at: datetime,
     ) -> QmtOrderCorrelation:
         if not isinstance(candidate, QmtCanaryOrderCandidate):
             raise TypeError("candidate must be QmtCanaryOrderCandidate")
+        token_hash = _lease_token_hash(lease_token)
         candidate.require_current(now=reserved_at)
         proposed = QmtOrderCorrelation(
             candidate_hash=candidate.candidate_hash,
@@ -118,7 +122,7 @@ class PostgresQmtCanaryOrderLedger:
                         await connection.execute(
                             text(
                                 f"""
-                                SELECT *
+                                SELECT *, clock_timestamp() AS observed_at
                                 FROM {self._schema}.qmt_session_leases
                                 WHERE session_id = :qmt_session_id
                                 FOR SHARE
@@ -133,11 +137,13 @@ class PostgresQmtCanaryOrderLedger:
                 if not _active_lease_matches(
                     lease_row,
                     candidate=candidate,
-                    reserved_at=proposed.reserved_at,
+                    token_hash=token_hash,
                 ):
                     raise QmtSessionLeaseLostError(
-                        "QMT candidate requires its matching active session lease"
+                        "QMT candidate requires its matching active bearer lease"
                     )
+                assert lease_row is not None
+                candidate.require_current(now=lease_row["observed_at"])
                 candidate_rows = (
                     (
                         await connection.execute(
@@ -292,6 +298,7 @@ class PostgresQmtCanaryOrderLedger:
         gateway_holder_id: str,
         qmt_session_id: int,
         qmt_lease_generation: int,
+        lease_token: SecretStr,
         async_request_id: int,
         broker_order_id: str,
         bound_at: datetime,
@@ -301,6 +308,7 @@ class PostgresQmtCanaryOrderLedger:
             qmt_session_id=qmt_session_id,
             qmt_lease_generation=qmt_lease_generation,
         )
+        token_hash = _lease_token_hash(lease_token)
         try:
             async with self._engine.begin() as connection:
                 await connection.execute(
@@ -312,6 +320,32 @@ class PostgresQmtCanaryOrderLedger:
                         )
                     },
                 )
+                lease_row = (
+                    (
+                        await connection.execute(
+                            text(
+                                f"""
+                                SELECT *, clock_timestamp() AS observed_at
+                                FROM {self._schema}.qmt_session_leases
+                                WHERE session_id = :qmt_session_id
+                                FOR SHARE
+                                """
+                            ),
+                            {"qmt_session_id": qmt_session_id},
+                        )
+                    )
+                    .mappings()
+                    .one_or_none()
+                )
+                if not _active_scope_lease_matches(
+                    lease_row,
+                    gateway_holder_id=gateway_holder_id,
+                    qmt_lease_generation=qmt_lease_generation,
+                    token_hash=token_hash,
+                ):
+                    raise QmtSessionLeaseLostError(
+                        "QMT order binding requires its matching active bearer lease"
+                    )
                 reservation_row = (
                     (
                         await connection.execute(
@@ -444,7 +478,12 @@ class PostgresQmtCanaryOrderLedger:
                     "stored QMT order binding failed integrity verification"
                 )
             return stored
-        except (TypeError, ValueError, BrokerStateUnknownError):
+        except (
+            TypeError,
+            ValueError,
+            BrokerStateUnknownError,
+            QmtSessionLeaseLostError,
+        ):
             raise
         except PersistenceUnavailableError:
             raise
@@ -458,6 +497,7 @@ class PostgresQmtCanaryOrderLedger:
         gateway_holder_id: str,
         qmt_session_id: int,
         qmt_lease_generation: int,
+        lease_token: SecretStr,
     ) -> QmtOrderCorrelationBook:
         _require_nonblank(account_id, name="QMT canary account_id")
         _require_scope(
@@ -465,8 +505,35 @@ class PostgresQmtCanaryOrderLedger:
             qmt_session_id=qmt_session_id,
             qmt_lease_generation=qmt_lease_generation,
         )
+        token_hash = _lease_token_hash(lease_token)
         try:
-            async with self._engine.connect() as connection:
+            async with self._engine.begin() as connection:
+                lease_row = (
+                    (
+                        await connection.execute(
+                            text(
+                                f"""
+                                SELECT *, clock_timestamp() AS observed_at
+                                FROM {self._schema}.qmt_session_leases
+                                WHERE session_id = :qmt_session_id
+                                FOR SHARE
+                                """
+                            ),
+                            {"qmt_session_id": qmt_session_id},
+                        )
+                    )
+                    .mappings()
+                    .one_or_none()
+                )
+                if not _active_scope_lease_matches(
+                    lease_row,
+                    gateway_holder_id=gateway_holder_id,
+                    qmt_lease_generation=qmt_lease_generation,
+                    token_hash=token_hash,
+                ):
+                    raise QmtSessionLeaseLostError(
+                        "QMT correlation recovery requires its matching active bearer lease"
+                    )
                 rows = (
                     (
                         await connection.execute(
@@ -515,7 +582,12 @@ class PostgresQmtCanaryOrderLedger:
                 )
             correlations = tuple(_restored_from_row(row) for row in rows)
             return QmtOrderCorrelationBook.restore(correlations)
-        except (TypeError, ValueError, BrokerStateUnknownError):
+        except (
+            TypeError,
+            ValueError,
+            BrokerStateUnknownError,
+            QmtSessionLeaseLostError,
+        ):
             raise
         except Exception:
             raise PersistenceUnavailableError("QMT order correlation recovery failed") from None
@@ -565,17 +637,41 @@ def _active_lease_matches(
     row: RowMapping | None,
     *,
     candidate: QmtCanaryOrderCandidate,
-    reserved_at: datetime,
+    token_hash: str,
 ) -> bool:
     return bool(
         row is not None
         and int(row["session_id"]) == candidate.qmt_session_id
         and str(row["holder_id"]) == candidate.gateway_holder_id
+        and str(row["token_hash"]) == token_hash
         and int(row["generation"]) == candidate.qmt_lease_generation
         and row["released_at"] is None
         and row["acquired_at"] <= candidate.created_at
-        and row["expires_at"] > reserved_at
+        and row["expires_at"] > row["observed_at"]
     )
+
+
+def _active_scope_lease_matches(
+    row: RowMapping | None,
+    *,
+    gateway_holder_id: str,
+    qmt_lease_generation: int,
+    token_hash: str,
+) -> bool:
+    return bool(
+        row is not None
+        and str(row["holder_id"]) == gateway_holder_id
+        and str(row["token_hash"]) == token_hash
+        and int(row["generation"]) == qmt_lease_generation
+        and row["released_at"] is None
+        and row["expires_at"] > row["observed_at"]
+    )
+
+
+def _lease_token_hash(lease_token: SecretStr) -> str:
+    if not isinstance(lease_token, SecretStr):
+        raise TypeError("lease_token must be SecretStr")
+    return qmt_session_token_hash(lease_token)
 
 
 def _correlation_parameters(

@@ -30,7 +30,6 @@ from autoquant.risk.models import (
 )
 
 POSTGRES_DSN = os.environ.get("AQ_POSTGRES_DSN", "").strip()
-NOW = datetime(2026, 7, 23, 1, tzinfo=UTC)
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.skipif(
@@ -44,21 +43,22 @@ def _candidate(
     *,
     client_order_id: str = "canary-order-0001",
     qmt_lease_generation: int = 1,
-    created_at: datetime = NOW,
+    created_at: datetime | None = None,
 ) -> QmtCanaryOrderCandidate:
+    instant = datetime.now(UTC) if created_at is None else created_at
     order = ProposedOrder(
         client_order_id=client_order_id,
         instrument="600000.XSHG",
         side=OrderSide.BUY,
         quantity=100,
-        submitted_at=created_at - timedelta(seconds=1),
+        submitted_at=instant - timedelta(seconds=1),
         limit_price=Decimal("10"),
     )
     decision = RiskDecision(
         account_id="canary-account",
         mode=ExecutionMode.LIVE,
         order=order,
-        evaluated_at=created_at - timedelta(seconds=1),
+        evaluated_at=instant - timedelta(seconds=1),
         state=RiskDecisionState.ACCEPTED,
         violations=(),
         policy_hash="b" * 64,
@@ -84,8 +84,8 @@ def _candidate(
         qmt_acceptance_hash="f" * 64,
         reconciliation_report_hash="1" * 64,
         maximum_order_notional=Decimal("2000"),
-        created_at=created_at,
-        valid_until=created_at + timedelta(seconds=30),
+        created_at=instant,
+        valid_until=instant + timedelta(seconds=30),
     )
 
 
@@ -128,7 +128,7 @@ async def ledger_fixture() -> AsyncIterator[
             session_id=20260723,
             holder_id="windows-qmt-canary-01",
             token=lease_token,
-            now=NOW - timedelta(seconds=2),
+            now=datetime.now(UTC) - timedelta(seconds=2),
             ttl=timedelta(minutes=2),
         )
         yield ledger, leases, lease_token, engine, schema
@@ -159,81 +159,101 @@ async def test_qmt_canary_ledger_is_idempotent_and_restart_recoverable(
     ],
 ) -> None:
     ledger, leases, lease_token, _, schema = ledger_fixture
-    candidate = _candidate()
+    now = datetime.now(UTC)
+    candidate = _candidate(created_at=now)
     reserved = await ledger.reserve(
         candidate,
+        lease_token=lease_token,
         async_request_id=17,
-        reserved_at=NOW + timedelta(seconds=1),
+        reserved_at=now + timedelta(seconds=1),
     )
     repeated = await ledger.reserve(
         candidate,
+        lease_token=lease_token,
         async_request_id=17,
-        reserved_at=NOW + timedelta(seconds=1),
+        reserved_at=now + timedelta(seconds=1),
     )
     bound = await ledger.bind(
         gateway_holder_id=candidate.gateway_holder_id,
         qmt_session_id=candidate.qmt_session_id,
         qmt_lease_generation=candidate.qmt_lease_generation,
+        lease_token=lease_token,
         async_request_id=17,
         broker_order_id="88001",
-        bound_at=NOW + timedelta(seconds=2),
+        bound_at=now + timedelta(seconds=2),
     )
     repeated_binding = await ledger.bind(
         gateway_holder_id=candidate.gateway_holder_id,
         qmt_session_id=candidate.qmt_session_id,
         qmt_lease_generation=candidate.qmt_lease_generation,
+        lease_token=lease_token,
         async_request_id=17,
         broker_order_id="88001",
-        bound_at=NOW + timedelta(seconds=2),
-    )
-    await leases.release(
-        session_id=candidate.qmt_session_id,
-        holder_id=candidate.gateway_holder_id,
-        token=lease_token,
-        now=NOW + timedelta(seconds=3),
-    )
-    next_lease = await leases.acquire(
-        session_id=candidate.qmt_session_id,
-        holder_id=candidate.gateway_holder_id,
-        token=lease_token,
-        now=NOW + timedelta(seconds=4),
-        ttl=timedelta(minutes=2),
-    )
-    next_generation = _candidate(
-        client_order_id="canary-order-0002",
-        qmt_lease_generation=next_lease.generation,
-        created_at=NOW + timedelta(seconds=4),
-    )
-    await ledger.reserve(
-        next_generation,
-        async_request_id=17,
-        reserved_at=NOW + timedelta(seconds=5),
-    )
-    await ledger.bind(
-        gateway_holder_id=next_generation.gateway_holder_id,
-        qmt_session_id=next_generation.qmt_session_id,
-        qmt_lease_generation=next_generation.qmt_lease_generation,
-        async_request_id=17,
-        broker_order_id="88001",
-        bound_at=NOW + timedelta(seconds=6),
+        bound_at=now + timedelta(seconds=2),
     )
     restarted = PostgresQmtCanaryOrderLedger.connect(
         dsn=POSTGRES_DSN,
         schema=schema,
     )
+    restored = await restarted.restore_book(
+        account_id=candidate.account_id,
+        gateway_holder_id=candidate.gateway_holder_id,
+        qmt_session_id=candidate.qmt_session_id,
+        qmt_lease_generation=candidate.qmt_lease_generation,
+        lease_token=lease_token,
+    )
+    released_at = datetime.now(UTC)
+    await leases.release(
+        session_id=candidate.qmt_session_id,
+        holder_id=candidate.gateway_holder_id,
+        token=lease_token,
+        now=released_at,
+    )
+    reacquired_at = datetime.now(UTC)
+    next_lease = await leases.acquire(
+        session_id=candidate.qmt_session_id,
+        holder_id=candidate.gateway_holder_id,
+        token=lease_token,
+        now=reacquired_at,
+        ttl=timedelta(minutes=2),
+    )
+    next_created_at = datetime.now(UTC)
+    next_generation = _candidate(
+        client_order_id="canary-order-0002",
+        qmt_lease_generation=next_lease.generation,
+        created_at=next_created_at,
+    )
+    await ledger.reserve(
+        next_generation,
+        lease_token=lease_token,
+        async_request_id=17,
+        reserved_at=next_created_at,
+    )
+    await ledger.bind(
+        gateway_holder_id=next_generation.gateway_holder_id,
+        qmt_session_id=next_generation.qmt_session_id,
+        qmt_lease_generation=next_generation.qmt_lease_generation,
+        lease_token=lease_token,
+        async_request_id=17,
+        broker_order_id="88001",
+        bound_at=datetime.now(UTC),
+    )
     try:
-        restored = await restarted.restore_book(
-            account_id=candidate.account_id,
-            gateway_holder_id=candidate.gateway_holder_id,
-            qmt_session_id=candidate.qmt_session_id,
-            qmt_lease_generation=candidate.qmt_lease_generation,
-        )
+        with pytest.raises(QmtSessionLeaseLostError, match="active bearer"):
+            await restarted.restore_book(
+                account_id=candidate.account_id,
+                gateway_holder_id=candidate.gateway_holder_id,
+                qmt_session_id=candidate.qmt_session_id,
+                qmt_lease_generation=candidate.qmt_lease_generation,
+                lease_token=lease_token,
+            )
         await restarted.check_connection()
         next_restored = await restarted.restore_book(
             account_id=next_generation.account_id,
             gateway_holder_id=next_generation.gateway_holder_id,
             qmt_session_id=next_generation.qmt_session_id,
             qmt_lease_generation=next_generation.qmt_lease_generation,
+            lease_token=lease_token,
         )
     finally:
         await restarted.close()
@@ -254,19 +274,22 @@ async def test_qmt_canary_ledger_rejects_conflicts_and_mutation(
         str,
     ],
 ) -> None:
-    ledger, _, _, engine, schema = ledger_fixture
-    candidate = _candidate()
+    ledger, _, lease_token, engine, schema = ledger_fixture
+    now = datetime.now(UTC)
+    candidate = _candidate(created_at=now)
     await ledger.reserve(
         candidate,
+        lease_token=lease_token,
         async_request_id=17,
-        reserved_at=NOW + timedelta(seconds=1),
+        reserved_at=now + timedelta(seconds=1),
     )
 
     with pytest.raises(ValueError, match="identity conflicts"):
         await ledger.reserve(
             _candidate(client_order_id="canary-order-0002"),
+            lease_token=lease_token,
             async_request_id=17,
-            reserved_at=NOW + timedelta(seconds=1),
+            reserved_at=now + timedelta(seconds=1),
         )
     with pytest.raises(QmtSessionLeaseLostError, match="matching active"):
         await ledger.reserve(
@@ -274,34 +297,38 @@ async def test_qmt_canary_ledger_rejects_conflicts_and_mutation(
                 client_order_id="canary-order-wrong-generation",
                 qmt_lease_generation=99,
             ),
+            lease_token=lease_token,
             async_request_id=18,
-            reserved_at=NOW + timedelta(seconds=1),
+            reserved_at=now + timedelta(seconds=1),
         )
     with pytest.raises(BrokerStateUnknownError, match="no durable"):
         await ledger.bind(
             gateway_holder_id=candidate.gateway_holder_id,
             qmt_session_id=candidate.qmt_session_id,
             qmt_lease_generation=candidate.qmt_lease_generation,
+            lease_token=lease_token,
             async_request_id=99,
             broker_order_id="88099",
-            bound_at=NOW + timedelta(seconds=2),
+            bound_at=now + timedelta(seconds=2),
         )
     await ledger.bind(
         gateway_holder_id=candidate.gateway_holder_id,
         qmt_session_id=candidate.qmt_session_id,
         qmt_lease_generation=candidate.qmt_lease_generation,
+        lease_token=lease_token,
         async_request_id=17,
         broker_order_id="88001",
-        bound_at=NOW + timedelta(seconds=2),
+        bound_at=now + timedelta(seconds=2),
     )
     with pytest.raises(BrokerStateUnknownError, match="conflicts"):
         await ledger.bind(
             gateway_holder_id=candidate.gateway_holder_id,
             qmt_session_id=candidate.qmt_session_id,
             qmt_lease_generation=candidate.qmt_lease_generation,
+            lease_token=lease_token,
             async_request_id=17,
             broker_order_id="88002",
-            bound_at=NOW + timedelta(seconds=2),
+            bound_at=now + timedelta(seconds=2),
         )
 
     for table in (
@@ -313,3 +340,80 @@ async def test_qmt_canary_ledger_rejects_conflicts_and_mutation(
             async with engine.begin() as connection:
                 await connection.exec_driver_sql(f'SET LOCAL search_path TO "{schema}"')
                 await connection.execute(text(f"DELETE FROM {table}"))
+
+
+@pytest.mark.asyncio
+async def test_qmt_canary_ledger_requires_active_bearer_lease_for_every_operation(
+    ledger_fixture: tuple[
+        PostgresQmtCanaryOrderLedger,
+        PostgresQmtSessionLeaseRepository,
+        SecretStr,
+        AsyncEngine,
+        str,
+    ],
+) -> None:
+    ledger, leases, lease_token, _, _ = ledger_fixture
+    now = datetime.now(UTC)
+    candidate = _candidate(
+        client_order_id="canary-order-bearer-fence",
+        created_at=now,
+    )
+    wrong_token = SecretStr("wrong-qmt-canary-integration-token")
+
+    with pytest.raises(QmtSessionLeaseLostError, match="active bearer"):
+        await ledger.reserve(
+            candidate,
+            lease_token=wrong_token,
+            async_request_id=31,
+            reserved_at=now + timedelta(seconds=1),
+        )
+
+    await ledger.reserve(
+        candidate,
+        lease_token=lease_token,
+        async_request_id=31,
+        reserved_at=now + timedelta(seconds=1),
+    )
+    with pytest.raises(QmtSessionLeaseLostError, match="active bearer"):
+        await ledger.bind(
+            gateway_holder_id=candidate.gateway_holder_id,
+            qmt_session_id=candidate.qmt_session_id,
+            qmt_lease_generation=candidate.qmt_lease_generation,
+            lease_token=wrong_token,
+            async_request_id=31,
+            broker_order_id="88031",
+            bound_at=now + timedelta(seconds=2),
+        )
+    with pytest.raises(QmtSessionLeaseLostError, match="active bearer"):
+        await ledger.restore_book(
+            account_id=candidate.account_id,
+            gateway_holder_id=candidate.gateway_holder_id,
+            qmt_session_id=candidate.qmt_session_id,
+            qmt_lease_generation=candidate.qmt_lease_generation,
+            lease_token=wrong_token,
+        )
+
+    await leases.release(
+        session_id=candidate.qmt_session_id,
+        holder_id=candidate.gateway_holder_id,
+        token=lease_token,
+        now=datetime.now(UTC),
+    )
+    with pytest.raises(QmtSessionLeaseLostError, match="active bearer"):
+        await ledger.bind(
+            gateway_holder_id=candidate.gateway_holder_id,
+            qmt_session_id=candidate.qmt_session_id,
+            qmt_lease_generation=candidate.qmt_lease_generation,
+            lease_token=lease_token,
+            async_request_id=31,
+            broker_order_id="88031",
+            bound_at=datetime.now(UTC),
+        )
+    with pytest.raises(QmtSessionLeaseLostError, match="active bearer"):
+        await ledger.restore_book(
+            account_id=candidate.account_id,
+            gateway_holder_id=candidate.gateway_holder_id,
+            qmt_session_id=candidate.qmt_session_id,
+            qmt_lease_generation=candidate.qmt_lease_generation,
+            lease_token=lease_token,
+        )

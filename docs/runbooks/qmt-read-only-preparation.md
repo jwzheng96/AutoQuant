@@ -14,7 +14,10 @@ generation 的账本恢复关联簿后再解释委托回报；持久化事实缺
 不得把订单猜测为新单，也不得继续接受新的候选。新的租约 generation 可以安全重用
 XtQuant 重新计数的请求序号，但不能跨 generation 解释回报。
 候选外键必须指向同一 holder 的真实 `acquire` 事件；预留事务还会锁定并检查当前租约
-未释放、未过期且 generation 未变化。仅知道 session id 或历史 generation 不能写入预留。
+未释放、未过期且 generation 未变化。候选预留、异步券商订单号绑定和重启恢复都必须
+提交当前租约 bearer token；数据库只比较其 SHA-256，并以数据库时钟在持有 lease 行锁
+期间重新验证 holder、generation 和有效期。仅知道 session id、holder 或历史 generation
+不能写入或恢复映射，旧进程在租约释放、超时或被接管后也不能处理迟到回报。
 
 ## 前提
 
