@@ -74,6 +74,7 @@ def test_qmt_observation_converts_cumulative_fill_to_internal_update() -> None:
         order_volume=200,
         traded_volume=100,
         average_traded_price=Decimal("10.25"),
+        order_price=Decimal("10.50"),
         raw_status=QmtOrderStatus.PARTIALLY_FILLED,
         status_message="partial fill",
         observed_at=NOW,

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Final
 
-from autoquant.clock import to_utc
+from autoquant.backtest.models import OrderSide
+from autoquant.clock import SHANGHAI, to_utc
 from autoquant.data.models import (
     _canonical_hash,
     _datetime_text,
@@ -18,7 +19,7 @@ from autoquant.execution.qmt_models import to_qmt_instrument
 from autoquant.risk.models import ExecutionMode, RiskDecision, RiskDecisionState
 
 QMT_CANARY_CANDIDATE_VERSION: Final = "qmt-canary-order-candidate-v1"
-QMT_CANARY_STAGE_VERSION: Final = "qmt-canary-order-stage-v1"
+QMT_CANARY_STAGE_VERSION: Final = "qmt-canary-order-stage-v2"
 MAXIMUM_CANDIDATE_LIFETIME: Final = timedelta(seconds=30)
 MAXIMUM_DECISION_AGE: Final = timedelta(seconds=5)
 
@@ -103,6 +104,15 @@ class QmtCanaryOrderCandidate:
             or self.version != QMT_CANARY_CANDIDATE_VERSION
         ):
             raise ValueError("canary candidate timing or version is unsupported")
+        order = self.decision.order
+        if (
+            order.limit_price is None
+            or order.submitted_at.astimezone(SHANGHAI).date()
+            != created_at.astimezone(SHANGHAI).date()
+        ):
+            raise ValueError(
+                "canary candidate requires a same-session limit order"
+            )
         object.__setattr__(self, "created_at", created_at)
         object.__setattr__(self, "valid_until", valid_until)
         object.__setattr__(self, "candidate_hash", _canonical_hash(self.payload()))
@@ -170,6 +180,11 @@ class QmtCanaryOrderStage:
     qmt_lease_generation: int
     candidate_created_at: datetime
     candidate_valid_until: datetime
+    broker_session_date: date
+    instrument: str
+    side: OrderSide
+    quantity: int
+    limit_price: Decimal
     staged_at: datetime
     broker_order_remark: str
     version: str = QMT_CANARY_STAGE_VERSION
@@ -185,6 +200,9 @@ class QmtCanaryOrderStage:
         if not isinstance(candidate, QmtCanaryOrderCandidate):
             raise TypeError("candidate must be QmtCanaryOrderCandidate")
         candidate.require_current(now=staged_at)
+        limit_price = candidate.decision.order.limit_price
+        if limit_price is None:
+            raise ValueError("QMT canary stage requires a limit price")
         return cls(
             candidate_hash=candidate.candidate_hash,
             account_id=candidate.account_id,
@@ -194,6 +212,11 @@ class QmtCanaryOrderStage:
             qmt_lease_generation=candidate.qmt_lease_generation,
             candidate_created_at=candidate.created_at,
             candidate_valid_until=candidate.valid_until,
+            broker_session_date=candidate.created_at.astimezone(SHANGHAI).date(),
+            instrument=candidate.decision.order.instrument,
+            side=candidate.decision.order.side,
+            quantity=candidate.decision.order.quantity,
+            limit_price=limit_price,
             staged_at=staged_at,
             broker_order_remark=qmt_canary_order_remark(candidate.candidate_hash),
         )
@@ -229,6 +252,23 @@ class QmtCanaryOrderStage:
             or not self.broker_order_remark.isascii()
         ):
             raise ValueError("QMT broker order remark must match its 24-character recovery tag")
+        if not isinstance(self.broker_session_date, date):
+            raise TypeError("broker_session_date must be a date")
+        to_qmt_instrument(self.instrument)
+        if not isinstance(self.side, OrderSide):
+            raise TypeError("QMT staged order side must be OrderSide")
+        if (
+            not isinstance(self.quantity, int)
+            or isinstance(self.quantity, bool)
+            or self.quantity < 1
+        ):
+            raise ValueError("QMT staged order quantity must be positive")
+        if (
+            not isinstance(self.limit_price, Decimal)
+            or not self.limit_price.is_finite()
+            or self.limit_price <= 0
+        ):
+            raise ValueError("QMT staged order limit price must be positive and finite")
         created_at = to_utc(
             self.candidate_created_at,
             name="QMT staged candidate creation time",
@@ -243,6 +283,8 @@ class QmtCanaryOrderStage:
             or valid_until - created_at > MAXIMUM_CANDIDATE_LIFETIME
             or staged_at < created_at
             or staged_at >= valid_until
+            or created_at.astimezone(SHANGHAI).date()
+            != self.broker_session_date
             or self.version != QMT_CANARY_STAGE_VERSION
         ):
             raise ValueError("QMT candidate stage timing or version is unsupported")
@@ -256,14 +298,19 @@ class QmtCanaryOrderStage:
             "account_id": self.account_id,
             "broker_mutation_allowed": False,
             "broker_order_remark": self.broker_order_remark,
+            "broker_session_date": self.broker_session_date.isoformat(),
             "candidate_created_at": _datetime_text(self.candidate_created_at),
             "candidate_hash": self.candidate_hash,
             "candidate_valid_until": _datetime_text(self.candidate_valid_until),
             "client_order_id": self.client_order_id,
             "gateway_holder_id": self.gateway_holder_id,
+            "instrument": self.instrument,
+            "limit_price": _decimal_text(self.limit_price),
+            "quantity": self.quantity,
             "qmt_lease_generation": self.qmt_lease_generation,
             "qmt_session_id": self.qmt_session_id,
             "staged_at": _datetime_text(self.staged_at),
+            "side": self.side.value,
             "version": self.version,
         }
 

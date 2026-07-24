@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime
+from datetime import date, datetime, timedelta
+from decimal import Decimal
 
 from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.engine import RowMapping
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
+from autoquant.backtest.models import OrderSide
+from autoquant.clock import SHANGHAI
 from autoquant.data.models import _canonical_hash, _require_nonblank
 from autoquant.errors import (
     BrokerStateUnknownError,
@@ -21,9 +24,11 @@ from autoquant.execution.qmt_canary_contract import (
     QmtOrderCorrelation,
     QmtOrderCorrelationBook,
 )
+from autoquant.execution.qmt_canary_recovery import QmtCanaryRemarkRecovery
 from autoquant.execution.qmt_session_store import qmt_session_token_hash
 
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+_MAXIMUM_CANARY_PERSISTENCE_AGE = timedelta(seconds=5)
 
 
 class PostgresQmtCanaryOrderLedger:
@@ -58,6 +63,7 @@ class PostgresQmtCanaryOrderLedger:
             "qmt_canary_order_candidates",
             "qmt_order_correlation_reservations",
             "qmt_order_correlation_bindings",
+            "qmt_order_remark_recovery_bindings",
         }
         try:
             async with self._engine.connect() as connection:
@@ -85,8 +91,8 @@ class PostgresQmtCanaryOrderLedger:
                 )
         except Exception:
             raise PersistenceUnavailableError("QMT canary ledger schema check failed") from None
-        if set(map(str, rows)) != required or not isinstance(version, int) or version < 38:
-            raise PersistenceUnavailableError("QMT canary ledger schema v38 is unavailable")
+        if set(map(str, rows)) != required or not isinstance(version, int) or version < 39:
+            raise PersistenceUnavailableError("QMT canary ledger schema v39 is unavailable")
 
     async def stage(
         self,
@@ -141,6 +147,14 @@ class PostgresQmtCanaryOrderLedger:
                     )
                 assert lease_row is not None
                 candidate.require_current(now=lease_row["observed_at"])
+                if (
+                    proposed.staged_at > lease_row["observed_at"]
+                    or lease_row["observed_at"] - proposed.staged_at
+                    > _MAXIMUM_CANARY_PERSISTENCE_AGE
+                ):
+                    raise BrokerStateUnknownError(
+                        "QMT candidate stage requires a fresh local observation"
+                    )
                 candidate_rows = (
                     (
                         await connection.execute(
@@ -322,6 +336,15 @@ class PostgresQmtCanaryOrderLedger:
                     raise BrokerStateUnknownError(
                         "QMT candidate stage failed integrity verification"
                     )
+                if (
+                    proposed.reserved_at < staged.staged_at
+                    or proposed.reserved_at > lease_row["observed_at"]
+                    or lease_row["observed_at"] - proposed.reserved_at
+                    > _MAXIMUM_CANARY_PERSISTENCE_AGE
+                ):
+                    raise BrokerStateUnknownError(
+                        "QMT request reservation requires a fresh post-stage observation"
+                    )
                 reservation_rows = (
                     (
                         await connection.execute(
@@ -484,6 +507,7 @@ class PostgresQmtCanaryOrderLedger:
                     raise QmtSessionLeaseLostError(
                         "QMT order binding requires its matching active bearer lease"
                     )
+                assert lease_row is not None
                 reservation_row = (
                     (
                         await connection.execute(
@@ -521,6 +545,17 @@ class PostgresQmtCanaryOrderLedger:
                     broker_order_id=broker_order_id,
                     bound_at=bound_at,
                 )
+                if (
+                    proposed.bound_at is None
+                    or proposed.bound_at > lease_row["observed_at"]
+                    or lease_row["observed_at"] - proposed.bound_at
+                    > _MAXIMUM_CANARY_PERSISTENCE_AGE
+                    or proposed.bound_at.astimezone(SHANGHAI).date()
+                    != lease_row["observed_at"].astimezone(SHANGHAI).date()
+                ):
+                    raise BrokerStateUnknownError(
+                        "QMT order binding requires a fresh same-session callback"
+                    )
                 binding_rows = (
                     (
                         await connection.execute(
@@ -786,9 +821,13 @@ class PostgresQmtCanaryOrderLedger:
                                 LEFT JOIN
                                     {self._schema}.qmt_order_correlation_reservations r
                                   ON r.candidate_hash = c.candidate_hash
+                                LEFT JOIN
+                                    {self._schema}.qmt_order_remark_recovery_bindings x
+                                  ON x.candidate_hash = c.candidate_hash
                                 WHERE c.account_id = :account_id
                                   AND c.qmt_session_id = :qmt_session_id
                                   AND r.candidate_hash IS NULL
+                                  AND x.candidate_hash IS NULL
                                 ORDER BY c.staged_at, c.candidate_hash
                                 """
                             ),
@@ -814,6 +853,319 @@ class PostgresQmtCanaryOrderLedger:
         except Exception:
             raise PersistenceUnavailableError(
                 "QMT unresolved stage recovery failed"
+            ) from None
+
+    async def bind_recovered_order(
+        self,
+        recovery: QmtCanaryRemarkRecovery,
+        *,
+        gateway_holder_id: str,
+        qmt_session_id: int,
+        qmt_lease_generation: int,
+        lease_token: SecretStr,
+    ) -> QmtCanaryRemarkRecovery:
+        """Persist one exact same-day remark match without mutating the broker."""
+
+        if not isinstance(recovery, QmtCanaryRemarkRecovery):
+            raise TypeError("recovery must be QmtCanaryRemarkRecovery")
+        _require_scope(
+            gateway_holder_id=gateway_holder_id,
+            qmt_session_id=qmt_session_id,
+            qmt_lease_generation=qmt_lease_generation,
+        )
+        token_hash = _lease_token_hash(lease_token)
+        try:
+            async with self._engine.begin() as connection:
+                await connection.execute(
+                    text("SELECT pg_advisory_xact_lock(hashtext(:identity))"),
+                    {
+                        "identity": (
+                            f"qmt-recovery:{recovery.account_id}:"
+                            f"{recovery.broker_session_date.isoformat()}:"
+                            f"{recovery.broker_order_id}"
+                        )
+                    },
+                )
+                lease_row = (
+                    (
+                        await connection.execute(
+                            text(
+                                f"""
+                                SELECT *, clock_timestamp() AS observed_at
+                                FROM {self._schema}.qmt_session_leases
+                                WHERE session_id = :qmt_session_id
+                                FOR SHARE
+                                """
+                            ),
+                            {"qmt_session_id": qmt_session_id},
+                        )
+                    )
+                    .mappings()
+                    .one_or_none()
+                )
+                if not _active_scope_lease_matches(
+                    lease_row,
+                    gateway_holder_id=gateway_holder_id,
+                    qmt_lease_generation=qmt_lease_generation,
+                    token_hash=token_hash,
+                ):
+                    raise QmtSessionLeaseLostError(
+                        "QMT remark recovery requires its matching active daily bearer lease"
+                    )
+                assert lease_row is not None
+                observed_at = lease_row["observed_at"]
+                if (
+                    recovery.broker_session_date
+                    != observed_at.astimezone(SHANGHAI).date()
+                    or recovery.observed_at < lease_row["acquired_at"]
+                    or recovery.observed_at > observed_at
+                    or observed_at - recovery.observed_at
+                    > _MAXIMUM_CANARY_PERSISTENCE_AGE
+                ):
+                    raise BrokerStateUnknownError(
+                        "QMT remark recovery requires a fresh same-lease baseline"
+                    )
+                candidate_row = (
+                    (
+                        await connection.execute(
+                            text(
+                                f"""
+                                SELECT c.*,
+                                       r.candidate_hash AS reservation_candidate_hash
+                                FROM {self._schema}.qmt_canary_order_candidates c
+                                LEFT JOIN
+                                    {self._schema}.qmt_order_correlation_reservations r
+                                  ON r.candidate_hash = c.candidate_hash
+                                WHERE c.stage_hash = :stage_hash
+                                  AND c.candidate_hash = :candidate_hash
+                                FOR SHARE OF c
+                                """
+                            ),
+                            {
+                                "candidate_hash": recovery.candidate_hash,
+                                "stage_hash": recovery.stage_hash,
+                            },
+                        )
+                    )
+                    .mappings()
+                    .one_or_none()
+                )
+                if candidate_row is None:
+                    raise BrokerStateUnknownError(
+                        "QMT remark recovery has no durable staged candidate"
+                    )
+                stage = _stage_from_row(candidate_row)
+                if (
+                    candidate_row["reservation_candidate_hash"] is not None
+                    or stage.account_id != recovery.account_id
+                    or stage.client_order_id != recovery.client_order_id
+                    or stage.broker_session_date != recovery.broker_session_date
+                    or stage.qmt_session_id != qmt_session_id
+                ):
+                    raise BrokerStateUnknownError(
+                        "QMT remark recovery conflicts with staged candidate state"
+                    )
+                recovery_rows = (
+                    (
+                        await connection.execute(
+                            text(
+                                f"""
+                                SELECT *
+                                FROM {self._schema}.qmt_order_remark_recovery_bindings
+                                WHERE stage_hash = :stage_hash
+                                   OR candidate_hash = :candidate_hash
+                                   OR (
+                                       account_id = :account_id
+                                       AND broker_session_date =
+                                           :broker_session_date
+                                       AND broker_order_id =
+                                           :broker_order_id
+                                   )
+                                """
+                            ),
+                            _recovery_parameters(
+                                recovery,
+                                gateway_holder_id=gateway_holder_id,
+                                qmt_session_id=qmt_session_id,
+                                qmt_lease_generation=qmt_lease_generation,
+                            ),
+                        )
+                    )
+                    .mappings()
+                    .all()
+                )
+                if any(_recovery_from_row(row) != recovery for row in recovery_rows):
+                    raise BrokerStateUnknownError(
+                        "QMT remark recovery identity conflicts"
+                    )
+                await connection.execute(
+                    text(
+                        f"""
+                        INSERT INTO
+                            {self._schema}.qmt_order_remark_recovery_bindings
+                            (recovery_hash, stage_hash, candidate_hash,
+                             account_id, broker_session_date,
+                             broker_order_id, client_order_id,
+                             baseline_hash, observed_at,
+                             recovery_holder_id, qmt_session_id,
+                             recovery_lease_generation,
+                             broker_mutation_allowed,
+                             recovery_version, payload)
+                        VALUES
+                            (:recovery_hash, :stage_hash, :candidate_hash,
+                             :account_id, :broker_session_date,
+                             :broker_order_id, :client_order_id,
+                             :baseline_hash, :observed_at,
+                             :recovery_holder_id, :qmt_session_id,
+                             :recovery_lease_generation, false,
+                             :recovery_version, CAST(:payload AS jsonb))
+                        ON CONFLICT (recovery_hash) DO NOTHING
+                        """
+                    ),
+                    _recovery_parameters(
+                        recovery,
+                        gateway_holder_id=gateway_holder_id,
+                        qmt_session_id=qmt_session_id,
+                        qmt_lease_generation=qmt_lease_generation,
+                    ),
+                )
+                stored_row = (
+                    (
+                        await connection.execute(
+                            text(
+                                f"""
+                                SELECT *
+                                FROM {self._schema}.qmt_order_remark_recovery_bindings
+                                WHERE recovery_hash = :recovery_hash
+                                """
+                            ),
+                            {"recovery_hash": recovery.recovery_hash},
+                        )
+                    )
+                    .mappings()
+                    .one()
+                )
+            if (
+                _recovery_from_row(stored_row) != recovery
+                or str(stored_row["recovery_holder_id"]) != gateway_holder_id
+                or int(stored_row["qmt_session_id"]) != qmt_session_id
+                or int(stored_row["recovery_lease_generation"])
+                != qmt_lease_generation
+            ):
+                raise PersistenceUnavailableError(
+                    "stored QMT remark recovery failed integrity verification"
+                )
+            return recovery
+        except (
+            TypeError,
+            ValueError,
+            BrokerStateUnknownError,
+            QmtSessionLeaseLostError,
+        ):
+            raise
+        except PersistenceUnavailableError:
+            raise
+        except Exception:
+            raise PersistenceUnavailableError(
+                "QMT remark recovery persistence failed"
+            ) from None
+
+    async def recovered_broker_mapping(
+        self,
+        *,
+        account_id: str,
+        broker_session_date: date,
+        gateway_holder_id: str,
+        qmt_session_id: int,
+        qmt_lease_generation: int,
+        lease_token: SecretStr,
+    ) -> dict[int, str]:
+        """Restore same-day remark recoveries under the current daily lease."""
+
+        _require_nonblank(account_id, name="QMT recovery account_id")
+        if not isinstance(broker_session_date, date):
+            raise TypeError("broker_session_date must be a date")
+        _require_scope(
+            gateway_holder_id=gateway_holder_id,
+            qmt_session_id=qmt_session_id,
+            qmt_lease_generation=qmt_lease_generation,
+        )
+        token_hash = _lease_token_hash(lease_token)
+        try:
+            async with self._engine.begin() as connection:
+                lease_row = (
+                    (
+                        await connection.execute(
+                            text(
+                                f"""
+                                SELECT *, clock_timestamp() AS observed_at
+                                FROM {self._schema}.qmt_session_leases
+                                WHERE session_id = :qmt_session_id
+                                FOR SHARE
+                                """
+                            ),
+                            {"qmt_session_id": qmt_session_id},
+                        )
+                    )
+                    .mappings()
+                    .one_or_none()
+                )
+                if not _active_scope_lease_matches(
+                    lease_row,
+                    gateway_holder_id=gateway_holder_id,
+                    qmt_lease_generation=qmt_lease_generation,
+                    token_hash=token_hash,
+                ):
+                    raise QmtSessionLeaseLostError(
+                        "QMT recovery mapping requires its matching active daily bearer lease"
+                    )
+                assert lease_row is not None
+                if (
+                    broker_session_date
+                    != lease_row["observed_at"].astimezone(SHANGHAI).date()
+                ):
+                    raise BrokerStateUnknownError(
+                        "QMT recovery mapping is available only for the current broker session"
+                    )
+                rows = (
+                    (
+                        await connection.execute(
+                            text(
+                                f"""
+                                SELECT *
+                                FROM {self._schema}.qmt_order_remark_recovery_bindings
+                                WHERE account_id = :account_id
+                                  AND broker_session_date =
+                                      :broker_session_date
+                                ORDER BY broker_order_id
+                                """
+                            ),
+                            {
+                                "account_id": account_id,
+                                "broker_session_date": broker_session_date,
+                            },
+                        )
+                    )
+                    .mappings()
+                    .all()
+                )
+            recoveries = tuple(_recovery_from_row(row) for row in rows)
+            return {
+                int(item.broker_order_id): item.client_order_id
+                for item in recoveries
+            }
+        except (
+            TypeError,
+            ValueError,
+            BrokerStateUnknownError,
+            QmtSessionLeaseLostError,
+        ):
+            raise
+        except PersistenceUnavailableError:
+            raise
+        except Exception:
+            raise PersistenceUnavailableError(
+                "QMT recovery mapping read failed"
             ) from None
 
 
@@ -894,6 +1246,7 @@ def _stage_row_matches(
 
 def _stage_from_row(row: RowMapping) -> QmtCanaryOrderStage:
     candidate_payload = dict(row["payload"])
+    stage_payload = dict(row["stage_payload"])
     if (
         _canonical_hash(candidate_payload) != str(row["candidate_hash"])
         or row["broker_mutation_allowed"] is not False
@@ -911,13 +1264,20 @@ def _stage_from_row(row: RowMapping) -> QmtCanaryOrderStage:
         qmt_lease_generation=int(row["qmt_lease_generation"]),
         candidate_created_at=row["created_at"],
         candidate_valid_until=row["valid_until"],
+        broker_session_date=date.fromisoformat(
+            str(stage_payload["broker_session_date"])
+        ),
+        instrument=str(stage_payload["instrument"]),
+        side=OrderSide(str(stage_payload["side"])),
+        quantity=int(stage_payload["quantity"]),
+        limit_price=Decimal(str(stage_payload["limit_price"])),
         staged_at=row["staged_at"],
         broker_order_remark=str(row["broker_order_remark"]),
         version=str(row["stage_version"]),
     )
     if (
         str(row["stage_hash"]) != stage.stage_hash
-        or dict(row["stage_payload"]) != stage.payload()
+        or stage_payload != stage.payload()
     ):
         raise PersistenceUnavailableError(
             "restored QMT candidate stage failed integrity verification"
@@ -940,6 +1300,9 @@ def _active_lease_matches(
         and row["released_at"] is None
         and row["acquired_at"] <= candidate.created_at
         and row["expires_at"] > row["observed_at"]
+        and row["acquired_at"].astimezone(SHANGHAI).date()
+        == candidate.created_at.astimezone(SHANGHAI).date()
+        == row["observed_at"].astimezone(SHANGHAI).date()
     )
 
 
@@ -957,6 +1320,8 @@ def _active_scope_lease_matches(
         and int(row["generation"]) == qmt_lease_generation
         and row["released_at"] is None
         and row["expires_at"] > row["observed_at"]
+        and row["acquired_at"].astimezone(SHANGHAI).date()
+        == row["observed_at"].astimezone(SHANGHAI).date()
     )
 
 
@@ -1082,6 +1447,54 @@ def _restored_from_row(row: RowMapping) -> QmtOrderCorrelation:
     ):
         raise PersistenceUnavailableError("restored QMT binding failed integrity verification")
     return binding
+
+
+def _recovery_parameters(
+    recovery: QmtCanaryRemarkRecovery,
+    *,
+    gateway_holder_id: str,
+    qmt_session_id: int,
+    qmt_lease_generation: int,
+) -> dict[str, object]:
+    return {
+        "account_id": recovery.account_id,
+        "baseline_hash": recovery.baseline_hash,
+        "broker_order_id": recovery.broker_order_id,
+        "broker_session_date": recovery.broker_session_date,
+        "candidate_hash": recovery.candidate_hash,
+        "client_order_id": recovery.client_order_id,
+        "observed_at": recovery.observed_at,
+        "payload": _json(recovery.payload()),
+        "qmt_session_id": qmt_session_id,
+        "recovery_hash": recovery.recovery_hash,
+        "recovery_holder_id": gateway_holder_id,
+        "recovery_lease_generation": qmt_lease_generation,
+        "recovery_version": recovery.version,
+        "stage_hash": recovery.stage_hash,
+    }
+
+
+def _recovery_from_row(row: RowMapping) -> QmtCanaryRemarkRecovery:
+    recovery = QmtCanaryRemarkRecovery(
+        stage_hash=str(row["stage_hash"]),
+        candidate_hash=str(row["candidate_hash"]),
+        account_id=str(row["account_id"]),
+        broker_session_date=row["broker_session_date"],
+        broker_order_id=str(row["broker_order_id"]),
+        client_order_id=str(row["client_order_id"]),
+        baseline_hash=str(row["baseline_hash"]),
+        observed_at=row["observed_at"],
+        version=str(row["recovery_version"]),
+    )
+    if (
+        str(row["recovery_hash"]) != recovery.recovery_hash
+        or row["broker_mutation_allowed"] is not False
+        or dict(row["payload"]) != recovery.payload()
+    ):
+        raise PersistenceUnavailableError(
+            "QMT remark recovery row failed integrity verification"
+        )
+    return recovery
 
 
 def _json(payload: dict[str, object]) -> str:

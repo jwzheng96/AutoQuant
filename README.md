@@ -79,6 +79,13 @@ broker call; only a staged candidate may later reserve the XtQuant asynchronous 
 The active lease owner can inventory staged candidates that lack a request reservation across
 prior process generations. Any such record is an explicit ambiguous-submit blocker, not
 permission to retry or create another order.
+Schema v39 scopes that identity to one Shanghai broker session. A canary lease generation
+acquired on a previous local date cannot stage, reserve, bind or restore current-day orders.
+For an unresolved stage, one fresh coherent read-only baseline may recover identity only when
+exactly one same-day broker order has the committed remark, instrument, side, quantity and price.
+No match remains unresolved; duplicate or conflicting matches fail closed. Successful matches
+are stored in a fourth immutable, non-mutating ledger and can be restored only by the current
+daily lease owner.
 Request and broker identifiers are scoped by QMT session-lease generation, so vendor counters may
 restart without ever joining a new process callback to an old process order.
 Candidate reservation, asynchronous broker-order binding and restart recovery also require the

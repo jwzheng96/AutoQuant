@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -160,16 +161,8 @@ def test_canary_stage_freezes_exact_xtquant_recovery_remark_before_mutation() ->
     assert len(stage.stage_hash) == 64
 
     with pytest.raises(ValueError, match="recovery tag"):
-        QmtCanaryOrderStage(
-            candidate_hash=candidate.candidate_hash,
-            account_id=candidate.account_id,
-            client_order_id=candidate.decision.order.client_order_id,
-            gateway_holder_id=candidate.gateway_holder_id,
-            qmt_session_id=candidate.qmt_session_id,
-            qmt_lease_generation=candidate.qmt_lease_generation,
-            candidate_created_at=candidate.created_at,
-            candidate_valid_until=candidate.valid_until,
-            staged_at=NOW + timedelta(seconds=1),
+        replace(
+            stage,
             broker_order_remark="AQwrong",
         )
 
@@ -186,6 +179,26 @@ def test_canary_candidate_rejects_unsafe_lifetime_or_notional(
 ) -> None:
     with pytest.raises(ValueError):
         _candidate(**overrides)  # type: ignore[arg-type]
+
+
+def test_canary_candidate_rejects_cross_session_or_unpriced_order() -> None:
+    candidate = _candidate()
+
+    for order in (
+        replace(
+            candidate.decision.order,
+            submitted_at=NOW - timedelta(days=1),
+        ),
+        replace(
+            candidate.decision.order,
+            limit_price=None,
+        ),
+    ):
+        with pytest.raises(ValueError, match="same-session limit"):
+            replace(
+                candidate,
+                decision=replace(candidate.decision, order=order),
+            )
 
 
 def test_qmt_order_correlation_is_exact_idempotent_and_one_to_one() -> None:
@@ -299,3 +312,11 @@ def test_qmt_canary_ledger_migration_is_append_only_and_locked() -> None:
     assert "stage_payload ? 'broker_mutation_allowed'" in staging
     assert "stage_payload->>'broker_mutation_allowed' = 'false'" in staging
     assert "VALUES ('postgres', 38)" in staging
+    recovery = Path("migrations/postgres/039_qmt_canary_remark_recovery.sql").read_text(
+        encoding="utf-8"
+    )
+    assert "qmt_order_remark_recovery_bindings" in recovery
+    assert "qmt-canary-order-stage-v2" in recovery
+    assert "AT TIME ZONE 'Asia/Shanghai'" in recovery
+    assert "NOT broker_mutation_allowed" in recovery
+    assert "VALUES ('postgres', 39)" in recovery

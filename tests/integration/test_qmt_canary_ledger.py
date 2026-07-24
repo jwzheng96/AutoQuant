@@ -18,6 +18,7 @@ from autoquant.adapters.postgres import PostgresControlRepository
 from autoquant.backtest.models import OrderSide
 from autoquant.errors import BrokerStateUnknownError, QmtSessionLeaseLostError
 from autoquant.execution.qmt_canary_contract import QmtCanaryOrderCandidate
+from autoquant.execution.qmt_canary_recovery import QmtCanaryRemarkRecovery
 from autoquant.execution.qmt_canary_store import PostgresQmtCanaryOrderLedger
 from autoquant.execution.qmt_session_store import (
     PostgresQmtSessionLeaseRepository,
@@ -121,6 +122,7 @@ async def ledger_fixture() -> AsyncIterator[
             "migrations/postgres/012_qmt_session_leases.sql",
             "migrations/postgres/037_qmt_canary_order_ledger.sql",
             "migrations/postgres/038_qmt_canary_order_staging.sql",
+            "migrations/postgres/039_qmt_canary_remark_recovery.sql",
         )
     )
     try:
@@ -179,18 +181,20 @@ async def test_qmt_canary_ledger_is_idempotent_and_restart_recoverable(
         qmt_lease_generation=candidate.qmt_lease_generation,
         lease_token=lease_token,
     ) == (staged,)
+    reserved_at = datetime.now(UTC)
     reserved = await ledger.reserve(
         candidate,
         lease_token=lease_token,
         async_request_id=17,
-        reserved_at=now + timedelta(seconds=1),
+        reserved_at=reserved_at,
     )
     repeated = await ledger.reserve(
         candidate,
         lease_token=lease_token,
         async_request_id=17,
-        reserved_at=now + timedelta(seconds=1),
+        reserved_at=reserved_at,
     )
+    bound_at = datetime.now(UTC)
     bound = await ledger.bind(
         gateway_holder_id=candidate.gateway_holder_id,
         qmt_session_id=candidate.qmt_session_id,
@@ -198,7 +202,7 @@ async def test_qmt_canary_ledger_is_idempotent_and_restart_recoverable(
         lease_token=lease_token,
         async_request_id=17,
         broker_order_id="88001",
-        bound_at=now + timedelta(seconds=2),
+        bound_at=bound_at,
     )
     repeated_binding = await ledger.bind(
         gateway_holder_id=candidate.gateway_holder_id,
@@ -207,7 +211,7 @@ async def test_qmt_canary_ledger_is_idempotent_and_restart_recoverable(
         lease_token=lease_token,
         async_request_id=17,
         broker_order_id="88001",
-        bound_at=now + timedelta(seconds=2),
+        bound_at=bound_at,
     )
     restarted = PostgresQmtCanaryOrderLedger.connect(
         dsn=POSTGRES_DSN,
@@ -311,7 +315,7 @@ async def test_qmt_canary_ledger_rejects_conflicts_and_mutation(
         candidate,
         lease_token=lease_token,
         async_request_id=17,
-        reserved_at=now + timedelta(seconds=1),
+        reserved_at=datetime.now(UTC),
     )
 
     unstaged = _candidate(client_order_id="canary-order-unstaged")
@@ -320,7 +324,7 @@ async def test_qmt_canary_ledger_rejects_conflicts_and_mutation(
             unstaged,
             lease_token=lease_token,
             async_request_id=18,
-            reserved_at=unstaged.created_at,
+            reserved_at=datetime.now(UTC),
         )
 
     conflicting = _candidate(client_order_id="canary-order-0002")
@@ -334,7 +338,7 @@ async def test_qmt_canary_ledger_rejects_conflicts_and_mutation(
             conflicting,
             lease_token=lease_token,
             async_request_id=17,
-            reserved_at=now + timedelta(seconds=1),
+            reserved_at=datetime.now(UTC),
         )
     with pytest.raises(QmtSessionLeaseLostError, match="matching active"):
         await ledger.reserve(
@@ -344,7 +348,7 @@ async def test_qmt_canary_ledger_rejects_conflicts_and_mutation(
             ),
             lease_token=lease_token,
             async_request_id=18,
-            reserved_at=now + timedelta(seconds=1),
+            reserved_at=datetime.now(UTC),
         )
     with pytest.raises(BrokerStateUnknownError, match="no durable"):
         await ledger.bind(
@@ -354,7 +358,7 @@ async def test_qmt_canary_ledger_rejects_conflicts_and_mutation(
             lease_token=lease_token,
             async_request_id=99,
             broker_order_id="88099",
-            bound_at=now + timedelta(seconds=2),
+            bound_at=datetime.now(UTC),
         )
     await ledger.bind(
         gateway_holder_id=candidate.gateway_holder_id,
@@ -363,7 +367,7 @@ async def test_qmt_canary_ledger_rejects_conflicts_and_mutation(
         lease_token=lease_token,
         async_request_id=17,
         broker_order_id="88001",
-        bound_at=now + timedelta(seconds=2),
+        bound_at=datetime.now(UTC),
     )
     with pytest.raises(BrokerStateUnknownError, match="conflicts"):
         await ledger.bind(
@@ -373,7 +377,7 @@ async def test_qmt_canary_ledger_rejects_conflicts_and_mutation(
             lease_token=lease_token,
             async_request_id=17,
             broker_order_id="88002",
-            bound_at=now + timedelta(seconds=2),
+            bound_at=datetime.now(UTC),
         )
 
     for table in (
@@ -412,7 +416,7 @@ async def test_qmt_canary_ledger_requires_active_bearer_lease_for_every_operatio
             staged_at=now,
         )
 
-    await ledger.stage(
+    stage = await ledger.stage(
         candidate,
         lease_token=lease_token,
         staged_at=now,
@@ -426,11 +430,18 @@ async def test_qmt_canary_ledger_requires_active_bearer_lease_for_every_operatio
     )
     assert unresolved[0].candidate_hash == candidate.candidate_hash
     assert unresolved[0].broker_order_remark.startswith("AQ")
+    with pytest.raises(BrokerStateUnknownError, match="fresh post-stage"):
+        await ledger.reserve(
+            candidate,
+            lease_token=lease_token,
+            async_request_id=31,
+            reserved_at=datetime.now(UTC) + timedelta(seconds=10),
+        )
     await ledger.reserve(
         candidate,
         lease_token=lease_token,
         async_request_id=31,
-        reserved_at=now + timedelta(seconds=1),
+        reserved_at=datetime.now(UTC),
     )
     assert await ledger.unresolved_stages(
         account_id=candidate.account_id,
@@ -439,6 +450,34 @@ async def test_qmt_canary_ledger_requires_active_bearer_lease_for_every_operatio
         qmt_lease_generation=candidate.qmt_lease_generation,
         lease_token=lease_token,
     ) == ()
+    with pytest.raises(BrokerStateUnknownError, match="fresh same-session callback"):
+        await ledger.bind(
+            gateway_holder_id=candidate.gateway_holder_id,
+            qmt_session_id=candidate.qmt_session_id,
+            qmt_lease_generation=candidate.qmt_lease_generation,
+            lease_token=lease_token,
+            async_request_id=31,
+            broker_order_id="88031",
+            bound_at=datetime.now(UTC) + timedelta(seconds=10),
+        )
+    recovery_for_reserved_candidate = QmtCanaryRemarkRecovery(
+        stage_hash=stage.stage_hash,
+        candidate_hash=stage.candidate_hash,
+        account_id=stage.account_id,
+        broker_session_date=stage.broker_session_date,
+        broker_order_id="88031",
+        client_order_id=stage.client_order_id,
+        baseline_hash="8" * 64,
+        observed_at=datetime.now(UTC),
+    )
+    with pytest.raises(BrokerStateUnknownError, match="staged candidate state"):
+        await ledger.bind_recovered_order(
+            recovery_for_reserved_candidate,
+            gateway_holder_id=candidate.gateway_holder_id,
+            qmt_session_id=candidate.qmt_session_id,
+            qmt_lease_generation=candidate.qmt_lease_generation,
+            lease_token=lease_token,
+        )
     with pytest.raises(QmtSessionLeaseLostError, match="active bearer"):
         await ledger.bind(
             gateway_holder_id=candidate.gateway_holder_id,
@@ -447,7 +486,7 @@ async def test_qmt_canary_ledger_requires_active_bearer_lease_for_every_operatio
             lease_token=wrong_token,
             async_request_id=31,
             broker_order_id="88031",
-            bound_at=now + timedelta(seconds=2),
+            bound_at=datetime.now(UTC),
         )
     with pytest.raises(QmtSessionLeaseLostError, match="active bearer"):
         await ledger.restore_book(
@@ -510,7 +549,7 @@ async def test_new_lease_generation_inventories_prior_ambiguous_submit_stage(
         str,
     ],
 ) -> None:
-    ledger, leases, lease_token, _, _ = ledger_fixture
+    ledger, leases, lease_token, engine, schema = ledger_fixture
     staged_at = datetime.now(UTC)
     candidate = _candidate(
         client_order_id="canary-order-prior-ambiguous",
@@ -545,3 +584,75 @@ async def test_new_lease_generation_inventories_prior_ambiguous_submit_stage(
 
     assert current.generation == candidate.qmt_lease_generation + 1
     assert unresolved == (stage,)
+
+    observed_at = datetime.now(UTC)
+    stale_recovery = QmtCanaryRemarkRecovery(
+        stage_hash=stage.stage_hash,
+        candidate_hash=stage.candidate_hash,
+        account_id=stage.account_id,
+        broker_session_date=stage.broker_session_date,
+        broker_order_id="88991",
+        client_order_id=stage.client_order_id,
+        baseline_hash="9" * 64,
+        observed_at=observed_at - timedelta(seconds=10),
+    )
+    with pytest.raises(BrokerStateUnknownError, match="fresh same-lease"):
+        await ledger.bind_recovered_order(
+            stale_recovery,
+            gateway_holder_id=candidate.gateway_holder_id,
+            qmt_session_id=candidate.qmt_session_id,
+            qmt_lease_generation=current.generation,
+            lease_token=lease_token,
+        )
+    recovery = QmtCanaryRemarkRecovery(
+        stage_hash=stage.stage_hash,
+        candidate_hash=stage.candidate_hash,
+        account_id=stage.account_id,
+        broker_session_date=stage.broker_session_date,
+        broker_order_id="88991",
+        client_order_id=stage.client_order_id,
+        baseline_hash="9" * 64,
+        observed_at=observed_at,
+    )
+    stored = await ledger.bind_recovered_order(
+        recovery,
+        gateway_holder_id=candidate.gateway_holder_id,
+        qmt_session_id=candidate.qmt_session_id,
+        qmt_lease_generation=current.generation,
+        lease_token=lease_token,
+    )
+    repeated = await ledger.bind_recovered_order(
+        recovery,
+        gateway_holder_id=candidate.gateway_holder_id,
+        qmt_session_id=candidate.qmt_session_id,
+        qmt_lease_generation=current.generation,
+        lease_token=lease_token,
+    )
+    mapping = await ledger.recovered_broker_mapping(
+        account_id=candidate.account_id,
+        broker_session_date=stage.broker_session_date,
+        gateway_holder_id=candidate.gateway_holder_id,
+        qmt_session_id=candidate.qmt_session_id,
+        qmt_lease_generation=current.generation,
+        lease_token=lease_token,
+    )
+
+    assert stored == repeated == recovery
+    assert mapping == {88991: candidate.decision.order.client_order_id}
+    assert await ledger.unresolved_stages(
+        account_id=candidate.account_id,
+        gateway_holder_id=candidate.gateway_holder_id,
+        qmt_session_id=candidate.qmt_session_id,
+        qmt_lease_generation=current.generation,
+        lease_token=lease_token,
+    ) == ()
+    with pytest.raises(SQLAlchemyError):
+        async with engine.begin() as connection:
+            await connection.exec_driver_sql(f'SET LOCAL search_path TO "{schema}"')
+            await connection.execute(
+                text(
+                    "DELETE FROM qmt_order_remark_recovery_bindings "
+                    "WHERE recovery_hash = :recovery_hash"
+                ),
+                {"recovery_hash": recovery.recovery_hash},
+            )

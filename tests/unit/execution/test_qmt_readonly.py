@@ -67,6 +67,7 @@ def _order_payload(**overrides: object) -> dict[str, object]:
         "order_volume": 100,
         "traded_volume": 0,
         "traded_price": 0,
+        "price": 10,
         "order_status": QmtOrderStatus.REPORTED,
         "order_remark": "AQ1234567890abcdef123456",
         "status_msg": "",
@@ -172,6 +173,7 @@ def test_normalizers_copy_documented_asset_position_order_and_trade_fields() -> 
     assert positions[0].instrument == "600000.XSHG"
     assert positions[0].available_volume == 80
     assert orders[0].client_order_id == "client-101"
+    assert orders[0].order_price == Decimal("10")
     assert orders[0].order_remark == "AQ1234567890abcdef123456"
     assert orders[0].state is PaperOrderState.FILLED
     assert trades[0].side is OrderSide.BUY

@@ -179,6 +179,7 @@ class QmtOrderObservation:
     order_volume: int
     traded_volume: int
     average_traded_price: Decimal | None
+    order_price: Decimal
     raw_status: int
     status_message: str
     observed_at: datetime
@@ -221,6 +222,7 @@ class QmtOrderObservation:
             _finite_nonnegative(self.average_traded_price, name="average_traded_price")
             if self.average_traded_price == 0:
                 raise ValueError("average_traded_price must be positive")
+        _finite_nonnegative(self.order_price, name="order_price")
         object.__setattr__(self, "observed_at", to_utc(self.observed_at, name="observed_at"))
         object.__setattr__(self, "order_remark", order_remark)
 

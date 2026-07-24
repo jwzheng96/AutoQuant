@@ -515,6 +515,7 @@ def _order_payload(
         "order_volume": _int_attr(value, "order_volume"),
         "traded_volume": _int_attr(value, "traded_volume"),
         "traded_price": _float_attr(value, "traded_price"),
+        "price": _float_attr(value, "price"),
         "order_status": _int_attr(value, "order_status"),
         "order_remark": _string_attr(
             value,
