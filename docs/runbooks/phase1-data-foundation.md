@@ -1038,3 +1038,35 @@ pre-open paper decision. Every v47 row therefore hard-codes
 `live_trading_locked=true`. Do not treat a prepared signal as a scheduler deployment. A
 separately versioned, decision-time execution model must be validated before that lock can be
 changed in a later schema.
+
+### Decision-time execution compatibility
+
+Schema v48 freezes the execution-compatibility methodology before the terminal forward outcome
+is known:
+
+```bash
+uv run autoquant low-volatility-execution-compatibility-freeze \
+  --forward-spec-hash \
+  ae3d74b1a35d700efea01310bd80e8fd1264eabe6c569f83d9628670a85e34f0 \
+  --requested-by risk-auditor \
+  --confirm-decision-time-audit
+```
+
+The official immutable compatibility-spec hash is
+`7da729b9dfe7b9035b9552236a6c1c80e4f5d814c3166a35bf57f234c997102a`.
+It was frozen with 1 of 126 forward sessions already observed, so
+`partial_outcome_observed_before_freeze=true`; no terminal evaluation existed, so
+`terminal_outcome_observed_before_freeze=false`. PostgreSQL rejects a first freeze at 126
+sessions or after a terminal evaluation exists.
+
+The policy `low-volatility-prior-close-order-intents-v1` may use only prior adjusted close,
+prior-session volume, exact pre-open instrument rules and pre-open suspension status. It may not
+read execution-day open, high, low, close or final volume while constructing an order. Unit
+tests perturb all five forbidden values and require identical order intents. The completed day
+may still be read later by `daily-open-conservative-v1` to simulate fills, non-fills and
+rejections; this keeps decision data and ex-post execution outcomes in separate stages.
+
+This compatibility audit is disqualifying-only. It must reuse the exact first 126 frozen
+sessions and unchanged signal/risk parameters. A failure blocks paper promotion; a pass cannot
+rescue a rejected original evaluation, change historical classification, activate the runtime,
+or unlock live trading.

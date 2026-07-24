@@ -10,6 +10,8 @@ from autoquant.backtest.low_volatility_portfolio import (
     LowVolatilityResearchSpec,
 )
 from autoquant.backtest.low_volatility_strategy import (
+    LOW_VOLATILITY_DECISION_TIME_ORDER_POLICY_VERSION,
+    DecisionTimeLowVolatilityOrderPolicy,
     LowVolatilityExecutableSession,
     LowVolatilityObservation,
     LowVolatilityOrderPolicy,
@@ -37,6 +39,12 @@ def _market(
     session_date: date,
     *,
     price: Decimal = Decimal("10"),
+    open_price: Decimal | None = None,
+    high_price: Decimal | None = None,
+    low_price: Decimal | None = None,
+    close_price: Decimal | None = None,
+    pre_close: Decimal | None = None,
+    volume: int = 1_000_000,
 ) -> MarketState:
     event_time = datetime.combine(
         session_date,
@@ -54,12 +62,22 @@ def _market(
             source_revision="low-volatility-test",
             availability_policy="test-v1",
             evidence_hash="e" * 64,
-            open_price=str(price),
-            high_price=str(price + 1),
-            low_price=str(price - 1),
-            close_price=str(price),
-            pre_close=str(price),
-            volume=1_000_000,
+            open_price=str(
+                price if open_price is None else open_price
+            ),
+            high_price=str(
+                price + 1 if high_price is None else high_price
+            ),
+            low_price=str(
+                price - 1 if low_price is None else low_price
+            ),
+            close_price=str(
+                price if close_price is None else close_price
+            ),
+            pre_close=str(
+                price if pre_close is None else pre_close
+            ),
+            volume=volume,
             turnover="10000000",
         ),
         rules=AshareRuleBook().resolve(
@@ -227,3 +245,99 @@ def test_low_volatility_policy_stays_in_cash_below_gate() -> None:
     )
 
     assert policy(0, first.markets, None) == ()
+
+
+def test_decision_time_policy_ignores_execution_day_final_ohlcv() -> None:
+    instruments = tuple(
+        f"{index:06d}.XSHE" for index in range(1, 61)
+    )
+    start = date(2025, 1, 1)
+    padding = tuple(
+        _session(
+            start + timedelta(days=index),
+            (instruments[0],),
+        )
+        for index in range(252)
+    )
+    prior_date = start + timedelta(days=252)
+    prior = _session(prior_date, instruments)
+    execution_date = start + timedelta(days=253)
+    observations = tuple(
+        LowVolatilityObservation(
+            instrument=instrument,
+            signal_date=prior_date,
+            execution_date=execution_date,
+            volatility=Decimal(index) / Decimal("1000"),
+            window_hash=f"{index + 1:064x}",
+        )
+        for index, instrument in enumerate(instruments)
+    )
+
+    def current(
+        *,
+        open_price: Decimal,
+        high_price: Decimal,
+        low_price: Decimal,
+        close_price: Decimal,
+        volume: int,
+    ) -> LowVolatilityExecutableSession:
+        return LowVolatilityExecutableSession(
+            session_date=execution_date,
+            snapshot_hash="f" * 64,
+            active_members=instruments,
+            observations=observations,
+            markets=tuple(
+                _market(
+                    instrument,
+                    execution_date,
+                    open_price=open_price,
+                    high_price=high_price,
+                    low_price=low_price,
+                    close_price=close_price,
+                    pre_close=Decimal("10"),
+                    volume=volume,
+                )
+                for instrument in instruments
+            ),
+        )
+
+    first = current(
+        open_price=Decimal("10"),
+        high_price=Decimal("11"),
+        low_price=Decimal("9"),
+        close_price=Decimal("10.5"),
+        volume=10,
+    )
+    second = current(
+        open_price=Decimal("10.8"),
+        high_price=Decimal("12"),
+        low_price=Decimal("8"),
+        close_price=Decimal("9.5"),
+        volume=10_000_000,
+    )
+    trailing = _session(
+        execution_date + timedelta(days=1),
+        instruments,
+    )
+    first_policy = DecisionTimeLowVolatilityOrderPolicy(
+        sessions=(*padding, prior, first, trailing),
+        start_index=253,
+        trade_session_count=2,
+        spec=_spec(),
+    )
+    second_policy = DecisionTimeLowVolatilityOrderPolicy(
+        sessions=(*padding, prior, second, trailing),
+        start_index=253,
+        trade_session_count=2,
+        spec=_spec(),
+    )
+
+    first_orders = first_policy(0, first.markets, None)
+    second_orders = second_policy(0, second.markets, None)
+
+    assert first_policy.version == (
+        LOW_VOLATILITY_DECISION_TIME_ORDER_POLICY_VERSION
+    )
+    assert first_orders == second_orders
+    assert len(first_orders) == 20
+    assert all(value.side is OrderSide.BUY for value in first_orders)

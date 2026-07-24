@@ -91,6 +91,15 @@ It must be prepared before 09:30 Asia/Shanghai. The artifact deliberately record
 execution model uses completed execution-day OHLCV for fill simulation, while a paper decision
 can only use information visible at decision time. This difference must be resolved and
 revalidated before the resident scheduler may consume these signals.
+Schema v48 pre-registers that resolution before the terminal 126-session result exists. The new
+order-intent policy can read only prior adjusted close, prior-session volume, pre-open rules and
+pre-open suspension status; changing execution-day open/high/low/close/final volume is tested not
+to change its orders. Realized execution-day data remains isolated in the fill simulator. The
+official compatibility spec
+`7da729b9dfe7b9035b9552236a6c1c80e4f5d814c3166a35bf57f234c997102a`
+was frozen at 1/126 observed forward sessions, explicitly discloses that partial observation,
+and can only disqualify a future candidate. It cannot reclassify history or activate paper/live
+trading.
 PostgreSQL schema v36 adds an append-only, revocable compliance-approval artifact bound to the
 active paper registration and exact promotion policy. No approval is created automatically,
 and even a valid artifact can only satisfy an evidence gate while the code-level live release

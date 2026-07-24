@@ -32,6 +32,9 @@ from autoquant.data.models import (
 
 LOW_VOLATILITY_EXECUTABLE_PANEL_VERSION = "low-volatility-executable-panel-v1"
 LOW_VOLATILITY_ORDER_POLICY_VERSION = "low-volatility-equal-weight-orders-v1"
+LOW_VOLATILITY_DECISION_TIME_ORDER_POLICY_VERSION = (
+    "low-volatility-prior-close-order-intents-v1"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -427,6 +430,217 @@ class LowVolatilityOrderPolicy:
                 orders.append(
                     _order(
                         order_id=(f"low-volatility-{self._order_sequence:06d}-{suffix}"),
+                        instrument=instrument,
+                        side=side,
+                        quantity=quantity,
+                        session_date=session_date,
+                    )
+                )
+        return tuple(orders)
+
+
+class DecisionTimeLowVolatilityOrderPolicy:
+    """Generate intents without reading execution-day open/high/low/close/volume."""
+
+    version = LOW_VOLATILITY_DECISION_TIME_ORDER_POLICY_VERSION
+
+    def __init__(
+        self,
+        *,
+        sessions: tuple[LowVolatilityExecutableSession, ...],
+        start_index: int,
+        trade_session_count: int,
+        spec: LowVolatilityResearchSpec,
+    ) -> None:
+        sessions = tuple(sessions)
+        if (
+            not sessions
+            or start_index < spec.minimum_history_sessions
+            or trade_session_count < 2
+            or start_index + trade_session_count > len(sessions)
+        ):
+            raise ValueError(
+                "decision-time low-volatility interval is invalid"
+            )
+        self._sessions = sessions
+        self._start_index = start_index
+        self._trade_session_count = trade_session_count
+        self._spec = spec
+        self._last_rebalance: int | None = None
+        self._order_sequence = 0
+
+    def __call__(
+        self,
+        trade_index: int,
+        markets: tuple[MarketState, ...],
+        previous: AccountSnapshot | None,
+    ) -> tuple[OrderIntent, ...]:
+        if not 0 <= trade_index < self._trade_session_count:
+            raise ValueError(
+                "decision-time low-volatility index is invalid"
+            )
+        absolute_index = self._start_index + trade_index
+        session = self._sessions[absolute_index]
+        if not markets or markets != session.markets:
+            raise ValueError(
+                "decision-time markets do not match the panel"
+            )
+        if absolute_index < 1:
+            raise ValueError(
+                "decision-time policy requires a prior session"
+            )
+        prior = {
+            value.bar.instrument: value
+            for value in self._sessions[
+                absolute_index - 1
+            ].markets
+        }
+        current = {
+            value.bar.instrument: value for value in markets
+        }
+        holdings = (
+            {}
+            if previous is None
+            else {
+                value.instrument: value.total_quantity
+                for value in previous.positions
+            }
+        )
+        if trade_index == self._trade_session_count - 1:
+            return self._orders_to_targets(
+                holdings=holdings,
+                targets={},
+                current=current,
+                prior=prior,
+                session_date=session.session_date,
+                suffix="forced-exit",
+            )
+        rebalance = (
+            self._last_rebalance is None
+            or trade_index - self._last_rebalance
+            >= self._spec.rebalance_sessions
+        )
+        if not rebalance:
+            return ()
+        self._last_rebalance = trade_index
+        selected = (
+            tuple(
+                value.instrument
+                for value in sorted(
+                    session.observations,
+                    key=lambda value: (
+                        value.volatility,
+                        value.instrument,
+                    ),
+                )[: self._spec.selection_count]
+            )
+            if len(session.observations)
+            >= self._spec.minimum_eligible_members
+            else ()
+        )
+        targets = {
+            instrument: quantity
+            for instrument in selected
+            if (market := current.get(instrument)) is not None
+            and not market.suspended
+            and (
+                prior_market := prior.get(instrument)
+            )
+            is not None
+            and prior_market.bar.volume > 0
+            and (
+                quantity := _target_quantity(
+                    market=market,
+                    spec=self._spec,
+                )
+            )
+            >= market.rules.buy_minimum
+        }
+        return self._orders_to_targets(
+            holdings=holdings,
+            targets=targets,
+            current=current,
+            prior=prior,
+            session_date=session.session_date,
+            suffix="rebalance",
+        )
+
+    def _orders_to_targets(
+        self,
+        *,
+        holdings: dict[str, int],
+        targets: dict[str, int],
+        current: dict[str, MarketState],
+        prior: dict[str, MarketState],
+        session_date: date,
+        suffix: str,
+    ) -> tuple[OrderIntent, ...]:
+        orders: list[OrderIntent] = []
+        for side in (OrderSide.SELL, OrderSide.BUY):
+            for instrument in sorted(
+                set(holdings) | set(targets)
+            ):
+                held = holdings.get(instrument, 0)
+                target = targets.get(instrument, 0)
+                delta = target - held
+                if (
+                    side is OrderSide.SELL and delta >= 0
+                ) or (
+                    side is OrderSide.BUY and delta <= 0
+                ):
+                    continue
+                market = current.get(instrument)
+                prior_market = prior.get(instrument)
+                if (
+                    market is None
+                    or prior_market is None
+                    or market.suspended
+                    or prior_market.bar.session_date
+                    >= session_date
+                    or prior_market.bar.volume <= 0
+                ):
+                    continue
+                step = (
+                    market.rules.sell_step
+                    if side is OrderSide.SELL
+                    else market.rules.buy_step
+                )
+                desired = abs(delta)
+                if side is OrderSide.BUY:
+                    desired = desired // step * step
+                elif desired != held:
+                    desired = desired // step * step
+                quantity = min(
+                    desired,
+                    market.rules.max_order_quantity,
+                    _liquidity_quantity(
+                        prior_market,
+                        participation=(
+                            self._spec.maximum_volume_participation
+                        ),
+                        step=step,
+                    ),
+                    _notional_quantity_limit(
+                        market=market,
+                        maximum_notional=(
+                            self._spec.maximum_order_notional
+                        ),
+                        step=step,
+                    ),
+                )
+                if quantity <= 0 or (
+                    side is OrderSide.BUY
+                    and quantity < market.rules.buy_minimum
+                ):
+                    continue
+                self._order_sequence += 1
+                orders.append(
+                    _order(
+                        order_id=(
+                            "low-volatility-decision-"
+                            f"{self._order_sequence:06d}-"
+                            f"{suffix}"
+                        ),
                         instrument=instrument,
                         side=side,
                         quantity=quantity,

@@ -20,6 +20,7 @@ from autoquant.backtest.low_volatility_portfolio import (
     LowVolatilityResearchSpec,
 )
 from autoquant.backtest.low_volatility_strategy import (
+    DecisionTimeLowVolatilityOrderPolicy,
     LowVolatilityExecutablePanel,
     LowVolatilityOrderPolicy,
 )
@@ -443,6 +444,38 @@ def run_low_volatility_strategy_interval(
         spec=spec,
         start_index=start_index,
         trade_session_count=trade_session_count,
+    )
+
+
+def run_low_volatility_decision_time_strategy_interval(
+    *,
+    panel: LowVolatilityExecutablePanel,
+    spec: LowVolatilityResearchSpec,
+    start_index: int,
+    trade_session_count: int,
+) -> BacktestResult:
+    """Run intent generation using only information visible by decision time."""
+
+    policy = DecisionTimeLowVolatilityOrderPolicy(
+        sessions=panel.sessions,
+        start_index=start_index,
+        trade_session_count=trade_session_count,
+        spec=spec,
+    )
+    selected = panel.sessions[
+        start_index : start_index + trade_session_count
+    ]
+    return _engine(spec).run_dynamic(
+        strategy_id=(
+            f"{spec.strategy_id}:decision-time-execution-v1"
+        ),
+        manifest_hash=panel.panel_hash,
+        as_of=panel.as_of,
+        initial_cash=spec.initial_cash,
+        market_sessions=tuple(
+            value.markets for value in selected
+        ),
+        order_factory=policy,
     )
 
 

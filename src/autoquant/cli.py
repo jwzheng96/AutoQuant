@@ -53,6 +53,7 @@ from autoquant.operations import (
     freeze_dynamic_regime_research_spec,
     freeze_dynamic_research_spec,
     freeze_fundamental_research_spec,
+    freeze_low_volatility_execution_compatibility_spec,
     freeze_low_volatility_forward_evidence_spec,
     freeze_low_volatility_research_spec,
     inspect_fundamental_data_backfill,
@@ -1253,6 +1254,44 @@ def low_volatility_forward_spec_freeze(
         )
     except (AutoQuantError, LookupError, ValueError):
         _fail("low-volatility forward evidence freeze failed")
+    _emit(payload)
+
+
+@app.command("low-volatility-execution-compatibility-freeze")
+def low_volatility_execution_compatibility_freeze(
+    forward_spec_hash: Annotated[
+        str,
+        typer.Option("--forward-spec-hash"),
+    ],
+    requested_by: Annotated[
+        str,
+        typer.Option("--requested-by"),
+    ],
+    confirm_decision_time_audit: Annotated[
+        bool,
+        typer.Option("--confirm-decision-time-audit"),
+    ] = False,
+) -> None:
+    """Freeze a disqualifying-only decision-time execution audit."""
+
+    if not confirm_decision_time_audit:
+        _fail(
+            "decision-time execution compatibility confirmation "
+            "is required"
+        )
+    try:
+        payload = asyncio.run(
+            freeze_low_volatility_execution_compatibility_spec(
+                _settings(),
+                forward_spec_hash=forward_spec_hash,
+                requested_by=requested_by,
+            )
+        )
+    except (AutoQuantError, LookupError, ValueError):
+        _fail(
+            "low-volatility execution compatibility freeze "
+            "failed closed"
+        )
     _emit(payload)
 
 

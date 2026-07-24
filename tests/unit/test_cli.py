@@ -1213,6 +1213,75 @@ def test_low_volatility_forward_evaluation_is_redacted_and_does_not_deploy() -> 
     assert evaluation.await_args.kwargs["evaluation_dataset_manifest_hash"] == "d" * 64
 
 
+def test_execution_compatibility_freeze_requires_confirmation() -> None:
+    freeze = AsyncMock()
+    with patch(
+        "autoquant.cli.freeze_low_volatility_execution_compatibility_spec",
+        new=freeze,
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "low-volatility-execution-compatibility-freeze",
+                "--forward-spec-hash",
+                "a" * 64,
+                "--requested-by",
+                "research-operator",
+            ],
+        )
+
+    assert result.exit_code == 2
+    assert freeze.await_count == 0
+
+
+def test_execution_compatibility_freeze_discloses_partial_outcome() -> None:
+    payload = {
+        "compatibility_can_only_disqualify": True,
+        "decision_order_policy_version": (
+            "low-volatility-prior-close-order-intents-v1"
+        ),
+        "execution_compatibility_spec_hash": "a" * 64,
+        "forward_spec_hash": "b" * 64,
+        "live_trading_locked": True,
+        "observed_forward_session_count": 1,
+        "paper_activation_allowed": False,
+        "partial_outcome_observed_before_freeze": True,
+        "runtime_activation_allowed": False,
+        "source_spec_hash": "c" * 64,
+        "status": (
+            "frozen_awaiting_terminal_forward_evaluation"
+        ),
+        "terminal_outcome_observed_before_freeze": False,
+    }
+    freeze = AsyncMock(return_value=payload)
+    with patch(
+        "autoquant.cli.freeze_low_volatility_execution_compatibility_spec",
+        new=freeze,
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "low-volatility-execution-compatibility-freeze",
+                "--forward-spec-hash",
+                "b" * 64,
+                "--requested-by",
+                "research-operator",
+                "--confirm-decision-time-audit",
+            ],
+            env={
+                "AQ_POSTGRES_DSN": (
+                    "postgresql+asyncpg://sensitive"
+                )
+            },
+        )
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == payload
+    assert "sensitive" not in result.stdout
+    assert payload["paper_activation_allowed"] is False
+    freeze.assert_awaited_once()
+
+
 def test_low_volatility_candidate_approval_requires_confirmation() -> None:
     approval = AsyncMock()
     with patch(

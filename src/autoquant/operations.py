@@ -43,6 +43,9 @@ from autoquant.backtest.fundamental_validation import (
     FundamentalWalkForwardValidator,
     assess_fundamental_validation,
 )
+from autoquant.backtest.low_volatility_execution_compatibility import (
+    LowVolatilityExecutionCompatibilitySpec,
+)
 from autoquant.backtest.low_volatility_forward import (
     LowVolatilityForwardEvidenceSpec,
     LowVolatilityForwardSessionBinding,
@@ -237,6 +240,9 @@ from autoquant.web.fundamental_research_store import (
 from autoquant.web.fundamental_validation_store import (
     FundamentalValidationRecord,
     PostgresFundamentalValidationRepository,
+)
+from autoquant.web.low_volatility_execution_compatibility_store import (
+    PostgresLowVolatilityExecutionCompatibilityRepository,
 )
 from autoquant.web.low_volatility_forward_evaluation_store import (
     LowVolatilityForwardEvaluationRecord,
@@ -1411,6 +1417,106 @@ async def freeze_low_volatility_forward_evidence_spec(
         await forward_specs.close()
         await source_specs.close()
         await validations.close()
+
+
+async def freeze_low_volatility_execution_compatibility_spec(
+    settings: AppSettings,
+    *,
+    forward_spec_hash: str,
+    requested_by: str,
+) -> dict[str, object]:
+    """Pre-register decision-time intent rules before terminal outcome."""
+
+    if settings.live_trading_enabled:
+        raise MissingCapabilityError(
+            "execution compatibility requires live trading locked"
+        )
+    dsn = configured_dsn(
+        settings.postgres_dsn,
+        capability="PostgreSQL",
+    )
+    forward_specs = (
+        PostgresLowVolatilityForwardEvidenceSpecRepository.connect(
+            dsn=dsn
+        )
+    )
+    sessions = PostgresLowVolatilityForwardSessionRepository.connect(
+        dsn=dsn
+    )
+    compatibility = (
+        PostgresLowVolatilityExecutionCompatibilityRepository.connect(
+            dsn=dsn
+        )
+    )
+    control = PostgresControlRepository.connect(dsn=dsn)
+    try:
+        try:
+            existing = await compatibility.for_forward_spec(
+                forward_spec_hash
+            )
+        except LookupError:
+            existing = None
+        if existing is not None:
+            return _low_volatility_compatibility_spec_payload(
+                existing,
+                status="stored",
+            )
+        forward = (
+            await forward_specs.read(forward_spec_hash)
+        ).spec
+        records = await sessions.list_for_spec(
+            forward_spec_hash=forward.spec_hash
+        )
+        spec = LowVolatilityExecutionCompatibilitySpec(
+            source_spec_hash=forward.source_spec_hash,
+            forward_spec_hash=forward.spec_hash,
+            observed_forward_session_count=len(records),
+            frozen_by=requested_by,
+            frozen_at=datetime.now(UTC),
+        )
+        stored = await compatibility.save(spec)
+        payload = _low_volatility_compatibility_spec_payload(
+            stored,
+            status="frozen_awaiting_terminal_forward_evaluation",
+        )
+        await control.append_audit_event(
+            "research.low_volatility.execution_compatibility.frozen",
+            stored.frozen_at,
+            payload,
+        )
+        return payload
+    finally:
+        await control.close()
+        await compatibility.close()
+        await sessions.close()
+        await forward_specs.close()
+
+
+def _low_volatility_compatibility_spec_payload(
+    spec: LowVolatilityExecutionCompatibilitySpec,
+    *,
+    status: str,
+) -> dict[str, object]:
+    return {
+        "compatibility_can_only_disqualify": True,
+        "decision_order_policy_version": (
+            spec.decision_order_policy_version
+        ),
+        "execution_compatibility_spec_hash": spec.spec_hash,
+        "forward_spec_hash": spec.forward_spec_hash,
+        "live_trading_locked": True,
+        "observed_forward_session_count": (
+            spec.observed_forward_session_count
+        ),
+        "paper_activation_allowed": False,
+        "partial_outcome_observed_before_freeze": (
+            spec.partial_outcome_observed_before_freeze
+        ),
+        "runtime_activation_allowed": False,
+        "source_spec_hash": spec.source_spec_hash,
+        "status": status,
+        "terminal_outcome_observed_before_freeze": False,
+    }
 
 
 async def create_low_volatility_forward_session_campaign(
