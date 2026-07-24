@@ -24,6 +24,7 @@ from autoquant.operations import (
     approve_paper_sma_strategy,
     create_compliance_approval,
     revoke_paper_strategy,
+    run_low_volatility_forward_window,
 )
 
 NOW = datetime(2026, 7, 23, 8, tzinfo=UTC)
@@ -82,6 +83,118 @@ def test_forward_cycle_rejects_ambiguous_session_order() -> None:
             ),
             bound_dates=(),
             minimum_sessions=126,
+        )
+
+
+@pytest.mark.asyncio
+async def test_forward_window_repeats_only_batch_progress_until_frozen() -> None:
+    cycle = AsyncMock(
+        side_effect=(
+            {"status": "batch_progress", "item_counts": {"completed": 25}},
+            {"status": "batch_progress", "item_counts": {"completed": 50}},
+            {
+                "status": "session_frozen",
+                "binding_hash": "a" * 64,
+                "completed_required_sessions": 2,
+            },
+        )
+    )
+    sleeper = AsyncMock()
+    with (
+        patch(
+            "autoquant.operations.run_low_volatility_forward_cycle",
+            new=cycle,
+        ),
+        patch("autoquant.operations.asyncio.sleep", new=sleeper),
+    ):
+        result = await run_low_volatility_forward_window(
+            _settings(),
+            forward_spec_hash="b" * 64,
+            requested_by="forward-collector",
+            max_cycles=20,
+            max_items=25,
+            pause_seconds=Decimal("1.25"),
+            interval_seconds=Decimal("5"),
+        )
+
+    assert result["status"] == "session_frozen"
+    assert result["window_cycles"] == 3
+    assert result["window_exhausted"] is False
+    assert result["cycle_statuses"] == [
+        "batch_progress",
+        "batch_progress",
+        "session_frozen",
+    ]
+    assert cycle.await_count == 3
+    assert sleeper.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_forward_window_stops_waiting_without_sleep_or_vendor_loop() -> None:
+    cycle = AsyncMock(
+        return_value={
+            "status": "waiting_for_completed_session",
+            "completed_required_sessions": 1,
+        }
+    )
+    sleeper = AsyncMock()
+    with (
+        patch(
+            "autoquant.operations.run_low_volatility_forward_cycle",
+            new=cycle,
+        ),
+        patch("autoquant.operations.asyncio.sleep", new=sleeper),
+    ):
+        result = await run_low_volatility_forward_window(
+            _settings(),
+            forward_spec_hash="b" * 64,
+            requested_by="forward-collector",
+            max_cycles=20,
+            max_items=25,
+            pause_seconds=Decimal("1.25"),
+            interval_seconds=Decimal("5"),
+        )
+
+    assert result["status"] == "waiting_for_completed_session"
+    assert result["window_cycles"] == 1
+    cycle.assert_awaited_once()
+    sleeper.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_forward_window_exhaustion_is_explicitly_non_successful() -> None:
+    cycle = AsyncMock(return_value={"status": "batch_progress"})
+    with patch(
+        "autoquant.operations.run_low_volatility_forward_cycle",
+        new=cycle,
+    ):
+        result = await run_low_volatility_forward_window(
+            _settings(),
+            forward_spec_hash="b" * 64,
+            requested_by="forward-collector",
+            max_cycles=2,
+            max_items=25,
+            pause_seconds=Decimal("1.25"),
+            interval_seconds=Decimal("0"),
+        )
+
+    assert result["status"] == "window_exhausted"
+    assert result["last_cycle_status"] == "batch_progress"
+    assert result["window_exhausted"] is True
+    assert cycle.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_forward_window_rejects_unbounded_or_nonfinite_timing() -> None:
+    with pytest.raises(ValueError, match="interval_seconds"):
+        await run_low_volatility_forward_window(
+            _settings(),
+            forward_spec_hash="b" * 64,
+            requested_by="forward-collector",
+            max_cycles=20,
+            max_items=25,
+            pause_seconds=Decimal("1.25"),
+            interval_seconds=Decimal("NaN"),
         )
 
 

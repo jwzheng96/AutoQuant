@@ -66,6 +66,7 @@ from autoquant.operations import (
     run_fundamental_ingestion,
     run_fundamental_validation,
     run_low_volatility_forward_cycle,
+    run_low_volatility_forward_window,
     run_low_volatility_validation,
     run_qmt_readonly_acceptance,
     run_research_data_campaign,
@@ -1326,6 +1327,60 @@ def low_volatility_forward_cycle_run(
         _fail("low-volatility forward cycle failed")
     _emit(payload)
     if payload["status"] == "failed":
+        raise typer.Exit(code=2)
+
+
+@app.command("low-volatility-forward-window-run")
+def low_volatility_forward_window_run(
+    forward_spec_hash: Annotated[
+        str,
+        typer.Option("--forward-spec-hash"),
+    ],
+    requested_by: Annotated[
+        str,
+        typer.Option("--requested-by"),
+    ],
+    max_cycles: Annotated[
+        int,
+        typer.Option("--max-cycles", min=1, max=100),
+    ] = 20,
+    max_items: Annotated[
+        int,
+        typer.Option("--max-items", min=1, max=25),
+    ] = 25,
+    pause_seconds: Annotated[
+        str,
+        typer.Option("--pause-seconds"),
+    ] = "1.25",
+    interval_seconds: Annotated[
+        str,
+        typer.Option("--interval-seconds"),
+    ] = "5",
+) -> None:
+    """Run one bounded unattended forward-collection window."""
+
+    try:
+        payload = asyncio.run(
+            run_low_volatility_forward_window(
+                _settings(),
+                forward_spec_hash=forward_spec_hash,
+                requested_by=requested_by,
+                max_cycles=max_cycles,
+                max_items=max_items,
+                pause_seconds=_parse_decimal(
+                    pause_seconds,
+                    name="pause-seconds",
+                ),
+                interval_seconds=_parse_decimal(
+                    interval_seconds,
+                    name="interval-seconds",
+                ),
+            )
+        )
+    except (AutoQuantError, LookupError, ValueError):
+        _fail("low-volatility forward window failed closed")
+    _emit(payload)
+    if payload["status"] in {"failed", "window_exhausted"}:
         raise typer.Exit(code=2)
 
 

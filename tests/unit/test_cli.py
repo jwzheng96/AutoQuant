@@ -1097,6 +1097,53 @@ def test_low_volatility_forward_cycle_is_bounded_and_redacted() -> None:
     assert cycle.await_args.kwargs["pause_seconds"] == Decimal("1.25")
 
 
+def test_low_volatility_forward_window_is_bounded_and_redacted() -> None:
+    payload = {
+        "binding_hash": "b" * 64,
+        "completed_required_sessions": 2,
+        "cycle_statuses": ["batch_progress", "session_frozen"],
+        "forward_spec_hash": "a" * 64,
+        "live_trading_locked": True,
+        "remaining_required_sessions": 124,
+        "status": "session_frozen",
+        "window_cycles": 2,
+        "window_exhausted": False,
+    }
+    window = AsyncMock(return_value=payload)
+    with patch(
+        "autoquant.cli.run_low_volatility_forward_window",
+        new=window,
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "low-volatility-forward-window-run",
+                "--forward-spec-hash",
+                "a" * 64,
+                "--requested-by",
+                "scheduler",
+                "--max-cycles",
+                "20",
+                "--max-items",
+                "25",
+                "--pause-seconds",
+                "1.25",
+                "--interval-seconds",
+                "5",
+            ],
+            env={"AQ_POSTGRES_DSN": ("postgresql+asyncpg://sensitive")},
+        )
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == payload
+    assert "sensitive" not in result.stdout
+    window.assert_awaited_once()
+    assert window.await_args.kwargs["max_cycles"] == 20
+    assert window.await_args.kwargs["max_items"] == 25
+    assert window.await_args.kwargs["pause_seconds"] == Decimal("1.25")
+    assert window.await_args.kwargs["interval_seconds"] == Decimal("5")
+
+
 def test_research_input_plan_compilation_stays_live_locked_and_redacted() -> None:
     payload = {
         "activation_rule": "session_date>snapshot.reference_date",

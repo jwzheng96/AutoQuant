@@ -63,6 +63,9 @@ and calendar conflicts read-only while both paper and live trading remain locked
 The bounded `low-volatility-forward-cycle-run` command advances only the earliest missing
 eligible session, automatically freezes a fully completed session, and stops fail-closed on
 calendar conflicts or terminal data failures.
+The bounded `low-volatility-forward-window-run` command composes at most 20 such attempts to
+finish one 300-instrument session in a scheduled job; it stops after one freeze or any waiting,
+failure, or completed-gate state and reports exhaustion as a nonzero exit.
 PostgreSQL schema v36 adds an append-only, revocable compliance-approval artifact bound to the
 active paper registration and exact promotion policy. No approval is created automatically,
 and even a valid artifact can only satisfy an evidence gate while the code-level live release

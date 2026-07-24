@@ -1620,7 +1620,7 @@ async def run_low_volatility_forward_cycle(
         raise ValueError("requested_by must contain 1-128 trimmed characters")
     if max_items < 1 or max_items > 25:
         raise ValueError("max_items must be between 1 and 25")
-    if pause_seconds < 0 or pause_seconds > Decimal("60"):
+    if not pause_seconds.is_finite() or pause_seconds < 0 or pause_seconds > Decimal("60"):
         raise ValueError("pause_seconds must be between 0 and 60")
     postgres_dsn = configured_dsn(
         settings.postgres_dsn,
@@ -1725,6 +1725,67 @@ async def run_low_volatility_forward_cycle(
     elif batch["status"] == "failed":
         payload["status"] = "failed"
     return payload
+
+
+async def run_low_volatility_forward_window(
+    settings: AppSettings,
+    *,
+    forward_spec_hash: str,
+    requested_by: str,
+    max_cycles: int,
+    max_items: int,
+    pause_seconds: Decimal,
+    interval_seconds: Decimal,
+) -> dict[str, object]:
+    """Run bounded cycle attempts for at most one newly completed session."""
+
+    if max_cycles < 1 or max_cycles > 100:
+        raise ValueError("max_cycles must be between 1 and 100")
+    if (
+        not interval_seconds.is_finite()
+        or interval_seconds < 0
+        or interval_seconds > Decimal("600")
+    ):
+        raise ValueError("interval_seconds must be between 0 and 600")
+    terminal = {
+        "failed",
+        "session_frozen",
+        "session_gate_complete_awaiting_evaluation",
+        "waiting_for_completed_session",
+    }
+    statuses: list[str] = []
+    latest: dict[str, object] | None = None
+    for cycle_number in range(1, max_cycles + 1):
+        latest = await run_low_volatility_forward_cycle(
+            settings,
+            forward_spec_hash=forward_spec_hash,
+            requested_by=requested_by,
+            max_items=max_items,
+            pause_seconds=pause_seconds,
+        )
+        status = latest.get("status")
+        if not isinstance(status, str) or status not in terminal | {"batch_progress"}:
+            raise ValueError("forward window received an unsupported cycle status")
+        statuses.append(status)
+        if status in terminal:
+            return {
+                **latest,
+                "cycle_statuses": statuses,
+                "window_cycles": cycle_number,
+                "window_exhausted": False,
+            }
+        if cycle_number < max_cycles and interval_seconds > 0:
+            await asyncio.sleep(float(interval_seconds))
+    if latest is None:
+        raise RuntimeError("forward window did not execute")
+    return {
+        **latest,
+        "cycle_statuses": statuses,
+        "last_cycle_status": latest["status"],
+        "status": "window_exhausted",
+        "window_cycles": max_cycles,
+        "window_exhausted": True,
+    }
 
 
 async def inspect_fundamental_data_backfill(

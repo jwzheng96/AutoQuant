@@ -857,25 +857,29 @@ the remaining forward-session count, and the still-locked 60-session paper gate.
 binding the verified state is `collecting_forward_sessions`, `1/126`, with no missing session
 or calendar conflict.
 
-For unattended, bounded progress, invoke the cycle command repeatedly after a Shanghai calendar
-day has completed:
+For unattended, bounded progress, invoke one collection window after the conservative cutoff has
+advanced (for example at 06:30 Shanghai time each day):
 
 ```bash
-uv run autoquant low-volatility-forward-cycle-run \
+uv run autoquant low-volatility-forward-window-run \
   --forward-spec-hash \
   ae3d74b1a35d700efea01310bd80e8fd1264eabe6c569f83d9628670a85e34f0 \
-  --requested-by scheduler \
+  --requested-by forward-collector \
+  --max-cycles 20 \
   --max-items 25 \
-  --pause-seconds 1.25
+  --pause-seconds 1.25 \
+  --interval-seconds 5
 ```
 
-Each invocation selects only the earliest missing open session inside the frozen 126-session
-window, processes at most 25 persistent queue items, and freezes the session automatically once
-all shards finish. It returns `waiting_for_completed_session` without contacting Tushare when
-there is no eligible new date. A calendar conflict or terminal shard failure stops the cycle;
-terminal failures still require the separate explicitly authorized retry command. Run this
-command from a single host every five minutes during a bounded overnight window rather than as
-a permanent tight loop.
+The window makes at most 20 cycle attempts and each attempt processes at most 25 persistent queue
+items. It continues only while the cycle reports `batch_progress`, and stops immediately after
+one session freezes, no completed session is eligible, the 126-session gate is complete, or a
+terminal failure appears. Exhausting all attempts returns `window_exhausted` and exit code 2 so
+an external scheduler can alert instead of treating partial progress as success. A calendar
+conflict or terminal shard failure still requires investigation and the separate explicitly
+authorized retry command. Schedule this command on one host; do not wrap it in a permanent tight
+loop. The original `low-volatility-forward-cycle-run` remains available for one-attempt
+diagnostics.
 
 ## Future-only low-volatility evidence correction
 
