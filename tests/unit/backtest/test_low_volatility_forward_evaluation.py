@@ -253,6 +253,7 @@ def _evaluation(
         market_panel_hash="8" * 64,
         as_of=as_of,
         forward_spec=spec,
+        evaluation_dataset_manifest_hash="9" * 64,
         bindings=bindings,
         predecessor_result=source,
         strategy_result=strategy,
@@ -294,6 +295,7 @@ def test_incomplete_forward_window_cannot_produce_a_result() -> None:
             market_panel_hash="8" * 64,
             as_of=as_of,
             forward_spec=spec,
+            evaluation_dataset_manifest_hash="9" * 64,
             bindings=bindings,
             predecessor_result=source,
             strategy_result=_backtest(
@@ -462,3 +464,11 @@ def test_forward_evaluation_migration_is_immutable_and_cannot_deploy() -> None:
     assert "live_trading_locked boolean NOT NULL DEFAULT true" in sql
     assert "autoquant_reject_immutable_change()" in sql
     assert "VALUES ('postgres', 44)" in sql
+
+    dataset_sql = Path(
+        "migrations/postgres/"
+        "045_low_volatility_forward_evaluation_dataset.sql"
+    ).read_text(encoding="utf-8")
+    assert "evaluation_dataset_manifest_hash" in dataset_sql
+    assert "ALTER COLUMN evaluation_dataset_manifest_hash SET NOT NULL" in dataset_sql
+    assert "VALUES ('postgres', 45)" in dataset_sql

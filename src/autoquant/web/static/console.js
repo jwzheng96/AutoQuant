@@ -891,6 +891,9 @@ async function loadLowVolatilityForwardProgress() {
       calendar_conflict: "日历修订冲突",
       collecting_forward_sessions: "积累前瞻交易日",
       session_gate_complete_awaiting_evaluation: "交易日数量达标，等待评估",
+      forward_evaluation_passed_awaiting_paper_approval:
+        "前瞻评估通过，等待模拟盘显式批准",
+      forward_evaluation_rejected: "前瞻评估未通过",
     };
     setText(
       "low-volatility-forward-status",
@@ -922,7 +925,9 @@ async function loadLowVolatilityForwardProgress() {
     );
     setText(
       "low-volatility-forward-paper",
-      `${progress.minimum_paper_sessions} 日（未解锁）`,
+      progress.paper_trading_eligible
+        ? `${progress.minimum_paper_sessions} 日（候选，仍未部署）`
+        : `${progress.minimum_paper_sessions} 日（未解锁）`,
     );
     const table = document.getElementById(
       "low-volatility-forward-sessions-table",

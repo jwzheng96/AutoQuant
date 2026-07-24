@@ -918,3 +918,46 @@ annualized stability gap no greater than the unchanged 0.15 threshold. Passing t
 still requires at least 60 separately controlled paper sessions. The rationale follows the
 warning that repeated historical trials increase backtest-overfitting risk:
 <https://papers.ssrn.com/sol3/papers.cfm?abstract_id=2326253>.
+
+After the progress endpoint reports exactly
+`session_gate_complete_awaiting_evaluation`, create the deterministic schema-v45 full-window
+market-coverage campaign:
+
+```bash
+uv run autoquant low-volatility-forward-evaluation-data-create \
+  --forward-spec-hash \
+  ae3d74b1a35d700efea01310bd80e8fd1264eabe6c569f83d9628670a85e34f0 \
+  --requested-by research-operator
+```
+
+Run the returned campaign with the existing bounded `research-data-run` command until it returns
+its aggregate `dataset_manifest_hash`. The campaign interval is exactly the first 126 frozen
+sessions and its instruments are the sorted union of those 126 immutable point-in-time
+universes. This extra coverage is required so a held name remains observable and sellable after
+it leaves a later universe; it does not alter which names were active on any signal date.
+
+Then run the one-shot evaluation:
+
+```bash
+uv run autoquant low-volatility-forward-evaluate \
+  --forward-spec-hash \
+  ae3d74b1a35d700efea01310bd80e8fd1264eabe6c569f83d9628670a85e34f0 \
+  --evaluation-dataset-manifest-hash \
+  <completed-evaluation-dataset-manifest-hash> \
+  --requested-by research-operator
+```
+
+Do not schedule either command before the gate completes. Both deliberately exit nonzero without
+creating a partial artifact when fewer than 126 frozen sessions exist. The evaluator always
+selects the first 126 ordered bindings from the pre-registered start date; later sessions cannot
+replace an unfavorable day. It independently re-reads exact manifest rows, verifies the
+evaluation dataset interval, snapshot set and deterministic instrument union, combines the
+frozen historical lookback with the forward prefix, preserves the v4 parameters, runs one
+continuous strategy and benchmark interval, derives six non-overlapping 21-session returns from
+continuous equity, and stores both complete backtest artifacts.
+
+The immutable result is either `paper_candidate` or `rejected`. A candidate changes the console
+state to `forward_evaluation_passed_awaiting_paper_approval`, but schema v44 still enforces
+`paper_deployment_allowed=false` and `live_trading_locked=true`. A rejected result cannot be
+edited, deleted, re-windowed, or promoted. No command in this stage activates paper or live
+trading.

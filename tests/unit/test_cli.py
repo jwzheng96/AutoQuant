@@ -1171,6 +1171,99 @@ def test_low_volatility_forward_window_is_bounded_and_redacted() -> None:
     assert window.await_args.kwargs["interval_seconds"] == Decimal("5")
 
 
+def test_low_volatility_forward_evaluation_is_redacted_and_does_not_deploy() -> None:
+    payload = {
+        "assessment_hash": "b" * 64,
+        "block_count": 6,
+        "evidence_status": "paper_candidate",
+        "evaluation_dataset_manifest_hash": "d" * 64,
+        "forward_spec_hash": "a" * 64,
+        "live_trading_locked": True,
+        "paper_deployment_allowed": False,
+        "paper_trading_eligible": True,
+        "result_hash": "c" * 64,
+        "session_count": 126,
+        "status": "completed",
+    }
+    evaluation = AsyncMock(return_value=payload)
+    with patch(
+        "autoquant.cli.run_low_volatility_forward_evaluation",
+        new=evaluation,
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "low-volatility-forward-evaluate",
+                "--forward-spec-hash",
+                "a" * 64,
+                "--evaluation-dataset-manifest-hash",
+                "d" * 64,
+                "--requested-by",
+                "research-operator",
+            ],
+            env={
+                "AQ_POSTGRES_DSN": (
+                    "postgresql+asyncpg://sensitive"
+                )
+            },
+        )
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == payload
+    assert "sensitive" not in result.stdout
+    assert payload["paper_deployment_allowed"] is False
+    assert payload["live_trading_locked"] is True
+    evaluation.assert_awaited_once()
+    assert (
+        evaluation.await_args.kwargs[
+            "evaluation_dataset_manifest_hash"
+        ]
+        == "d" * 64
+    )
+
+
+def test_forward_evaluation_data_campaign_is_bounded_and_locked() -> None:
+    payload = {
+        "campaign_hash": "b" * 64,
+        "completed_items": 0,
+        "forward_spec_hash": "a" * 64,
+        "instrument_count": 340,
+        "live_trading_locked": True,
+        "paper_deployment_allowed": False,
+        "session_count": 126,
+        "snapshot_count": 7,
+        "status": "queued",
+    }
+    creation = AsyncMock(return_value=payload)
+    with patch(
+        "autoquant.cli."
+        "create_low_volatility_forward_evaluation_campaign",
+        new=creation,
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "low-volatility-forward-evaluation-data-create",
+                "--forward-spec-hash",
+                "a" * 64,
+                "--requested-by",
+                "research-operator",
+            ],
+            env={
+                "AQ_POSTGRES_DSN": (
+                    "postgresql+asyncpg://sensitive"
+                )
+            },
+        )
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == payload
+    assert "sensitive" not in result.stdout
+    assert payload["paper_deployment_allowed"] is False
+    assert payload["live_trading_locked"] is True
+    creation.assert_awaited_once()
+
+
 def test_research_input_plan_compilation_stays_live_locked_and_redacted() -> None:
     payload = {
         "activation_rule": "session_date>snapshot.reference_date",

@@ -59,6 +59,9 @@ from autoquant.web.backtest_store import PostgresBacktestRepository
 from autoquant.web.fundamental_validation_store import (
     PostgresFundamentalValidationRepository,
 )
+from autoquant.web.low_volatility_forward_evaluation_store import (
+    PostgresLowVolatilityForwardEvaluationRepository,
+)
 from autoquant.web.low_volatility_forward_session_store import (
     PostgresLowVolatilityForwardSessionRepository,
 )
@@ -585,6 +588,11 @@ async def _production_service(settings: AppSettings) -> ConsoleService:
     low_volatility_forward_sessions = PostgresLowVolatilityForwardSessionRepository.connect(
         dsn=postgres_dsn
     )
+    low_volatility_forward_evaluations = (
+        PostgresLowVolatilityForwardEvaluationRepository.connect(
+            dsn=postgres_dsn
+        )
+    )
     risks = PostgresRiskDecisionRepository.connect(dsn=postgres_dsn)
     executions = PostgresPaperExecutionRepository.connect(dsn=postgres_dsn)
     execution_controls = PostgresExecutionControlRepository.connect(dsn=postgres_dsn)
@@ -608,6 +616,7 @@ async def _production_service(settings: AppSettings) -> ConsoleService:
         await fundamental_validations.close()
         await low_volatility_validations.close()
         await low_volatility_forward_sessions.close()
+        await low_volatility_forward_evaluations.close()
         await low_volatility_forward_specs.close()
         await risks.close()
         await executions.close()
@@ -654,6 +663,9 @@ async def _production_service(settings: AppSettings) -> ConsoleService:
         low_volatility_validation_repository=(low_volatility_validations),
         low_volatility_forward_spec_repository=(low_volatility_forward_specs),
         low_volatility_forward_session_repository=(low_volatility_forward_sessions),
+        low_volatility_forward_evaluation_repository=(
+            low_volatility_forward_evaluations
+        ),
         risk_repository=risks,
         execution_repository=executions,
         execution_control_repository=execution_controls,

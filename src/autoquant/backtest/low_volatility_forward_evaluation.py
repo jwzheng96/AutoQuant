@@ -136,6 +136,7 @@ class LowVolatilityForwardBlockResult:
 @dataclass(frozen=True, slots=True)
 class LowVolatilityForwardEvaluationResult:
     forward_spec_hash: str
+    evaluation_dataset_manifest_hash: str
     source_spec_hash: str
     predecessor_result_hash: str
     predecessor_assessment_hash: str
@@ -165,6 +166,10 @@ class LowVolatilityForwardEvaluationResult:
     def __post_init__(self) -> None:
         for value, name in (
             (self.forward_spec_hash, "forward evaluation spec hash"),
+            (
+                self.evaluation_dataset_manifest_hash,
+                "forward evaluation dataset manifest hash",
+            ),
             (self.source_spec_hash, "forward evaluation source spec hash"),
             (
                 self.predecessor_result_hash,
@@ -334,6 +339,9 @@ class LowVolatilityForwardEvaluationResult:
                     "forward_compounded_return": _decimal_text(
                         self.forward_compounded_return
                     ),
+                    "evaluation_dataset_manifest_hash": (
+                        self.evaluation_dataset_manifest_hash
+                    ),
                     "forward_excess_return": _decimal_text(
                         self.forward_excess_return
                     ),
@@ -442,6 +450,7 @@ class LowVolatilityForwardEvaluator:
         panel: LowVolatilityExecutablePanel,
         source_spec: LowVolatilityResearchSpec,
         forward_spec: LowVolatilityForwardEvidenceSpec,
+        evaluation_dataset_manifest_hash: str,
         bindings: tuple[LowVolatilityForwardSessionBinding, ...],
         predecessor_result: LowVolatilityValidationResult,
         predecessor_evidence: LowVolatilityValidationEvidence,
@@ -510,6 +519,9 @@ class LowVolatilityForwardEvaluator:
         return _result(
             panel=panel,
             forward_spec=forward_spec,
+            evaluation_dataset_manifest_hash=(
+                evaluation_dataset_manifest_hash
+            ),
             bindings=ordered,
             predecessor_result=predecessor_result,
             strategy=strategy,
@@ -574,6 +586,7 @@ def build_low_volatility_forward_result(
     market_panel_hash: str,
     as_of: datetime,
     forward_spec: LowVolatilityForwardEvidenceSpec,
+    evaluation_dataset_manifest_hash: str,
     bindings: tuple[LowVolatilityForwardSessionBinding, ...],
     predecessor_result: LowVolatilityValidationResult,
     strategy_result: BacktestResult,
@@ -594,6 +607,9 @@ def build_low_volatility_forward_result(
         market_panel_hash=market_panel_hash,
         as_of=as_of,
         forward_spec=forward_spec,
+        evaluation_dataset_manifest_hash=(
+            evaluation_dataset_manifest_hash
+        ),
         bindings=bindings,
         predecessor_result=predecessor_result,
         strategy=strategy_result,
@@ -604,6 +620,7 @@ def build_low_volatility_forward_result(
 def _result(
     *,
     forward_spec: LowVolatilityForwardEvidenceSpec,
+    evaluation_dataset_manifest_hash: str,
     bindings: tuple[LowVolatilityForwardSessionBinding, ...],
     predecessor_result: LowVolatilityValidationResult,
     strategy: BacktestResult,
@@ -641,6 +658,9 @@ def _result(
     )
     return LowVolatilityForwardEvaluationResult(
         forward_spec_hash=forward_spec.spec_hash,
+        evaluation_dataset_manifest_hash=(
+            evaluation_dataset_manifest_hash
+        ),
         source_spec_hash=forward_spec.source_spec_hash,
         predecessor_result_hash=forward_spec.predecessor_result_hash,
         predecessor_assessment_hash=(

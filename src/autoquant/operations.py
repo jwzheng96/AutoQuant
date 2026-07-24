@@ -4,6 +4,7 @@ import asyncio
 import calendar
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from itertools import pairwise
 from uuid import UUID, uuid4
 
 from pydantic import SecretStr
@@ -45,6 +46,13 @@ from autoquant.backtest.fundamental_validation import (
 from autoquant.backtest.low_volatility_forward import (
     LowVolatilityForwardEvidenceSpec,
     LowVolatilityForwardSessionBinding,
+)
+from autoquant.backtest.low_volatility_forward_evaluation import (
+    LowVolatilityForwardEvaluator,
+    assess_low_volatility_forward,
+)
+from autoquant.backtest.low_volatility_forward_panel import (
+    LowVolatilityForwardPanelCompiler,
 )
 from autoquant.backtest.low_volatility_portfolio import (
     LowVolatilityResearchSpec,
@@ -212,6 +220,10 @@ from autoquant.web.fundamental_research_store import (
 from autoquant.web.fundamental_validation_store import (
     FundamentalValidationRecord,
     PostgresFundamentalValidationRepository,
+)
+from autoquant.web.low_volatility_forward_evaluation_store import (
+    LowVolatilityForwardEvaluationRecord,
+    PostgresLowVolatilityForwardEvaluationRepository,
 )
 from autoquant.web.low_volatility_forward_session_store import (
     PostgresLowVolatilityForwardSessionRepository,
@@ -1806,6 +1818,350 @@ async def run_low_volatility_forward_window(
         "window_cycles": max_cycles,
         "window_exhausted": True,
     }
+
+
+async def run_low_volatility_forward_evaluation(
+    settings: AppSettings,
+    *,
+    forward_spec_hash: str,
+    evaluation_dataset_manifest_hash: str,
+    requested_by: str,
+) -> dict[str, object]:
+    """Evaluate only the immutable first 126-session forward window."""
+
+    if settings.live_trading_enabled:
+        raise MissingCapabilityError(
+            "forward evaluation requires live trading locked"
+        )
+    if (
+        not requested_by.strip()
+        or requested_by != requested_by.strip()
+        or len(requested_by) > 128
+    ):
+        raise ValueError(
+            "requested_by must contain 1-128 trimmed characters"
+        )
+    dsn = configured_dsn(
+        settings.postgres_dsn,
+        capability="PostgreSQL",
+    )
+    forward_specs = (
+        PostgresLowVolatilityForwardEvidenceSpecRepository.connect(
+            dsn=dsn
+        )
+    )
+    source_specs = PostgresLowVolatilityResearchSpecRepository.connect(
+        dsn=dsn
+    )
+    sessions = PostgresLowVolatilityForwardSessionRepository.connect(
+        dsn=dsn
+    )
+    campaigns = PostgresResearchDataCampaignRepository.connect(dsn=dsn)
+    universes = PostgresResearchUniverseRepository.connect(dsn=dsn)
+    validations = PostgresLowVolatilityValidationRepository.connect(
+        dsn=dsn
+    )
+    evaluations = (
+        PostgresLowVolatilityForwardEvaluationRepository.connect(
+            dsn=dsn
+        )
+    )
+    control = PostgresControlRepository.connect(dsn=dsn)
+    market: ClickHouseDailyRepository | None = None
+    try:
+        forward = (await forward_specs.read(forward_spec_hash)).spec
+        existing = await evaluations.read_for_spec(forward.spec_hash)
+        if existing is not None:
+            return _low_volatility_forward_evaluation_payload(
+                existing,
+                status="stored",
+            )
+        source = (
+            await source_specs.read(forward.source_spec_hash)
+        ).spec
+        predecessor = await validations.read(
+            forward.predecessor_result_hash
+        )
+        records = await sessions.list_for_spec(
+            forward_spec_hash=forward.spec_hash
+        )
+        if len(records) < forward.minimum_forward_sessions:
+            raise ValueError(
+                "forward evaluation window is incomplete"
+            )
+        selected = records[: forward.minimum_forward_sessions]
+        bindings = tuple(value.binding for value in selected)
+        if (
+            bindings[0].session_date != forward.forward_start_date
+            or any(
+                current.session_date >= following.session_date
+                for current, following in pairwise(bindings)
+            )
+        ):
+            raise ValueError(
+                "forward evaluation window is not the frozen prefix"
+            )
+        source_plan = await _load_research_input_plan(
+            campaigns=campaigns,
+            universes=universes,
+            manifest_hash=source.dataset_manifest_hash,
+        )
+        evaluation_manifest = await campaigns.read_manifest(
+            evaluation_dataset_manifest_hash
+        )
+        market = await ClickHouseDailyRepository.connect(
+            dsn=configured_dsn(
+                settings.clickhouse_dsn,
+                capability="ClickHouse",
+            ),
+            source="tushare",
+        )
+        historical_reader = ExactManifestResearchDatasetReader(
+            plan=source_plan,
+            control_reader=control,
+            record_reader=market,
+            batch_size=4,
+        )
+        forward_reader = ExactManifestResearchDatasetReader(
+            plan=evaluation_manifest,
+            control_reader=control,
+            record_reader=market,
+            batch_size=4,
+        )
+        dynamic_panel = await LowVolatilityForwardPanelCompiler(
+            historical_reader=historical_reader,
+            forward_reader=forward_reader,
+        ).compile(
+            source_plan=source_plan,
+            source_spec=source,
+            forward_spec=forward,
+            forward_manifest=evaluation_manifest,
+            bindings=bindings,
+        )
+        executable = compile_low_volatility_executable_panel(
+            spec=source,
+            markets=dynamic_panel,
+        )
+        result = LowVolatilityForwardEvaluator().run(
+            panel=executable,
+            source_spec=source,
+            forward_spec=forward,
+            evaluation_dataset_manifest_hash=(
+                evaluation_manifest.manifest_hash
+            ),
+            bindings=bindings,
+            predecessor_result=predecessor.result,
+            predecessor_evidence=predecessor.evidence,
+        )
+        assessment = assess_low_volatility_forward(
+            result,
+            spec=forward,
+        )
+        completed_at = datetime.now(UTC)
+        stored = await evaluations.save(
+            result,
+            assessment,
+            requested_by=requested_by,
+            completed_at=completed_at,
+        )
+        payload = _low_volatility_forward_evaluation_payload(
+            stored,
+            status="completed",
+        )
+        await control.append_audit_event(
+            "research.low_volatility.forward_evaluation.completed",
+            completed_at,
+            payload,
+        )
+        return payload
+    finally:
+        if market is not None:
+            await market.client.close()
+        await control.close()
+        await evaluations.close()
+        await validations.close()
+        await universes.close()
+        await campaigns.close()
+        await sessions.close()
+        await source_specs.close()
+        await forward_specs.close()
+
+
+def _low_volatility_forward_evaluation_payload(
+    record: LowVolatilityForwardEvaluationRecord,
+    *,
+    status: str,
+) -> dict[str, object]:
+    result = record.result
+    assessment = record.assessment
+    return {
+        "annualized_forward_return": str(
+            result.annualized_forward_return
+        ),
+        "annualized_stability_gap": str(
+            result.annualized_stability_gap
+        ),
+        "annualized_training_return": str(
+            result.annualized_training_return
+        ),
+        "assessment_hash": assessment.assessment_hash,
+        "benchmark_compounded_return": str(
+            result.benchmark_compounded_return
+        ),
+        "block_count": len(result.blocks),
+        "evidence_status": assessment.evidence_status,
+        "evaluation_dataset_manifest_hash": (
+            result.evaluation_dataset_manifest_hash
+        ),
+        "forward_compounded_return": str(
+            result.forward_compounded_return
+        ),
+        "forward_excess_return": str(
+            result.forward_excess_return
+        ),
+        "forward_spec_hash": result.forward_spec_hash,
+        "gate_failures": list(assessment.gate_failures),
+        "live_trading_locked": True,
+        "paper_deployment_allowed": False,
+        "paper_trading_eligible": (
+            assessment.paper_trading_eligible
+        ),
+        "profitable_block_rate": str(
+            result.profitable_block_rate
+        ),
+        "requested_by": record.requested_by,
+        "result_hash": result.result_hash,
+        "session_count": len(result.session_bindings),
+        "status": status,
+        "strategy_rejected_order_count": (
+            result.strategy_rejected_order_count
+        ),
+        "strategy_unresolved_position_count": (
+            result.strategy_unresolved_position_count
+        ),
+        "version": result.version,
+    }
+
+
+async def create_low_volatility_forward_evaluation_campaign(
+    settings: AppSettings,
+    *,
+    forward_spec_hash: str,
+    requested_by: str,
+) -> dict[str, object]:
+    """Freeze deterministic full-market coverage for the 126-day prefix."""
+
+    if settings.live_trading_enabled:
+        raise MissingCapabilityError(
+            "forward evaluation data requires live trading locked"
+        )
+    if (
+        not requested_by.strip()
+        or requested_by != requested_by.strip()
+        or len(requested_by) > 128
+    ):
+        raise ValueError(
+            "requested_by must contain 1-128 trimmed characters"
+        )
+    dsn = configured_dsn(
+        settings.postgres_dsn,
+        capability="PostgreSQL",
+    )
+    forward_specs = (
+        PostgresLowVolatilityForwardEvidenceSpecRepository.connect(
+            dsn=dsn
+        )
+    )
+    sessions = PostgresLowVolatilityForwardSessionRepository.connect(
+        dsn=dsn
+    )
+    campaigns = PostgresResearchDataCampaignRepository.connect(dsn=dsn)
+    control = PostgresControlRepository.connect(dsn=dsn)
+    try:
+        forward = (await forward_specs.read(forward_spec_hash)).spec
+        records = await sessions.list_for_spec(
+            forward_spec_hash=forward.spec_hash
+        )
+        if len(records) < forward.minimum_forward_sessions:
+            raise ValueError(
+                "forward evaluation data window is incomplete"
+            )
+        bindings = tuple(
+            value.binding
+            for value in records[
+                : forward.minimum_forward_sessions
+            ]
+        )
+        if (
+            bindings[0].session_date != forward.forward_start_date
+            or any(
+                current.session_date >= following.session_date
+                for current, following in pairwise(bindings)
+            )
+            or len({value.policy_hash for value in bindings}) != 1
+        ):
+            raise ValueError(
+                "forward evaluation data prefix is inconsistent"
+            )
+        snapshot_hashes = tuple(
+            dict.fromkeys(value.snapshot_hash for value in bindings)
+        )
+        instruments = tuple(
+            sorted(
+                {
+                    instrument
+                    for value in bindings
+                    for instrument in value.instruments
+                }
+            )
+        )
+        campaign_spec = ResearchDataCampaignSpec(
+            campaign_key=(
+                "low-vol-forward-eval:"
+                f"{forward.spec_hash[:16]}"
+            ),
+            policy_hash=bindings[0].policy_hash,
+            snapshot_hashes=snapshot_hashes,
+            instruments=instruments,
+            start_date=bindings[0].session_date,
+            end_date=bindings[-1].session_date,
+            requested_by=requested_by,
+        )
+        created_at = datetime.now(UTC)
+        status = await campaigns.create(
+            campaign_spec,
+            created_at=created_at,
+        )
+        payload: dict[str, object] = {
+            "campaign_hash": campaign_spec.campaign_hash,
+            "completed_items": sum(
+                value.state == "completed"
+                for value in status.items
+            ),
+            "end_date": campaign_spec.end_date.isoformat(),
+            "forward_spec_hash": forward.spec_hash,
+            "instrument_count": len(instruments),
+            "live_trading_locked": True,
+            "paper_deployment_allowed": False,
+            "session_count": len(bindings),
+            "snapshot_count": len(snapshot_hashes),
+            "start_date": campaign_spec.start_date.isoformat(),
+            "status": status.status,
+        }
+        await control.append_audit_event(
+            "research.low_volatility.forward_evaluation_data.created",
+            created_at,
+            {
+                **payload,
+                "requested_by": requested_by,
+            },
+        )
+        return payload
+    finally:
+        await control.close()
+        await campaigns.close()
+        await sessions.close()
+        await forward_specs.close()
 
 
 async def inspect_fundamental_data_backfill(

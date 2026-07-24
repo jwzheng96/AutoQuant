@@ -38,6 +38,7 @@ from autoquant.operations import (
     compile_research_input,
     complete_qmt_recovery_drill,
     create_compliance_approval,
+    create_low_volatility_forward_evaluation_campaign,
     create_low_volatility_forward_session_campaign,
     create_portfolio_validation,
     create_research_data_campaign,
@@ -66,6 +67,7 @@ from autoquant.operations import (
     run_fundamental_ingestion,
     run_fundamental_validation,
     run_low_volatility_forward_cycle,
+    run_low_volatility_forward_evaluation,
     run_low_volatility_forward_window,
     run_low_volatility_validation,
     run_qmt_observer,
@@ -1402,6 +1404,68 @@ def low_volatility_forward_window_run(
     _emit(payload)
     if payload["status"] in {"failed", "window_exhausted"}:
         raise typer.Exit(code=2)
+
+
+@app.command("low-volatility-forward-evaluate")
+def low_volatility_forward_evaluate(
+    forward_spec_hash: Annotated[
+        str,
+        typer.Option("--forward-spec-hash"),
+    ],
+    evaluation_dataset_manifest_hash: Annotated[
+        str,
+        typer.Option("--evaluation-dataset-manifest-hash"),
+    ],
+    requested_by: Annotated[
+        str,
+        typer.Option("--requested-by"),
+    ],
+) -> None:
+    """Evaluate the frozen 126-session prefix without deploying it."""
+
+    try:
+        payload = asyncio.run(
+            run_low_volatility_forward_evaluation(
+                _settings(),
+                forward_spec_hash=forward_spec_hash,
+                evaluation_dataset_manifest_hash=(
+                    evaluation_dataset_manifest_hash
+                ),
+                requested_by=requested_by,
+            )
+        )
+    except (AutoQuantError, LookupError, ValueError):
+        _fail("low-volatility forward evaluation failed closed")
+    _emit(payload)
+
+
+@app.command("low-volatility-forward-evaluation-data-create")
+def low_volatility_forward_evaluation_data_create(
+    forward_spec_hash: Annotated[
+        str,
+        typer.Option("--forward-spec-hash"),
+    ],
+    requested_by: Annotated[
+        str,
+        typer.Option("--requested-by"),
+    ],
+) -> None:
+    """Create deterministic full coverage after the 126-day gate."""
+
+    try:
+        payload = asyncio.run(
+            create_low_volatility_forward_evaluation_campaign(
+                _settings(),
+                forward_spec_hash=forward_spec_hash,
+                requested_by=requested_by,
+            )
+        )
+    except (AutoQuantError, LookupError, ValueError):
+        _fail(
+            "low-volatility forward evaluation data creation "
+            "failed closed"
+        )
+    _emit(payload)
 
 
 @app.command("fundamental-data-run")

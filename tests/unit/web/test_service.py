@@ -78,6 +78,7 @@ def _service(
     qmt_sessions: MagicMock | None = None,
     forward_specs: MagicMock | None = None,
     forward_sessions: MagicMock | None = None,
+    forward_evaluations: MagicMock | None = None,
     market: MagicMock | None = None,
 ) -> ConsoleService:
     market = MagicMock() if market is None else market
@@ -104,6 +105,9 @@ def _service(
         qmt_session_repository=qmt_sessions,
         low_volatility_forward_spec_repository=(forward_specs),
         low_volatility_forward_session_repository=(forward_sessions),
+        low_volatility_forward_evaluation_repository=(
+            forward_evaluations
+        ),
         now=lambda: NOW,
         poll_interval=0.01,
     )
@@ -214,6 +218,88 @@ async def test_forward_progress_exposes_missing_sessions_and_keeps_locks() -> No
     assert progress.completed_required_sessions == 1
     assert progress.remaining_required_sessions == 125
     assert progress.missing_session_dates == (date(2025, 1, 2),)
+    assert progress.paper_trading_unlocked is False
+    assert progress.live_trading_locked is True
+
+
+@pytest.mark.asyncio
+async def test_forward_progress_exposes_evaluation_without_deploying() -> None:
+    start = date(2025, 1, 1)
+    open_dates = tuple(
+        start + timedelta(days=index) for index in range(126)
+    )
+    specification = MagicMock()
+    specification.spec = MagicMock(
+        spec_hash="a" * 64,
+        forward_start_date=start,
+        minimum_forward_sessions=126,
+        minimum_paper_sessions=60,
+    )
+    forward_specs = MagicMock()
+    forward_specs.latest = AsyncMock(return_value=specification)
+    records = tuple(
+        MagicMock(
+            binding=MagicMock(
+                binding_hash=f"{index + 1:064x}",
+                dataset_manifest_hash=f"{index + 1000:064x}",
+                session_date=session_date,
+                snapshot_hash=f"{index + 2000:064x}",
+                snapshot_reference_date=(
+                    session_date - timedelta(days=1)
+                ),
+                instruments=("000001.XSHE",),
+            ),
+            completed_at=NOW,
+        )
+        for index, session_date in enumerate(open_dates)
+    )
+    forward_sessions = MagicMock()
+    forward_sessions.list_for_spec = AsyncMock(
+        return_value=records
+    )
+    forward_evaluations = MagicMock()
+    forward_evaluations.read_for_spec = AsyncMock(
+        return_value=MagicMock(
+            result=MagicMock(result_hash="b" * 64),
+            assessment=MagicMock(
+                assessment_hash="c" * 64,
+                evidence_status="paper_candidate",
+                gate_failures=(),
+                paper_trading_eligible=True,
+            ),
+        )
+    )
+    market = MagicMock()
+    market.query_sessions_as_of = AsyncMock(
+        return_value=tuple(
+            MagicMock(
+                session_date=session_date,
+                is_open=True,
+            )
+            for session_date in open_dates
+        )
+    )
+    service = _service(
+        operator=MagicMock(),
+        control=MagicMock(),
+        runner=AsyncMock(),
+        forward_specs=forward_specs,
+        forward_sessions=forward_sessions,
+        forward_evaluations=forward_evaluations,
+        market=market,
+    )
+
+    progress = await service.low_volatility_forward_progress()
+
+    assert (
+        progress.status
+        == "forward_evaluation_passed_awaiting_paper_approval"
+    )
+    assert progress.evaluation_result_hash == "b" * 64
+    assert progress.evaluation_assessment_hash == "c" * 64
+    assert progress.evaluation_evidence_status == "paper_candidate"
+    assert progress.paper_trading_eligible is True
+    assert progress.paper_deployment_allowed is False
     assert progress.paper_trading_unlocked is False
     assert progress.live_trading_locked is True
 

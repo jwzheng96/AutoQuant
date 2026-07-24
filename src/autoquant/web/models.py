@@ -632,6 +632,18 @@ class LowVolatilityForwardProgressView(BaseModel):
     required_window_end: date | None = None
     status: str
     sessions: tuple[LowVolatilityForwardSessionView, ...]
+    evaluation_result_hash: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    evaluation_assessment_hash: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    evaluation_evidence_status: str | None = None
+    evaluation_gate_failures: tuple[str, ...] = ()
+    paper_trading_eligible: bool = False
+    paper_deployment_allowed: bool = False
     historical_result_eligible_for_promotion: bool = False
     paper_trading_unlocked: bool = False
     live_trading_locked: bool = True
@@ -650,6 +662,24 @@ class LowVolatilityForwardProgressView(BaseModel):
             != self.minimum_forward_sessions - self.completed_required_sessions
             or self.missing_session_dates != tuple(sorted(self.missing_session_dates))
             or self.calendar_conflict_dates != tuple(sorted(self.calendar_conflict_dates))
+            or (
+                self.evaluation_result_hash is None
+                or self.evaluation_assessment_hash is None
+                or self.evaluation_evidence_status is None
+            )
+            != (
+                self.evaluation_result_hash is None
+                and self.evaluation_assessment_hash is None
+                and self.evaluation_evidence_status is None
+            )
+            or len(set(self.evaluation_gate_failures))
+            != len(self.evaluation_gate_failures)
+            or self.paper_trading_eligible
+            != (
+                self.evaluation_evidence_status
+                == "paper_candidate"
+            )
+            or self.paper_deployment_allowed
             or self.historical_result_eligible_for_promotion
             or self.paper_trading_unlocked
             or not self.live_trading_locked
@@ -659,7 +689,31 @@ class LowVolatilityForwardProgressView(BaseModel):
                 "calendar_conflict",
                 "collecting_forward_sessions",
                 "session_gate_complete_awaiting_evaluation",
+                "forward_evaluation_passed_awaiting_paper_approval",
+                "forward_evaluation_rejected",
             }
+            or (
+                self.evaluation_evidence_status
+                not in {None, "paper_candidate", "rejected"}
+            )
+            or (
+                (
+                    self.status
+                    == "forward_evaluation_passed_awaiting_paper_approval"
+                )
+                and (
+                    self.evaluation_evidence_status
+                    != "paper_candidate"
+                )
+            )
+            or (
+                (
+                    self.status == "forward_evaluation_rejected"
+                )
+                and (
+                    self.evaluation_evidence_status != "rejected"
+                )
+            )
         ):
             raise ValueError("low-volatility forward progress is inconsistent")
         return self

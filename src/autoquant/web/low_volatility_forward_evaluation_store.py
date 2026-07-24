@@ -158,6 +158,7 @@ class PostgresLowVolatilityForwardEvaluationRepository:
                             INSERT INTO {self._schema}.
                                 low_volatility_forward_evaluation_runs
                                 (result_hash, forward_spec_hash,
+                                 evaluation_dataset_manifest_hash,
                                  source_spec_hash,
                                  predecessor_result_hash,
                                  predecessor_assessment_hash,
@@ -178,6 +179,7 @@ class PostgresLowVolatilityForwardEvaluationRepository:
                                  summary_payload, assessment_payload)
                             VALUES
                                 (:result_hash, :forward_spec_hash,
+                                 :evaluation_dataset_manifest_hash,
                                  :source_spec_hash,
                                  :predecessor_result_hash,
                                  :predecessor_assessment_hash,
@@ -406,6 +408,9 @@ def _run_parameters(
         "completed_at": record.completed_at,
         "evaluation_version": result.version,
         "evidence_status": assessment.evidence_status,
+        "evaluation_dataset_manifest_hash": (
+            result.evaluation_dataset_manifest_hash
+        ),
         "forward_spec_hash": result.forward_spec_hash,
         "market_panel_hash": result.market_panel_hash,
         "panel_hash": result.panel_hash,
@@ -473,6 +478,9 @@ def _record(
         blocks = tuple(_block(row) for row in block_rows)
         result = LowVolatilityForwardEvaluationResult(
             forward_spec_hash=str(run["forward_spec_hash"]),
+            evaluation_dataset_manifest_hash=str(
+                run["evaluation_dataset_manifest_hash"]
+            ),
             source_spec_hash=str(run["source_spec_hash"]),
             predecessor_result_hash=str(
                 run["predecessor_result_hash"]

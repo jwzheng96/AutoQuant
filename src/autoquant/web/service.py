@@ -57,6 +57,9 @@ from autoquant.web.fundamental_validation_store import (
     FundamentalValidationRecord,
     PostgresFundamentalValidationRepository,
 )
+from autoquant.web.low_volatility_forward_evaluation_store import (
+    PostgresLowVolatilityForwardEvaluationRepository,
+)
 from autoquant.web.low_volatility_forward_session_store import (
     PostgresLowVolatilityForwardSessionRepository,
 )
@@ -285,6 +288,9 @@ class ConsoleService:
         low_volatility_forward_session_repository: (
             PostgresLowVolatilityForwardSessionRepository | None
         ) = None,
+        low_volatility_forward_evaluation_repository: (
+            PostgresLowVolatilityForwardEvaluationRepository | None
+        ) = None,
         universe_repository: (PostgresResearchUniverseRepository | None) = None,
         risk_repository: PostgresRiskDecisionRepository | None = None,
         execution_repository: PostgresPaperExecutionRepository | None = None,
@@ -329,6 +335,9 @@ class ConsoleService:
             )
         self._low_volatility_forward_specs = low_volatility_forward_spec_repository
         self._low_volatility_forward_sessions = low_volatility_forward_session_repository
+        self._low_volatility_forward_evaluations = (
+            low_volatility_forward_evaluation_repository
+        )
         self._universes = universe_repository
         self._risk = risk_repository
         self._execution = execution_repository
@@ -520,6 +529,8 @@ class ConsoleService:
             await self._low_volatility_validations.close()
         if self._low_volatility_forward_sessions is not None:
             await self._low_volatility_forward_sessions.close()
+        if self._low_volatility_forward_evaluations is not None:
+            await self._low_volatility_forward_evaluations.close()
         if self._low_volatility_forward_specs is not None:
             await self._low_volatility_forward_specs.close()
         if self._universes is not None:
@@ -870,6 +881,13 @@ class ConsoleService:
         records = await self._low_volatility_forward_sessions.list_for_spec(
             forward_spec_hash=spec.spec_hash,
         )
+        evaluation = (
+            None
+            if self._low_volatility_forward_evaluations is None
+            else await self._low_volatility_forward_evaluations.read_for_spec(
+                spec.spec_hash
+            )
+        )
         now = self._now()
         safe_cutoff = to_shanghai(now).date() - timedelta(days=1)
         calendar = (
@@ -896,6 +914,13 @@ class ConsoleService:
             status = "backfill_required"
         elif len(required_window) < (spec.minimum_forward_sessions):
             status = "collecting_forward_sessions"
+        elif evaluation is not None:
+            status = (
+                "forward_evaluation_passed_awaiting_paper_approval"
+                if evaluation.assessment.evidence_status
+                == "paper_candidate"
+                else "forward_evaluation_rejected"
+            )
         else:
             status = "session_gate_complete_awaiting_evaluation"
         return LowVolatilityForwardProgressView(
@@ -916,6 +941,31 @@ class ConsoleService:
                 else None
             ),
             status=status,
+            evaluation_result_hash=(
+                None
+                if evaluation is None
+                else evaluation.result.result_hash
+            ),
+            evaluation_assessment_hash=(
+                None
+                if evaluation is None
+                else evaluation.assessment.assessment_hash
+            ),
+            evaluation_evidence_status=(
+                None
+                if evaluation is None
+                else evaluation.assessment.evidence_status
+            ),
+            evaluation_gate_failures=(
+                ()
+                if evaluation is None
+                else evaluation.assessment.gate_failures
+            ),
+            paper_trading_eligible=(
+                False
+                if evaluation is None
+                else evaluation.assessment.paper_trading_eligible
+            ),
             sessions=tuple(
                 LowVolatilityForwardSessionView(
                     binding_hash=record.binding.binding_hash,

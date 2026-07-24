@@ -204,6 +204,17 @@ class ExactDailyRecordReader(Protocol):
     ) -> ExactDailyRecordBatch: ...
 
 
+class ExactResearchShardPlan(Protocol):
+    @property
+    def start_date(self) -> date: ...
+
+    @property
+    def end_date(self) -> date: ...
+
+    @property
+    def shards(self) -> tuple[ResearchDatasetShard, ...]: ...
+
+
 class DailyManifestEvidenceReader(DailyManifestReader, Protocol):
     async def read_quality_report(
         self,
@@ -295,7 +306,7 @@ class ExactManifestResearchDatasetReader:
     def __init__(
         self,
         *,
-        plan: ResearchInputPlan,
+        plan: ExactResearchShardPlan,
         control_reader: DailyManifestEvidenceReader,
         record_reader: ExactDailyRecordReader,
         batch_size: int = 4,

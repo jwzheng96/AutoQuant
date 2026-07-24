@@ -66,6 +66,17 @@ calendar conflicts or terminal data failures.
 The bounded `low-volatility-forward-window-run` command composes at most 20 such attempts to
 finish one 300-instrument session in a scheduled job; it stops after one freeze or any waiting,
 failure, or completed-gate state and reports exhaustion as a nonzero exit.
+PostgreSQL schema v44 adds the terminal forward evaluation that was previously missing. The
+`low-volatility-forward-evaluate` command refuses to write anything before all 126 prefix
+sessions exist, reconstructs every hash-addressed source and evaluation shard, runs the unchanged
+strategy and equal-weight benchmark continuously over that prefix, and freezes the full
+backtest artifacts plus six 21-session blocks. A passing result is only a
+`paper_candidate`: the evaluation row has `paper_deployment_allowed=false` and
+`live_trading_locked=true`, so a separate future paper approval remains mandatory.
+Schema v45 additionally requires one full-window evaluation dataset over the deterministic
+union of the 126 frozen point-in-time universes. This ensures a position can still be valued
+and exited after leaving an index; it cannot change the frozen active members, session prefix,
+signal, or parameters.
 PostgreSQL schema v36 adds an append-only, revocable compliance-approval artifact bound to the
 active paper registration and exact promotion policy. No approval is created automatically,
 and even a valid artifact can only satisfy an evidence gate while the code-level live release
