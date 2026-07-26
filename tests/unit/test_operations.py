@@ -162,6 +162,47 @@ async def test_forward_window_stops_waiting_without_sleep_or_vendor_loop() -> No
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "terminal_status",
+    (
+        "waiting_for_data_availability",
+        "retry_authorization_required",
+    ),
+)
+async def test_forward_window_stops_on_visibility_or_retry_gate(
+    terminal_status: str,
+) -> None:
+    cycle = AsyncMock(
+        return_value={
+            "status": terminal_status,
+            "completed_required_sessions": 1,
+        }
+    )
+    sleeper = AsyncMock()
+    with (
+        patch(
+            "autoquant.operations.run_low_volatility_forward_cycle",
+            new=cycle,
+        ),
+        patch("autoquant.operations.asyncio.sleep", new=sleeper),
+    ):
+        result = await run_low_volatility_forward_window(
+            _settings(),
+            forward_spec_hash="b" * 64,
+            requested_by="forward-collector",
+            max_cycles=20,
+            max_items=25,
+            pause_seconds=Decimal("1.25"),
+            interval_seconds=Decimal("5"),
+        )
+
+    assert result["status"] == terminal_status
+    assert result["window_cycles"] == 1
+    cycle.assert_awaited_once()
+    sleeper.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_forward_window_exhaustion_is_explicitly_non_successful() -> None:
     cycle = AsyncMock(return_value={"status": "batch_progress"})
     with patch(

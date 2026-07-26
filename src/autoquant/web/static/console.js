@@ -890,6 +890,7 @@ async function loadLowVolatilityForwardProgress() {
       backfill_required: "存在待补交易日",
       calendar_conflict: "日历修订冲突",
       collecting_forward_sessions: "积累前瞻交易日",
+      waiting_for_data_availability: "等待下一交易日 09:30 数据可见",
       session_gate_complete_awaiting_evaluation: "交易日数量达标，等待评估",
       forward_evaluation_passed_awaiting_paper_approval:
         "前瞻评估通过，等待模拟盘显式批准",
@@ -921,6 +922,12 @@ async function loadLowVolatilityForwardProgress() {
         ? `冲突 ${progress.calendar_conflict_dates.join(", ")}`
         : progress.missing_session_dates.length
           ? progress.missing_session_dates.join(", ")
+          : progress.pending_availability_session_dates.length
+            ? `等待 ${progress.pending_availability_session_dates.join(", ")}${
+                progress.next_collection_eligible_at
+                  ? `（${new Date(progress.next_collection_eligible_at).toLocaleString()} 后）`
+                  : "（下一开市时间尚无完整日历证据）"
+              }`
           : "0",
     );
     setText(

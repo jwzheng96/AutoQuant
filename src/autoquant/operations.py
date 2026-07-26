@@ -78,6 +78,9 @@ from autoquant.backtest.validation import (
 from autoquant.clock import SHANGHAI, to_shanghai
 from autoquant.config import AppSettings, RuntimeEnvironment
 from autoquant.data.calendar_refresh import TradingCalendarRefreshService
+from autoquant.data.daily_availability import (
+    completed_daily_session_availability,
+)
 from autoquant.data.daily_ingestion import (
     DailyIngestionRequest,
     DailyIngestionService,
@@ -1641,17 +1644,22 @@ async def create_low_volatility_forward_session_campaign(
             ),
             source="tushare",
         )
-        sessions = await market.query_sessions_as_of(
+        calendar = await market.query_sessions_as_of(
             session_date,
-            session_date,
+            session_date + timedelta(days=14),
             now,
         )
-        if (
-            len(sessions) != 1
-            or sessions[0].session_date != session_date
-            or not sessions[0].is_open
-        ):
+        availability = completed_daily_session_availability(calendar, now)
+        session = next(
+            (value for value in calendar if value.session_date == session_date),
+            None,
+        )
+        if session is None or not session.is_open:
             raise ValueError("forward session is not proven open")
+        if session_date not in availability.eligible_open_dates:
+            raise ValueError(
+                "forward session daily data is not visible before the next session open"
+            )
         candidates = tuple(
             value
             for value in await universes.list(limit=200)
@@ -1697,7 +1705,7 @@ async def create_low_volatility_forward_session_campaign(
             now,
             {
                 **payload,
-                "calendar_content_hash": (sessions[0].content_hash),
+                "calendar_content_hash": session.content_hash,
                 "requested_by": requested_by,
             },
         )
@@ -1871,7 +1879,7 @@ async def run_low_volatility_forward_cycle(
         forward = (await forward_specs.read(forward_spec_hash)).spec
         records = await sessions.list_for_spec(forward_spec_hash=forward.spec_hash)
         now = datetime.now(UTC)
-        safe_cutoff = to_shanghai(now).date() - timedelta(days=1)
+        local_date = to_shanghai(now).date()
         market = await ClickHouseDailyRepository.connect(
             dsn=configured_dsn(
                 settings.clickhouse_dsn,
@@ -1879,18 +1887,23 @@ async def run_low_volatility_forward_cycle(
             ),
             source="tushare",
         )
-        calendar = (
-            ()
-            if safe_cutoff < forward.forward_start_date
-            else await market.query_sessions_as_of(
+        calendar = await market.query_sessions_as_of(
+            forward.forward_start_date,
+            max(
                 forward.forward_start_date,
-                safe_cutoff,
-                now,
-            )
+                local_date + timedelta(days=14),
+            ),
+            now,
         )
-        open_dates = tuple(value.session_date for value in calendar if value.is_open)
+        availability = completed_daily_session_availability(calendar, now)
+        open_dates = availability.eligible_open_dates
+        historical_open_dates = tuple(
+            value.session_date
+            for value in calendar
+            if value.is_open and value.session_date < local_date
+        )
         bound_dates = tuple(value.binding.session_date for value in records)
-        conflicts = tuple(value for value in bound_dates if value not in set(open_dates))
+        conflicts = tuple(value for value in bound_dates if value not in set(historical_open_dates))
         if conflicts:
             raise ValueError("forward cycle found a calendar conflict")
         target = _next_low_volatility_forward_session(
@@ -1901,6 +1914,12 @@ async def run_low_volatility_forward_cycle(
         completed_required = len(
             set(bound_dates).intersection(open_dates[: forward.minimum_forward_sessions])
         )
+        pending_required = availability.pending_open_dates[
+            : max(forward.minimum_forward_sessions - len(open_dates), 0)
+        ]
+        safe_cutoff = (
+            open_dates[-1] if open_dates else forward.forward_start_date - timedelta(days=1)
+        )
         base: dict[str, object] = {
             "completed_required_sessions": (completed_required),
             "forward_spec_hash": forward.spec_hash,
@@ -1908,12 +1927,25 @@ async def run_low_volatility_forward_cycle(
             "minimum_forward_sessions": (forward.minimum_forward_sessions),
             "remaining_required_sessions": (forward.minimum_forward_sessions - completed_required),
             "safe_cutoff_date": safe_cutoff.isoformat(),
+            "pending_availability_session_dates": [
+                value.isoformat()
+                for value in pending_required
+            ],
+            "next_collection_eligible_at": (
+                None
+                if not pending_required or availability.next_eligible_at is None
+                else availability.next_eligible_at.isoformat()
+            ),
         }
         if target is None:
             base["status"] = (
                 "session_gate_complete_awaiting_evaluation"
                 if len(open_dates) >= forward.minimum_forward_sessions
-                else "waiting_for_completed_session"
+                else (
+                    "waiting_for_data_availability"
+                    if pending_required
+                    else "waiting_for_completed_session"
+                )
             )
             return base
     finally:
@@ -1929,6 +1961,13 @@ async def run_low_volatility_forward_cycle(
         requested_by=requested_by,
     )
     campaign_hash = str(creation["campaign_hash"])
+    if creation["status"] == "failed":
+        return {
+            **base,
+            "campaign_hash": campaign_hash,
+            "session_date": target.isoformat(),
+            "status": "retry_authorization_required",
+        }
     batch = await run_research_data_campaign(
         settings,
         campaign_hash=campaign_hash,
@@ -1987,8 +2026,10 @@ async def run_low_volatility_forward_window(
         raise ValueError("interval_seconds must be between 0 and 600")
     terminal = {
         "failed",
+        "retry_authorization_required",
         "session_frozen",
         "session_gate_complete_awaiting_evaluation",
+        "waiting_for_data_availability",
         "waiting_for_completed_session",
     }
     statuses: list[str] = []
@@ -4208,6 +4249,19 @@ def _research_data_campaign_payload(
         state: sum(value.state == state for value in status.items)
         for state in ("queued", "running", "completed", "failed")
     }
+    terminal_error_counts = {
+        error_code: sum(
+            value.state == "failed" and value.error_code == error_code
+            for value in status.items
+        )
+        for error_code in sorted(
+            {
+                value.error_code
+                for value in status.items
+                if value.state == "failed" and value.error_code is not None
+            }
+        )
+    }
     return {
         "campaign_hash": status.spec.campaign_hash,
         "campaign_key": status.spec.campaign_key,
@@ -4221,6 +4275,7 @@ def _research_data_campaign_payload(
         "snapshot_count": len(status.spec.snapshot_hashes),
         "start_date": status.spec.start_date.isoformat(),
         "status": status.status,
+        "terminal_error_counts": terminal_error_counts,
     }
 
 

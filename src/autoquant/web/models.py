@@ -629,6 +629,8 @@ class LowVolatilityForwardProgressView(BaseModel):
     remaining_required_sessions: int = Field(ge=0)
     missing_session_dates: tuple[date, ...]
     calendar_conflict_dates: tuple[date, ...]
+    pending_availability_session_dates: tuple[date, ...] = ()
+    next_collection_eligible_at: datetime | None = None
     required_window_end: date | None = None
     status: str
     sessions: tuple[LowVolatilityForwardSessionView, ...]
@@ -681,6 +683,13 @@ class LowVolatilityForwardProgressView(BaseModel):
         self,
     ) -> Self:
         session_dates = tuple(value.session_date for value in self.sessions)
+        if self.next_collection_eligible_at is not None:
+            if (
+                self.next_collection_eligible_at.tzinfo is None
+                or self.next_collection_eligible_at.utcoffset() is None
+            ):
+                raise ValueError("next forward collection eligibility must be timezone-aware")
+            self.next_collection_eligible_at = self.next_collection_eligible_at.astimezone(UTC)
         if (
             self.completed_sessions != len(self.sessions)
             or session_dates != tuple(sorted(session_dates))
@@ -690,6 +699,14 @@ class LowVolatilityForwardProgressView(BaseModel):
             != self.minimum_forward_sessions - self.completed_required_sessions
             or self.missing_session_dates != tuple(sorted(self.missing_session_dates))
             or self.calendar_conflict_dates != tuple(sorted(self.calendar_conflict_dates))
+            or self.pending_availability_session_dates
+            != tuple(sorted(self.pending_availability_session_dates))
+            or len(set(self.pending_availability_session_dates))
+            != len(self.pending_availability_session_dates)
+            or (
+                self.next_collection_eligible_at is not None
+                and not self.pending_availability_session_dates
+            )
             or (
                 self.evaluation_result_hash is None
                 or self.evaluation_assessment_hash is None
@@ -776,6 +793,7 @@ class LowVolatilityForwardProgressView(BaseModel):
                 "backfill_required",
                 "calendar_conflict",
                 "collecting_forward_sessions",
+                "waiting_for_data_availability",
                 "session_gate_complete_awaiting_evaluation",
                 "forward_evaluation_passed_awaiting_paper_approval",
                 "forward_evaluation_rejected",

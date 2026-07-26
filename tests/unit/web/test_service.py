@@ -86,6 +86,7 @@ def _service(
     compatibility_runs: MagicMock | None = None,
     low_volatility_deployment: MagicMock | None = None,
     market: MagicMock | None = None,
+    now: datetime = NOW,
 ) -> ConsoleService:
     market = MagicMock() if market is None else market
     market.client = MagicMock()
@@ -115,7 +116,7 @@ def _service(
         low_volatility_compatibility_spec_repository=(compatibility_specs),
         low_volatility_compatibility_run_repository=(compatibility_runs),
         low_volatility_deployment_reader=(low_volatility_deployment),
-        now=lambda: NOW,
+        now=lambda: now,
         poll_interval=0.01,
     )
 
@@ -208,6 +209,10 @@ async def test_forward_progress_exposes_missing_sessions_and_keeps_locks() -> No
                 session_date=date(2025, 1, 2),
                 is_open=True,
             ),
+            MagicMock(
+                session_date=date(2025, 1, 3),
+                is_open=True,
+            ),
         )
     )
     compatibility_specs = MagicMock()
@@ -233,6 +238,7 @@ async def test_forward_progress_exposes_missing_sessions_and_keeps_locks() -> No
         compatibility_runs=compatibility_runs,
         low_volatility_deployment=deployment,
         market=market,
+        now=datetime(2025, 1, 3, 2, tzinfo=UTC),
     )
 
     progress = await service.low_volatility_forward_progress()
@@ -250,6 +256,78 @@ async def test_forward_progress_exposes_missing_sessions_and_keeps_locks() -> No
     assert progress.deployment_contract_hash is None
     assert progress.deployment_contract_status == "not_frozen"
     assert progress.ready_for_runtime is False
+    assert progress.live_trading_locked is True
+
+
+@pytest.mark.asyncio
+async def test_forward_progress_waits_for_next_open_daily_visibility() -> None:
+    specification = MagicMock()
+    specification.spec = MagicMock(
+        spec_hash="a" * 64,
+        forward_start_date=date(2026, 7, 23),
+        minimum_forward_sessions=126,
+        minimum_paper_sessions=60,
+    )
+    forward_specs = MagicMock()
+    forward_specs.latest = AsyncMock(return_value=specification)
+    binding = MagicMock(
+        binding_hash="b" * 64,
+        dataset_manifest_hash="c" * 64,
+        session_date=date(2026, 7, 23),
+        snapshot_hash="d" * 64,
+        snapshot_reference_date=date(2026, 7, 22),
+        instruments=("000001.XSHE",),
+    )
+    forward_sessions = MagicMock()
+    forward_sessions.list_for_spec = AsyncMock(
+        return_value=(
+            MagicMock(
+                binding=binding,
+                completed_at=datetime(2026, 7, 24, tzinfo=UTC),
+            ),
+        )
+    )
+    market = MagicMock()
+    market.query_sessions_as_of = AsyncMock(
+        return_value=tuple(
+            MagicMock(
+                session_date=date(2026, 7, day),
+                is_open=is_open,
+            )
+            for day, is_open in (
+                (23, True),
+                (24, True),
+                (25, False),
+                (26, False),
+                (27, True),
+            )
+        )
+    )
+    service = _service(
+        operator=MagicMock(),
+        control=MagicMock(),
+        runner=AsyncMock(),
+        forward_specs=forward_specs,
+        forward_sessions=forward_sessions,
+        market=market,
+        now=datetime(2026, 7, 26, 2, tzinfo=UTC),
+    )
+
+    progress = await service.low_volatility_forward_progress()
+
+    assert progress.status == "waiting_for_data_availability"
+    assert progress.safe_cutoff_date == date(2026, 7, 23)
+    assert progress.observed_open_sessions == 1
+    assert progress.missing_session_dates == ()
+    assert progress.pending_availability_session_dates == (date(2026, 7, 24),)
+    assert progress.next_collection_eligible_at == datetime(
+        2026,
+        7,
+        27,
+        1,
+        30,
+        tzinfo=UTC,
+    )
     assert progress.live_trading_locked is True
 
 
@@ -295,13 +373,14 @@ async def test_forward_progress_exposes_evaluation_without_deploying() -> None:
         )
     )
     market = MagicMock()
+    next_open_date = open_dates[-1] + timedelta(days=1)
     market.query_sessions_as_of = AsyncMock(
         return_value=tuple(
             MagicMock(
                 session_date=session_date,
                 is_open=True,
             )
-            for session_date in open_dates
+            for session_date in (*open_dates, next_open_date)
         )
     )
     compatibility_spec = MagicMock(spec_hash="d" * 64)
@@ -339,6 +418,12 @@ async def test_forward_progress_exposes_evaluation_without_deploying() -> None:
         compatibility_runs=compatibility_runs,
         low_volatility_deployment=deployment,
         market=market,
+        now=datetime.combine(
+            next_open_date,
+            datetime.min.time(),
+            tzinfo=UTC,
+        )
+        + timedelta(hours=2),
     )
 
     progress = await service.low_volatility_forward_progress()

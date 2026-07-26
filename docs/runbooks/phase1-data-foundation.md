@@ -421,6 +421,11 @@ uv run autoquant research-data-campaign-retry \
   --confirm-data-retry
 ```
 
+`research-data-campaign-status` includes `terminal_error_counts` so the operator can prove the
+failure class before authorizing a retry. Do not retry `daily_quality_rejected` merely because a
+record exists at the vendor. When the quality report says `record_not_visible`, wait until the
+record's frozen availability policy has elapsed.
+
 When every shard is complete, the worker creates one immutable aggregate
 research manifest binding the policy hash, all monthly snapshot hashes and all
 daily shard manifest hashes. Until that aggregate exists, expanded portfolio
@@ -852,13 +857,20 @@ of the required 126; live trading remains locked.
 
 The authenticated operator console exposes the same ledger read-only at
 `GET /api/v1/low-volatility-forward-progress` and on the research page. It reports the latest
-safe Shanghai cutoff, completed bindings, missing already-open sessions, calendar revisions,
-the remaining forward-session count, and the still-locked 60-session paper gate. At the first
-binding the verified state is `collecting_forward_sessions`, `1/126`, with no missing session
-or calendar conflict.
+safe daily-data cutoff, completed bindings, missing eligible sessions, calendar revisions,
+completed sessions still waiting for daily-data visibility, the next eligible instant, the
+remaining forward-session count, and the still-locked 60-session paper gate.
+
+Forward eligibility is deliberately stricter than “the calendar date has ended.” Under
+`tushare-daily-v1`, one session's daily bar and adjustment factor become visible only at 09:30
+Asia/Shanghai on the next open trading session. For example, Friday data remains pending through
+the weekend and becomes eligible on Monday at 09:30 if Monday is open. The API reports
+`waiting_for_data_availability`; it must not report that Friday as a missing backfill before then.
+If the next open session is absent from the hash-addressed calendar evidence, eligibility remains
+unknown and collection stays closed.
 
 For unattended, bounded progress, invoke one collection window after the conservative cutoff has
-advanced (for example at 06:30 Shanghai time each day):
+advanced (for example at 09:35 Shanghai time on each open trading day):
 
 ```bash
 uv run autoquant low-volatility-forward-window-run \
@@ -873,13 +885,15 @@ uv run autoquant low-volatility-forward-window-run \
 
 The window makes at most 20 cycle attempts and each attempt processes at most 25 persistent queue
 items. It continues only while the cycle reports `batch_progress`, and stops immediately after
-one session freezes, no completed session is eligible, the 126-session gate is complete, or a
-terminal failure appears. Exhausting all attempts returns `window_exhausted` and exit code 2 so
-an external scheduler can alert instead of treating partial progress as success. A calendar
+one session freezes, no completed session is eligible, daily visibility is pending, the
+126-session gate is complete, a failed campaign requires retry authorization, or a terminal
+failure appears. Exhausting all attempts returns `window_exhausted` and exit code 2 so an
+external scheduler can alert instead of treating partial progress as success. A calendar
 conflict or terminal shard failure still requires investigation and the separate explicitly
-authorized retry command. Schedule this command on one host; do not wrap it in a permanent tight
-loop. The original `low-volatility-forward-cycle-run` remains available for one-attempt
-diagnostics.
+authorized retry command. A campaign already containing terminal failures returns
+`retry_authorization_required` without claiming its remaining queued items. Schedule this command
+on one host; do not wrap it in a permanent tight loop. The original
+`low-volatility-forward-cycle-run` remains available for one-attempt diagnostics.
 
 ## Future-only low-volatility evidence correction
 

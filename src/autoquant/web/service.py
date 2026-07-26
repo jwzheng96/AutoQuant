@@ -26,6 +26,9 @@ from autoquant.backtest.portfolio_validation import (
 from autoquant.backtest.validation import WalkForwardConfig, WalkForwardResult
 from autoquant.clock import to_shanghai
 from autoquant.config import AppSettings
+from autoquant.data.daily_availability import (
+    completed_daily_session_availability,
+)
 from autoquant.errors import AutoQuantError, PersistenceUnavailableError
 from autoquant.execution.control import KillSwitchReason
 from autoquant.execution.control_store import PostgresExecutionControlRepository
@@ -921,21 +924,30 @@ class ConsoleService:
             else await self._low_volatility_forward_evaluations.read_for_spec(spec.spec_hash)
         )
         now = self._now()
-        safe_cutoff = to_shanghai(now).date() - timedelta(days=1)
-        calendar = (
-            ()
-            if safe_cutoff < spec.forward_start_date
-            else await self._market.query_sessions_as_of(
+        local_date = to_shanghai(now).date()
+        calendar = await self._market.query_sessions_as_of(
+            spec.forward_start_date,
+            max(
                 spec.forward_start_date,
-                safe_cutoff,
-                now,
-            )
+                local_date + timedelta(days=14),
+            ),
+            now,
         )
-        open_dates = tuple(session.session_date for session in calendar if session.is_open)
+        availability = completed_daily_session_availability(calendar, now)
+        open_dates = availability.eligible_open_dates
+        historical_open_dates = tuple(
+            session.session_date
+            for session in calendar
+            if session.is_open and session.session_date < local_date
+        )
+        safe_cutoff = open_dates[-1] if open_dates else spec.forward_start_date - timedelta(days=1)
         required_window = open_dates[: spec.minimum_forward_sessions]
+        pending_required = availability.pending_open_dates[
+            : max(spec.minimum_forward_sessions - len(required_window), 0)
+        ]
         bound_dates = tuple(record.binding.session_date for record in records)
         bound_set = set(bound_dates)
-        open_set = set(open_dates)
+        open_set = set(historical_open_dates)
         required_set = set(required_window)
         missing = tuple(value for value in required_window if value not in bound_set)
         conflicts = tuple(value for value in bound_dates if value not in open_set)
@@ -945,7 +957,11 @@ class ConsoleService:
         elif missing:
             status = "backfill_required"
         elif len(required_window) < (spec.minimum_forward_sessions):
-            status = "collecting_forward_sessions"
+            status = (
+                "waiting_for_data_availability"
+                if pending_required
+                else "collecting_forward_sessions"
+            )
         elif evaluation is not None:
             status = (
                 "forward_evaluation_passed_awaiting_paper_approval"
@@ -1021,6 +1037,10 @@ class ConsoleService:
             remaining_required_sessions=(spec.minimum_forward_sessions - completed_required),
             missing_session_dates=missing,
             calendar_conflict_dates=conflicts,
+            pending_availability_session_dates=pending_required,
+            next_collection_eligible_at=(
+                availability.next_eligible_at if pending_required else None
+            ),
             required_window_end=(
                 required_window[-1]
                 if len(required_window) == spec.minimum_forward_sessions

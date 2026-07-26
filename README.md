@@ -62,10 +62,16 @@ The authenticated research console and
 and calendar conflicts read-only while both paper and live trading remain locked.
 The bounded `low-volatility-forward-cycle-run` command advances only the earliest missing
 eligible session, automatically freezes a fully completed session, and stops fail-closed on
-calendar conflicts or terminal data failures.
+calendar conflicts or terminal data failures. Eligibility uses the same conservative
+`tushare-daily-v1` availability rule as the immutable records: a completed session cannot enter
+the queue until the following open trading session reaches 09:30 Asia/Shanghai. Weekends and
+exchange holidays therefore report `waiting_for_data_availability` instead of creating shards
+that are guaranteed to fail point-in-time quality checks.
 The bounded `low-volatility-forward-window-run` command composes at most 20 such attempts to
 finish one 300-instrument session in a scheduled job; it stops after one freeze or any waiting,
-failure, or completed-gate state and reports exhaustion as a nonzero exit.
+failure, retry-authorization, or completed-gate state and reports exhaustion as a nonzero exit.
+Campaign status output includes aggregate terminal error codes, while a pre-existing failed
+campaign returns `retry_authorization_required` before any remaining queued shard is claimed.
 PostgreSQL schema v44 adds the terminal forward evaluation that was previously missing. The
 `low-volatility-forward-evaluate` command refuses to write anything before all 126 prefix
 sessions exist, reconstructs every hash-addressed source and evaluation shard, runs the unchanged
