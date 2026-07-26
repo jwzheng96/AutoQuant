@@ -26,6 +26,7 @@ from autoquant.operations import (
     _validate_campaign_dataset,
     approve_paper_sma_strategy,
     create_compliance_approval,
+    enforce_paper_runtime_health,
     inspect_paper_runtime_health,
     retry_research_data_campaign_item,
     revoke_paper_strategy,
@@ -91,6 +92,73 @@ async def test_paper_runtime_health_uses_database_backed_scheduler_evidence() ->
         maximum_silence=timedelta(seconds=30),
     )
     repository.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_paper_watchdog_rearms_only_the_paper_kill_switch() -> None:
+    scheduler = MagicMock()
+    scheduler.runtime_health = AsyncMock(
+        return_value=SimpleNamespace(
+            checked_at=NOW,
+            latest_event_persisted_at=NOW - timedelta(minutes=1),
+            latest_error_code=None,
+            latest_status="no_intents",
+            lease_active=True,
+            healthy=False,
+            state=SimpleNamespace(value="stale"),
+        )
+    )
+    scheduler.close = AsyncMock()
+    controls = MagicMock()
+    controls.ensure_fail_closed = AsyncMock(
+        return_value=SimpleNamespace(
+            active=False,
+            changed_at=NOW - timedelta(minutes=2),
+            state_hash="a" * 64,
+            version=4,
+        )
+    )
+    controls.activate = AsyncMock(
+        return_value=SimpleNamespace(
+            active=True,
+            changed_at=NOW,
+            state_hash="b" * 64,
+            version=5,
+        )
+    )
+    controls.close = AsyncMock()
+    settings = AppSettings(
+        _env_file=None,
+        environment=RuntimeEnvironment.PAPER,
+        postgres_dsn="postgresql+asyncpg://localhost/autoquant",
+    )
+    with (
+        patch(
+            "autoquant.operations.PostgresPaperSchedulerRepository.connect",
+            return_value=scheduler,
+        ),
+        patch(
+            "autoquant.operations.PostgresExecutionControlRepository.connect",
+            return_value=controls,
+        ),
+    ):
+        payload = await enforce_paper_runtime_health(settings)
+
+    assert payload["runtime_state"] == "stale"
+    assert payload["runtime_healthy"] is False
+    assert payload["control_active"] is True
+    assert payload["trip_applied"] is True
+    assert payload["broker_mutation_allowed"] is False
+    assert payload["live_trading_locked"] is True
+    assert len(str(payload["incident_hash"])) == 64
+    controls.activate.assert_awaited_once()
+    activate = controls.activate.await_args.kwargs
+    assert activate["reason"].value == "dependency_unavailable"
+    assert activate["actor"] == "paper-runtime-watchdog"
+    assert activate["evidence_hash"] == payload["incident_hash"]
+    assert activate["command_id"].startswith("paper-watchdog-")
+    controls.close.assert_awaited_once()
+    scheduler.close.assert_awaited_once()
 
 
 def _research_campaign_status(

@@ -52,6 +52,7 @@ from autoquant.operations import (
     create_research_data_campaign,
     create_research_universe_snapshot,
     create_validation_campaign,
+    enforce_paper_runtime_health,
     finalize_low_volatility_forward_session,
     freeze_dynamic_regime_research_spec,
     freeze_dynamic_research_spec,
@@ -551,6 +552,21 @@ def paper_watchdog_check() -> None:
         _fail("paper runtime watchdog check failed closed")
     _emit(payload)
     if payload["status"] != "ok":
+        raise typer.Exit(code=2)
+
+
+@app.command("paper-watchdog-enforce")
+def paper_watchdog_enforce() -> None:
+    """Re-arm only the paper kill switch when runtime liveness is unhealthy."""
+
+    try:
+        payload = asyncio.run(enforce_paper_runtime_health(_settings()))
+    except MissingCapabilityError as error:
+        _fail(str(error))
+    except (AutoQuantError, LookupError, ValueError):
+        _fail("paper runtime watchdog enforcement failed closed")
+    _emit(payload)
+    if not payload["runtime_healthy"]:
         raise typer.Exit(code=2)
 
 

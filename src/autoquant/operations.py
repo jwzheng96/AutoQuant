@@ -5011,6 +5011,83 @@ async def inspect_paper_runtime_health(
         await repository.close()
 
 
+async def enforce_paper_runtime_health(
+    settings: AppSettings,
+) -> dict[str, object]:
+    """Re-arm the paper kill switch when an independent watchdog finds failure."""
+
+    if settings.environment is not RuntimeEnvironment.PAPER:
+        raise MissingCapabilityError("paper environment is not configured")
+    postgres_dsn = configured_dsn(
+        settings.postgres_dsn,
+        capability="PostgreSQL",
+    )
+    scheduler = PostgresPaperSchedulerRepository.connect(dsn=postgres_dsn)
+    controls = PostgresExecutionControlRepository.connect(dsn=postgres_dsn)
+    maximum_silence = timedelta(
+        seconds=max(
+            settings.paper_scheduler_lease_ttl_seconds,
+            float(settings.paper_poll_interval_seconds) * 3,
+        )
+    )
+    try:
+        health = await scheduler.runtime_health(
+            account_id=settings.paper_account_id,
+            strategy_id=settings.paper_strategy_id,
+            maximum_silence=maximum_silence,
+        )
+        incident_payload = {
+            "account_id": settings.paper_account_id,
+            "event_persisted_at": (
+                None
+                if health.latest_event_persisted_at is None
+                else health.latest_event_persisted_at.isoformat()
+            ),
+            "latest_error_code": health.latest_error_code,
+            "latest_status": health.latest_status,
+            "lease_active": health.lease_active,
+            "runtime_state": health.state.value,
+            "strategy_id": settings.paper_strategy_id,
+            "version": "paper-runtime-watchdog-incident-v1",
+        }
+        incident_hash = _canonical_hash(incident_payload)
+        control = await controls.ensure_fail_closed(
+            account_id=settings.paper_account_id,
+            now=health.checked_at,
+        )
+        trip_applied = False
+        if not health.healthy and not control.active:
+            control = await controls.activate(
+                account_id=settings.paper_account_id,
+                command_id=f"paper-watchdog-{incident_hash[:32]}",
+                reason=KillSwitchReason.DEPENDENCY_UNAVAILABLE,
+                actor="paper-runtime-watchdog",
+                now=max(health.checked_at, control.changed_at),
+                evidence_hash=incident_hash,
+            )
+            trip_applied = True
+        return {
+            "broker_mutation_allowed": False,
+            "checked_at": health.checked_at.isoformat(),
+            "control_active": control.active,
+            "control_state_hash": control.state_hash,
+            "control_version": control.version,
+            "incident_hash": incident_hash,
+            "live_trading_locked": True,
+            "runtime_healthy": health.healthy,
+            "runtime_state": health.state.value,
+            "status": (
+                "healthy"
+                if health.healthy
+                else "fail_closed"
+            ),
+            "trip_applied": trip_applied,
+        }
+    finally:
+        await controls.close()
+        await scheduler.close()
+
+
 async def inspect_paper_promotion(
     settings: AppSettings,
 ) -> dict[str, object]:

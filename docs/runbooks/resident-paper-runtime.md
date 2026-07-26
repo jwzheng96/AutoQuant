@@ -127,6 +127,17 @@ uv run autoquant paper-watchdog-check
 exporter 或告警脚本处理。监控进程必须与 `run-paper` 分离，避免驻留进程自身卡死时同时
 失去检测能力。
 
+需要自动保护时，外部监控应调用：
+
+```bash
+uv run autoquant paper-watchdog-enforce
+```
+
+该命令在运行健康时不改变控制状态；发现 `stopped`、`stale`、`failed` 或
+`identity_mismatch` 时，只允许将模拟盘停机开关激活，并把确定性的 incident hash
+写入控制审计链。它没有复位停机开关、连接券商或提交订单的能力。故障状态即使成功
+fail closed 仍返回退出码 2，以保证告警不会因保护动作成功而被吞掉。
+
 ## 行情恢复
 
 XtData 回调线程只复制原始标量到有界队列。任何异常都会使整条行情失效，不能继续使用

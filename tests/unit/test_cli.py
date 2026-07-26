@@ -196,6 +196,31 @@ def test_paper_watchdog_check_exits_zero_only_when_healthy() -> None:
     assert json.loads(result.stdout) == payload
 
 
+def test_paper_watchdog_enforce_reports_audited_fail_closed_trip() -> None:
+    payload = {
+        "broker_mutation_allowed": False,
+        "checked_at": "2026-07-26T04:00:00+00:00",
+        "control_active": True,
+        "control_state_hash": "a" * 64,
+        "control_version": 5,
+        "incident_hash": "b" * 64,
+        "live_trading_locked": True,
+        "runtime_healthy": False,
+        "runtime_state": "stale",
+        "status": "fail_closed",
+        "trip_applied": True,
+    }
+    with patch(
+        "autoquant.cli.enforce_paper_runtime_health",
+        new=AsyncMock(return_value=payload),
+    ):
+        result = runner.invoke(app, ["paper-watchdog-enforce"])
+
+    assert result.exit_code == 2
+    assert json.loads(result.stdout) == payload
+    assert "token" not in result.stdout.lower()
+
+
 def test_promotion_check_emits_redacted_blockers_and_exits_nonzero() -> None:
     payload = {
         "blockers": ["paper_session_count", "compliance_approval"],
