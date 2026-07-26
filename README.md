@@ -72,6 +72,9 @@ finish one 300-instrument session in a scheduled job; it stops after one freeze 
 failure, retry-authorization, or completed-gate state and reports exhaustion as a nonzero exit.
 Campaign status output includes aggregate terminal error codes, while a pre-existing failed
 campaign returns `retry_authorization_required` before any remaining queued shard is claimed.
+The authenticated progress API and research console expose the matching campaign hash, item
+counts, terminal error totals and retry-authorization requirement read-only, so an operator can
+see the full recovery debt without starting a collector.
 Each worker batch also holds a PostgreSQL session advisory lock keyed by campaign hash. A second
 host reports `collector_busy` without claiming a shard or calling the vendor; the lock is
 automatically released when its database connection closes, including process termination.

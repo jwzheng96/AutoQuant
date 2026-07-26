@@ -936,6 +936,34 @@ async function loadLowVolatilityForwardProgress() {
         ? `${progress.minimum_paper_sessions} 日（候选，仍未部署）`
         : `${progress.minimum_paper_sessions} 日（未解锁）`,
     );
+    const campaignLabels = {
+      not_created: "尚未创建",
+      queued: "排队中",
+      running: "采集中",
+      completed: "已完成",
+      failed: "失败（需处理）",
+    };
+    setText(
+      "low-volatility-forward-campaign",
+      campaignLabels[progress.collection_campaign_status]
+        ?? progress.collection_campaign_status,
+    );
+    setText(
+      "low-volatility-forward-campaign-detail",
+      progress.retry_authorization_required
+        ? `失败 ${progress.collection_failed_items} / 排队 ${
+            progress.collection_queued_items
+          } / 运行 ${progress.collection_running_items} / 完成 ${
+            progress.collection_completed_items
+          }；需显式重试授权：${Object.entries(
+            progress.collection_terminal_error_counts,
+          ).map(([code, count]) => `${code}=${count}`).join(", ")}`
+        : progress.collection_campaign_hash
+          ? `完成 ${progress.collection_completed_items} / 排队 ${
+              progress.collection_queued_items
+            } / 运行 ${progress.collection_running_items}`
+          : "当前目标尚无采集队列",
+    );
     const compatibilityLabels = {
       not_configured: "服务未配置",
       not_preregistered: "尚未预注册",

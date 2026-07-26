@@ -206,6 +206,15 @@ async def test_campaign_recovers_retries_and_finalizes_verified_shards(
 
     created = await campaigns.create(spec, created_at=NOW)
     repeated = await campaigns.create(spec, created_at=NOW)
+    assert await campaigns.status_for_key(
+        campaign_key=spec.campaign_key
+    ) == created
+    assert (
+        await campaigns.status_for_key(
+            campaign_key="integration-missing-campaign-v1"
+        )
+        is None
+    )
     contender = PostgresResearchDataCampaignRepository.connect(
         dsn=POSTGRES_DSN,
         schema=schema,

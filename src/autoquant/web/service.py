@@ -131,6 +131,9 @@ from autoquant.web.portfolio_validation_store import (
 from autoquant.web.qmt_operations_store import (
     PostgresQmtOperationsRepository,
 )
+from autoquant.web.research_data_store import (
+    PostgresResearchDataCampaignRepository,
+)
 from autoquant.web.risk_store import PostgresRiskDecisionRepository
 from autoquant.web.store import PostgresOperatorRepository
 from autoquant.web.universe_store import (
@@ -312,6 +315,9 @@ class ConsoleService:
         low_volatility_deployment_reader: (
             PostgresLowVolatilityPaperDeploymentReader | None
         ) = None,
+        research_data_campaign_repository: (
+            PostgresResearchDataCampaignRepository | None
+        ) = None,
         universe_repository: (PostgresResearchUniverseRepository | None) = None,
         risk_repository: PostgresRiskDecisionRepository | None = None,
         execution_repository: PostgresPaperExecutionRepository | None = None,
@@ -369,6 +375,7 @@ class ConsoleService:
         self._low_volatility_compatibility_specs = low_volatility_compatibility_spec_repository
         self._low_volatility_compatibility_runs = low_volatility_compatibility_run_repository
         self._low_volatility_deployment = low_volatility_deployment_reader
+        self._research_data_campaigns = research_data_campaign_repository
         self._universes = universe_repository
         self._risk = risk_repository
         self._execution = execution_repository
@@ -570,6 +577,8 @@ class ConsoleService:
             await self._low_volatility_compatibility_runs.close()
         if self._low_volatility_compatibility_specs is not None:
             await self._low_volatility_compatibility_specs.close()
+        if self._research_data_campaigns is not None:
+            await self._research_data_campaigns.close()
         if self._universes is not None:
             await self._universes.close()
         if self._risk is not None:
@@ -952,6 +961,52 @@ class ConsoleService:
         missing = tuple(value for value in required_window if value not in bound_set)
         conflicts = tuple(value for value in bound_dates if value not in open_set)
         completed_required = len(bound_set.intersection(required_set))
+        collection_campaign_hash: str | None = None
+        collection_campaign_status = "not_created"
+        collection_counts = {
+            "queued": 0,
+            "running": 0,
+            "completed": 0,
+            "failed": 0,
+        }
+        collection_terminal_error_counts: dict[str, int] = {}
+        collection_target = (
+            missing[0]
+            if missing
+            else (pending_required[0] if pending_required else None)
+        )
+        if (
+            collection_target is not None
+            and self._research_data_campaigns is not None
+        ):
+            collection = await self._research_data_campaigns.status_for_key(
+                campaign_key=(
+                    f"low-vol-forward:{spec.spec_hash[:16]}:"
+                    f"{collection_target:%Y%m%d}"
+                ),
+            )
+            if collection is not None:
+                collection_campaign_hash = collection.spec.campaign_hash
+                collection_campaign_status = collection.status
+                collection_counts = {
+                    state: sum(value.state == state for value in collection.items)
+                    for state in ("queued", "running", "completed", "failed")
+                }
+                collection_terminal_error_counts = {
+                    error_code: sum(
+                        value.state == "failed"
+                        and value.error_code == error_code
+                        for value in collection.items
+                    )
+                    for error_code in sorted(
+                        {
+                            value.error_code
+                            for value in collection.items
+                            if value.state == "failed"
+                            and value.error_code is not None
+                        }
+                    )
+                }
         if conflicts:
             status = "calendar_conflict"
         elif missing:
@@ -1040,6 +1095,18 @@ class ConsoleService:
             pending_availability_session_dates=pending_required,
             next_collection_eligible_at=(
                 availability.next_eligible_at if pending_required else None
+            ),
+            collection_campaign_hash=collection_campaign_hash,
+            collection_campaign_status=collection_campaign_status,
+            collection_queued_items=collection_counts["queued"],
+            collection_running_items=collection_counts["running"],
+            collection_completed_items=collection_counts["completed"],
+            collection_failed_items=collection_counts["failed"],
+            collection_terminal_error_counts=(
+                collection_terminal_error_counts
+            ),
+            retry_authorization_required=(
+                collection_counts["failed"] > 0
             ),
             required_window_end=(
                 required_window[-1]

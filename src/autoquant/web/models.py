@@ -631,6 +631,19 @@ class LowVolatilityForwardProgressView(BaseModel):
     calendar_conflict_dates: tuple[date, ...]
     pending_availability_session_dates: tuple[date, ...] = ()
     next_collection_eligible_at: datetime | None = None
+    collection_campaign_hash: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    collection_campaign_status: str = "not_created"
+    collection_queued_items: int = Field(default=0, ge=0)
+    collection_running_items: int = Field(default=0, ge=0)
+    collection_completed_items: int = Field(default=0, ge=0)
+    collection_failed_items: int = Field(default=0, ge=0)
+    collection_terminal_error_counts: dict[str, int] = Field(
+        default_factory=dict,
+    )
+    retry_authorization_required: bool = False
     required_window_end: date | None = None
     status: str
     sessions: tuple[LowVolatilityForwardSessionView, ...]
@@ -707,6 +720,38 @@ class LowVolatilityForwardProgressView(BaseModel):
                 self.next_collection_eligible_at is not None
                 and not self.pending_availability_session_dates
             )
+            or self.collection_campaign_status
+            not in {"not_created", "queued", "running", "completed", "failed"}
+            or (
+                self.collection_campaign_hash is None
+                and self.collection_campaign_status != "not_created"
+            )
+            or (
+                self.collection_campaign_hash is not None
+                and self.collection_campaign_status == "not_created"
+            )
+            or (
+                self.collection_campaign_hash is None
+                and any(
+                    (
+                        self.collection_queued_items,
+                        self.collection_running_items,
+                        self.collection_completed_items,
+                        self.collection_failed_items,
+                    )
+                )
+            )
+            or any(
+                not key
+                or not isinstance(value, int)
+                or isinstance(value, bool)
+                or value < 1
+                for key, value in self.collection_terminal_error_counts.items()
+            )
+            or sum(self.collection_terminal_error_counts.values())
+            != self.collection_failed_items
+            or self.retry_authorization_required
+            != (self.collection_failed_items > 0)
             or (
                 self.evaluation_result_hash is None
                 or self.evaluation_assessment_hash is None

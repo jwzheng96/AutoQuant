@@ -859,7 +859,11 @@ The authenticated operator console exposes the same ledger read-only at
 `GET /api/v1/low-volatility-forward-progress` and on the research page. It reports the latest
 safe daily-data cutoff, completed bindings, missing eligible sessions, calendar revisions,
 completed sessions still waiting for daily-data visibility, the next eligible instant, the
-remaining forward-session count, and the still-locked 60-session paper gate.
+remaining forward-session count, and the still-locked 60-session paper gate. For the current
+collection target it also reports the deterministic campaign hash and status, queued/running/
+completed/failed item counts, terminal error totals and `retry_authorization_required`. These
+fields are read-only: inspecting the console never claims a shard, retries a failed item or
+consumes vendor quota.
 
 Forward eligibility is deliberately stricter than “the calendar date has ended.” Under
 `tushare-daily-v1`, one session's daily bar and adjustment factor become visible only at 09:30

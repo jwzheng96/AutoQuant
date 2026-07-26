@@ -93,6 +93,9 @@ from autoquant.web.portfolio_validation_store import (
 from autoquant.web.qmt_operations_store import (
     PostgresQmtOperationsRepository,
 )
+from autoquant.web.research_data_store import (
+    PostgresResearchDataCampaignRepository,
+)
 from autoquant.web.risk_store import PostgresRiskDecisionRepository
 from autoquant.web.service import ConsoleService, ConsoleServicePort
 from autoquant.web.store import PostgresOperatorRepository
@@ -589,6 +592,9 @@ async def _production_service(settings: AppSettings) -> ConsoleService:
     portfolio_validations = PostgresPortfolioValidationRepository.connect(dsn=postgres_dsn)
     universes = PostgresResearchUniverseRepository.connect(dsn=postgres_dsn)
     validation_campaigns = PostgresValidationCampaignRepository.connect(dsn=postgres_dsn)
+    research_data_campaigns = PostgresResearchDataCampaignRepository.connect(
+        dsn=postgres_dsn
+    )
     fundamental_validations = PostgresFundamentalValidationRepository.connect(dsn=postgres_dsn)
     low_volatility_validations = PostgresLowVolatilityValidationRepository.connect(dsn=postgres_dsn)
     low_volatility_forward_specs = PostgresLowVolatilityForwardEvidenceSpecRepository.connect(
@@ -631,6 +637,7 @@ async def _production_service(settings: AppSettings) -> ConsoleService:
         await portfolio_validations.close()
         await universes.close()
         await validation_campaigns.close()
+        await research_data_campaigns.close()
         await fundamental_validations.close()
         await low_volatility_validations.close()
         await low_volatility_forward_sessions.close()
@@ -688,6 +695,7 @@ async def _production_service(settings: AppSettings) -> ConsoleService:
         low_volatility_compatibility_spec_repository=(low_volatility_compatibility_specs),
         low_volatility_compatibility_run_repository=(low_volatility_compatibility_runs),
         low_volatility_deployment_reader=(low_volatility_deployment),
+        research_data_campaign_repository=(research_data_campaigns),
         risk_repository=risks,
         execution_repository=executions,
         execution_control_repository=execution_controls,

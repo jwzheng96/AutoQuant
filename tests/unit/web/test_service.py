@@ -1,5 +1,6 @@
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
@@ -85,6 +86,7 @@ def _service(
     compatibility_specs: MagicMock | None = None,
     compatibility_runs: MagicMock | None = None,
     low_volatility_deployment: MagicMock | None = None,
+    research_data_campaigns: MagicMock | None = None,
     market: MagicMock | None = None,
     now: datetime = NOW,
 ) -> ConsoleService:
@@ -116,6 +118,7 @@ def _service(
         low_volatility_compatibility_spec_repository=(compatibility_specs),
         low_volatility_compatibility_run_repository=(compatibility_runs),
         low_volatility_deployment_reader=(low_volatility_deployment),
+        research_data_campaign_repository=(research_data_campaigns),
         now=lambda: now,
         poll_interval=0.01,
     )
@@ -303,12 +306,37 @@ async def test_forward_progress_waits_for_next_open_daily_visibility() -> None:
             )
         )
     )
+    research_data_campaigns = MagicMock()
+    research_data_campaigns.status_for_key = AsyncMock(
+        return_value=SimpleNamespace(
+            spec=SimpleNamespace(campaign_hash="e" * 64),
+            status="failed",
+            items=tuple(
+                SimpleNamespace(
+                    state=state,
+                    error_code=(
+                        "daily_quality_rejected"
+                        if state == "failed"
+                        else None
+                    ),
+                )
+                for state in (
+                    "failed",
+                    "failed",
+                    "queued",
+                    "queued",
+                    "queued",
+                )
+            ),
+        )
+    )
     service = _service(
         operator=MagicMock(),
         control=MagicMock(),
         runner=AsyncMock(),
         forward_specs=forward_specs,
         forward_sessions=forward_sessions,
+        research_data_campaigns=research_data_campaigns,
         market=market,
         now=datetime(2026, 7, 26, 2, tzinfo=UTC),
     )
@@ -327,6 +355,17 @@ async def test_forward_progress_waits_for_next_open_daily_visibility() -> None:
         1,
         30,
         tzinfo=UTC,
+    )
+    assert progress.collection_campaign_hash == "e" * 64
+    assert progress.collection_campaign_status == "failed"
+    assert progress.collection_failed_items == 2
+    assert progress.collection_queued_items == 3
+    assert progress.collection_terminal_error_counts == {
+        "daily_quality_rejected": 2
+    }
+    assert progress.retry_authorization_required is True
+    research_data_campaigns.status_for_key.assert_awaited_once_with(
+        campaign_key="low-vol-forward:aaaaaaaaaaaaaaaa:20260724"
     )
     assert progress.live_trading_locked is True
 

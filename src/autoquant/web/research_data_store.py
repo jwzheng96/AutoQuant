@@ -20,6 +20,7 @@ from autoquant.data.research_data_campaign import (
 from autoquant.errors import PersistenceUnavailableError
 
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+_CAMPAIGN_KEY = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{15,127}\Z")
 _ITEM_STATES = frozenset({"queued", "running", "completed", "failed"})
 
 
@@ -220,6 +221,33 @@ class PostgresResearchDataCampaignRepository:
             raise PersistenceUnavailableError(
                 "research dataset manifest lookup failed"
             ) from None
+
+    async def status_for_key(
+        self,
+        *,
+        campaign_key: str,
+    ) -> ResearchDataCampaignStatus | None:
+        if _CAMPAIGN_KEY.fullmatch(campaign_key) is None:
+            raise ValueError("campaign_key must contain 16-128 safe characters")
+        try:
+            async with self._engine.connect() as connection:
+                campaign_hash = await connection.scalar(
+                    text(
+                        f"""
+                        SELECT campaign_hash
+                        FROM {self._schema}.research_data_campaigns
+                        WHERE campaign_key = :campaign_key
+                        """
+                    ),
+                    {"campaign_key": campaign_key},
+                )
+        except Exception:
+            raise PersistenceUnavailableError(
+                "research data campaign key lookup failed"
+            ) from None
+        if campaign_hash is None:
+            return None
+        return await self.status(campaign_hash=str(campaign_hash))
 
     async def create(
         self,
