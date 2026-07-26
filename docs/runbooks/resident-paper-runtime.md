@@ -138,6 +138,44 @@ uv run autoquant paper-watchdog-enforce
 写入控制审计链。它没有复位停机开关、连接券商或提交订单的能力。故障状态即使成功
 fail closed 仍返回退出码 2，以保证告警不会因保护动作成功而被吞掉。
 
+## Windows 计划任务安装
+
+不要把 Token、数据库 DSN、QMT 账号或租约 Token 放进任务参数。两个安装器只保存
+`uv.exe`、项目目录和固定子命令；运行时仍从项目根目录的 `.env` 读取配置。
+安装前必须在 Windows 项目目录运行一次 `uv sync --frozen`。安装器要求已提交的
+`uv.lock` 和 Windows `.venv\Scripts\python.exe` 同时存在；计划任务使用
+`--frozen --no-sync`，运行期间不会下载依赖或改写虚拟环境。
+
+先在授权 Windows 节点使用 `-WhatIf` 检查驻留任务：
+
+```powershell
+.\scripts\windows\install-paper-runtime-task.ps1 `
+  -ProjectPath (Resolve-Path .) `
+  -UvPath "$env:USERPROFILE\.local\bin\uv.exe" `
+  -WhatIf
+```
+
+确认路径后去掉 `-WhatIf`。任务默认在当前用户登录两分钟后启动，使用交互式低权限
+Token，失败后每分钟重试，但安装过程不会立即启动进程。已存在同名任务时必须显式传
+`-Replace`，防止静默覆盖人工配置。该任务只运行 `run-paper`，仍从 active 停机开关
+开始且不会自动解锁。
+
+watchdog 应优先安装在另一台能够访问 PostgreSQL 的主机：
+
+```powershell
+.\scripts\windows\install-paper-watchdog-task.ps1 `
+  -ProjectPath (Resolve-Path .) `
+  -UvPath "$env:USERPROFILE\.local\bin\uv.exe" `
+  -IntervalMinutes 1 `
+  -WhatIf
+```
+
+去掉 `-WhatIf` 后每分钟执行一次 `paper-watchdog-enforce`。若必须在无人登录的独立
+Windows 监控节点运行，可使用 `-RunAsSystem`，但必须先确认 SYSTEM 对项目目录和
+`.env` 只有所需的读取权限，并能访问 PostgreSQL；不得通过放宽 `.env` 到所有用户可读
+来解决权限问题。同一台 QMT 主机上的 watchdog 只能作为第二层保护，不能替代真正独立
+的监控节点。
+
 ## 行情恢复
 
 XtData 回调线程只复制原始标量到有界队列。任何异常都会使整条行情失效，不能继续使用
