@@ -1159,5 +1159,38 @@ The frozen terms require this order:
 
 The contract keeps `paper_activation_authority_granted=false`,
 `runtime_activation_allowed=false`, and `live_trading_locked=true`. A later authorization
-artifact and deployable v2 signal schema are still required; this contract cannot start the
-scheduler.
+artifact is still required; this contract cannot start the scheduler.
+
+### Decision-time paper signal
+
+Schema v51 implements the deployable v2 signal as a second immutable artifact. It does not
+modify or reinterpret the v47 observation-only signal. Before preparation, the following must
+already exist and agree exactly:
+
+1. the frozen v50 deployment contract;
+2. a compatible v49 run;
+3. a still-active candidate approved after that compatibility run;
+4. the exact-session v47 observation signal;
+5. a reconciled internal/broker account snapshot pair taken within five seconds of the
+   reconciliation report and containing no open orders;
+6. prior-close valuations for every instrument held in either snapshot;
+7. the candidate's exact default paper risk-policy hash;
+8. an active kill switch whose immutable event is bound into the signal.
+
+The reconciliation report must remain less than five minutes old when the v51 signal is
+prepared. The command is intentionally confirmation-gated:
+
+```bash
+uv run autoquant \
+  low-volatility-decision-time-signal-prepare \
+  --session-date YYYY-MM-DD \
+  --reconciliation-report-hash REPORT_SHA256 \
+  --prepared-by paper-risk-operator \
+  --confirm-no-activation
+```
+
+Successful output still has `paper_activation_authority_granted=false`,
+`runtime_activation_allowed=false`, and `live_trading_locked=true`. It may prove
+`execution_timing_compatible=true`, but that fact is not a scheduler unlock. A separate,
+short-lived runtime authorization must later recheck the lease, reconciliation, current
+quotes, session phase, exclusive deployment, and kill-switch transition atomically.

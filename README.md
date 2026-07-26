@@ -122,6 +122,14 @@ point-in-time universe/risk/held-position valuation evidence, an exclusive paper
 an active kill switch, and a separate fresh runtime unlock. The contract itself permanently
 stores `paper_activation_authority_granted=false`, `runtime_activation_allowed=false`, and
 `live_trading_locked=true`. No official contract row is created automatically.
+Schema v51 adds a separate immutable decision-time paper signal. It cannot rewrite the v47
+observation-only signal: it binds that exact observation to the v50 contract, compatible v49
+run, later candidate approval, exact default risk policy, active kill-switch event, and a
+reconciled internal/broker account snapshot pair. Both snapshots must be no more than five
+seconds old at reconciliation, have no open orders, and every actually held instrument must
+appear in the prior-close valuation set. The resulting signal records
+`execution_timing_compatible=true` while permanently keeping paper activation authority and
+runtime activation false. The v51 table is created empty and no broker mutation is performed.
 PostgreSQL schema v36 adds an append-only, revocable compliance-approval artifact bound to the
 active paper registration and exact promotion policy. No approval is created automatically,
 and even a valid artifact can only satisfy an evidence gate while the code-level live release

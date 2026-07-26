@@ -235,6 +235,12 @@ async def test_paper_order_and_reconciliation_survive_verified_replay(
         broker=snapshot,
         report=report,
     ) == report
+    assert await executions.load_account_snapshot(
+        snapshot.snapshot_hash
+    ) == snapshot
+    assert await executions.load_reconciliation_report(
+        report.report_hash
+    ) == report
 
     async with engine.connect() as connection:
         event_count = await connection.scalar(

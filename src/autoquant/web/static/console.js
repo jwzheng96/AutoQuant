@@ -968,8 +968,10 @@ async function loadLowVolatilityForwardProgress() {
     setText(
       "low-volatility-forward-signal",
       progress.daily_signal_hash
-        ? `${progress.daily_signal_hash.slice(0, 12)}…`
-        : "缺失",
+        ? `v51 ${progress.daily_signal_hash.slice(0, 12)}…（不授权）`
+        : progress.decision_signal_status === "not_available"
+          ? "尚无 v51 决策信号"
+          : "v51 信号服务未配置",
     );
     setText(
       "low-volatility-forward-signal-detail",

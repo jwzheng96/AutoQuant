@@ -11,7 +11,11 @@ from sqlalchemy.engine import RowMapping
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from autoquant.backtest.models import OrderSide
-from autoquant.data.models import _canonical_hash, _decimal_text
+from autoquant.data.models import (
+    _canonical_hash,
+    _decimal_text,
+    _require_lowercase_sha256,
+)
 from autoquant.errors import PersistenceUnavailableError
 from autoquant.execution.models import (
     ApprovedPaperOrder,
@@ -573,6 +577,101 @@ class PostgresPaperExecutionRepository:
                 "Stored reconciliation failed integrity verification"
             )
         return stored
+
+    async def load_account_snapshot(
+        self,
+        snapshot_hash: str,
+    ) -> ExecutionAccountSnapshot:
+        _require_lowercase_sha256(
+            snapshot_hash,
+            name="execution account snapshot hash",
+        )
+        try:
+            async with self._engine.connect() as connection:
+                row = (
+                    (
+                        await connection.execute(
+                            text(
+                                f"""
+                                SELECT snapshot_hash, account_id, as_of,
+                                       payload
+                                FROM {self._schema}.
+                                    execution_account_snapshots
+                                WHERE snapshot_hash = :snapshot_hash
+                                """
+                            ),
+                            {"snapshot_hash": snapshot_hash},
+                        )
+                    )
+                    .mappings()
+                    .one_or_none()
+                )
+        except Exception:
+            raise PersistenceUnavailableError(
+                "Execution account snapshot lookup failed"
+            ) from None
+        if row is None:
+            raise LookupError("execution account snapshot does not exist")
+        return _snapshot_from_row(row)
+
+    async def load_reconciliation_report(
+        self,
+        report_hash: str,
+    ) -> ReconciliationReport:
+        _require_lowercase_sha256(
+            report_hash,
+            name="execution reconciliation report hash",
+        )
+        try:
+            async with self._engine.connect() as connection:
+                row = (
+                    (
+                        await connection.execute(
+                            text(
+                                f"""
+                                SELECT report_hash, account_id,
+                                       evaluated_at,
+                                       internal_snapshot_hash,
+                                       broker_snapshot_hash,
+                                       reconciled, issues
+                                FROM {self._schema}.
+                                    execution_reconciliation_reports
+                                WHERE report_hash = :report_hash
+                                """
+                            ),
+                            {"report_hash": report_hash},
+                        )
+                    )
+                    .mappings()
+                    .one_or_none()
+                )
+        except Exception:
+            raise PersistenceUnavailableError(
+                "Execution reconciliation lookup failed"
+            ) from None
+        if row is None:
+            raise LookupError("execution reconciliation report does not exist")
+        try:
+            report = ReconciliationReport(
+                account_id=str(row["account_id"]),
+                evaluated_at=_datetime(row["evaluated_at"]),
+                internal_snapshot_hash=str(row["internal_snapshot_hash"]),
+                broker_snapshot_hash=str(row["broker_snapshot_hash"]),
+                issues=tuple(
+                    ReconciliationCode(str(value))
+                    for value in row["issues"]
+                ),
+            )
+            if (
+                report.report_hash != str(row["report_hash"])
+                or report.reconciled is not row["reconciled"]
+            ):
+                raise ValueError("reconciliation report mismatch")
+            return report
+        except (KeyError, TypeError, ValueError):
+            raise PersistenceUnavailableError(
+                "Stored execution reconciliation failed integrity"
+            ) from None
 
     async def verify_recovery(
         self, *, max_orders: int = 10_000

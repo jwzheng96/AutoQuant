@@ -11,6 +11,12 @@ from autoquant.backtest.low_volatility_execution_compatibility import (
 )
 from autoquant.data.models import _require_lowercase_sha256, _require_nonblank
 from autoquant.errors import PersistenceUnavailableError
+from autoquant.execution.low_volatility_decision_signal import (
+    LowVolatilityDecisionTimePaperSignal,
+)
+from autoquant.execution.low_volatility_decision_signal_store import (
+    PostgresLowVolatilityDecisionTimeSignalRepository,
+)
 from autoquant.execution.low_volatility_paper_approval_store import (
     LowVolatilityPaperCandidateRecord,
     PostgresLowVolatilityPaperCandidateRepository,
@@ -20,12 +26,6 @@ from autoquant.execution.low_volatility_paper_deployment_contract import (
 )
 from autoquant.execution.low_volatility_paper_deployment_contract_store import (
     PostgresLowVolatilityPaperDeploymentContractRepository,
-)
-from autoquant.execution.low_volatility_paper_signal import (
-    LowVolatilityPaperDailySignal,
-)
-from autoquant.execution.low_volatility_paper_signal_store import (
-    PostgresLowVolatilityPaperSignalRepository,
 )
 from autoquant.web.low_volatility_execution_compatibility_run_store import (
     PostgresLowVolatilityExecutionCompatibilityRunRepository,
@@ -87,7 +87,7 @@ class LowVolatilityDailySignalReader(Protocol):
         *,
         candidate_approval_hash: str,
         session_date: date,
-    ) -> LowVolatilityPaperDailySignal | None: ...
+    ) -> LowVolatilityDecisionTimePaperSignal | None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,7 +150,7 @@ class LowVolatilityPaperDeploymentReadiness:
 
 
 class LowVolatilityPaperDeploymentGate:
-    """Read deployment evidence while v46-v49 runtime authority stays locked."""
+    """Read v50-v51 deployment evidence while runtime authority stays locked."""
 
     def __init__(
         self,
@@ -260,8 +260,15 @@ class LowVolatilityPaperDeploymentGate:
                 or signal.account_id != approval.account_id
                 or signal.strategy_id != approval.strategy_id
                 or signal.source_spec_hash != approval.source_spec_hash
+                or signal.forward_spec_hash != approval.forward_spec_hash
                 or signal.risk_policy_hash != approval.risk_policy_hash
                 or signal.session_date != session_date
+                or contract is None
+                or signal.deployment_contract_hash != contract.contract_hash
+                or run is None
+                or signal.compatibility_run_hash != run.run_hash
+                or signal.compatibility_spec_hash
+                != run.compatibility_spec_hash
             ):
                 blockers.append(LowVolatilityPaperDeploymentBlocker.DAILY_SIGNAL_EVIDENCE_MISMATCH)
             if not signal.execution_timing_compatible:
@@ -270,7 +277,10 @@ class LowVolatilityPaperDeploymentGate:
                 )
             if not signal.runtime_activation_allowed:
                 blockers.append(LowVolatilityPaperDeploymentBlocker.DAILY_SIGNAL_RUNTIME_LOCKED)
-            if not signal.live_trading_locked:
+            if (
+                signal.paper_activation_authority_granted
+                or not signal.live_trading_locked
+            ):
                 raise PersistenceUnavailableError("low-volatility signal live lock failed")
 
         return self._report(
@@ -317,7 +327,7 @@ class PostgresLowVolatilityPaperDeploymentReader:
         contracts: (PostgresLowVolatilityPaperDeploymentContractRepository),
         compatibility_specs: (PostgresLowVolatilityExecutionCompatibilityRepository),
         compatibility_runs: (PostgresLowVolatilityExecutionCompatibilityRunRepository),
-        signals: PostgresLowVolatilityPaperSignalRepository,
+        signals: PostgresLowVolatilityDecisionTimeSignalRepository,
         account_id: str,
         strategy_id: str,
     ) -> None:
@@ -361,7 +371,7 @@ class PostgresLowVolatilityPaperDeploymentReader:
             dsn=dsn,
             schema=schema,
         )
-        signals = PostgresLowVolatilityPaperSignalRepository.connect(
+        signals = PostgresLowVolatilityDecisionTimeSignalRepository.connect(
             dsn=dsn,
             schema=schema,
         )

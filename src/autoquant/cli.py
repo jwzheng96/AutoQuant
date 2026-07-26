@@ -66,6 +66,7 @@ from autoquant.operations import (
     inspect_research_data_campaign,
     inspect_research_input_shard,
     inspect_validation_campaign,
+    prepare_low_volatility_decision_time_signal,
     prepare_low_volatility_paper_signal,
     retry_research_data_campaign_item,
     revoke_compliance_approval,
@@ -1710,6 +1711,48 @@ def low_volatility_paper_deployment_status(
     _emit(payload)
     if not payload["ready_for_runtime"]:
         raise typer.Exit(code=2)
+
+
+@app.command("low-volatility-decision-time-signal-prepare")
+def low_volatility_decision_time_signal_prepare(
+    session_date: Annotated[
+        str,
+        typer.Option("--session-date"),
+    ],
+    reconciliation_report_hash: Annotated[
+        str,
+        typer.Option("--reconciliation-report-hash"),
+    ],
+    prepared_by: Annotated[
+        str,
+        typer.Option("--prepared-by"),
+    ],
+    confirm_no_activation: Annotated[
+        bool,
+        typer.Option("--confirm-no-activation"),
+    ] = False,
+) -> None:
+    """Bind v51 decision evidence without activation authority."""
+
+    if not confirm_no_activation:
+        _fail("decision-time signal no-activation confirmation is required")
+    try:
+        payload = asyncio.run(
+            prepare_low_volatility_decision_time_signal(
+                _settings(),
+                session_date=_parse_date(
+                    session_date,
+                    name="session-date",
+                ),
+                reconciliation_report_hash=(
+                    reconciliation_report_hash
+                ),
+                prepared_by=prepared_by,
+            )
+        )
+    except (AutoQuantError, LookupError, ValueError):
+        _fail("decision-time paper signal preparation failed closed")
+    _emit(payload)
 
 
 @app.command("low-volatility-forward-evaluation-data-create")

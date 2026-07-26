@@ -103,6 +103,7 @@ async def test_deployment_gate_keeps_complete_v49_evidence_locked() -> None:
     approval = _approval()
     spec = SimpleNamespace(spec_hash="f" * 64)
     contract = SimpleNamespace(
+        contract_hash="9" * 64,
         forward_spec_hash=approval.forward_spec_hash,
         source_spec_hash=approval.source_spec_hash,
         compatibility_spec_hash=spec.spec_hash,
@@ -122,9 +123,14 @@ async def test_deployment_gate_keeps_complete_v49_evidence_locked() -> None:
         account_id=approval.account_id,
         strategy_id=approval.strategy_id,
         source_spec_hash=approval.source_spec_hash,
+        forward_spec_hash=approval.forward_spec_hash,
+        deployment_contract_hash=contract.contract_hash,
+        compatibility_run_hash=run.run_hash,
+        compatibility_spec_hash=spec.spec_hash,
         risk_policy_hash=approval.risk_policy_hash,
         session_date=SESSION,
-        execution_timing_compatible=False,
+        execution_timing_compatible=True,
+        paper_activation_authority_granted=False,
         runtime_activation_allowed=False,
         live_trading_locked=True,
     )
@@ -144,7 +150,6 @@ async def test_deployment_gate_keeps_complete_v49_evidence_locked() -> None:
     assert report.blockers == (
         LowVolatilityPaperDeploymentBlocker.CANDIDATE_RUNTIME_LOCKED,
         LowVolatilityPaperDeploymentBlocker.COMPATIBILITY_RUNTIME_AUTHORITY_MISSING,
-        LowVolatilityPaperDeploymentBlocker.DAILY_SIGNAL_EXECUTION_INCOMPATIBLE,
         LowVolatilityPaperDeploymentBlocker.DAILY_SIGNAL_RUNTIME_LOCKED,
     )
     assert report.ready_for_runtime is False

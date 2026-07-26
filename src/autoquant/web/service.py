@@ -963,6 +963,7 @@ class ConsoleService:
         deployment_contract_hash: str | None = None
         deployment_contract_status = "not_configured"
         daily_signal_hash: str | None = None
+        decision_signal_status = "not_configured"
         deployment_blockers: tuple[str, ...] = ("deployment_gate_unavailable",)
         if (
             self._low_volatility_compatibility_specs is not None
@@ -1002,6 +1003,11 @@ class ConsoleService:
                 deployment_contract_status = "frozen_without_activation_authority"
             candidate_approval_hash = deployment.candidate_approval_hash
             daily_signal_hash = deployment.daily_signal_hash
+            decision_signal_status = (
+                "not_available"
+                if daily_signal_hash is None
+                else "prepared_without_activation_authority"
+            )
             deployment_blockers = tuple(value.value for value in deployment.blockers)
         return LowVolatilityForwardProgressView(
             spec_hash=spec.spec_hash,
@@ -1043,6 +1049,7 @@ class ConsoleService:
             deployment_contract_hash=(deployment_contract_hash),
             deployment_contract_status=(deployment_contract_status),
             daily_signal_hash=daily_signal_hash,
+            decision_signal_status=decision_signal_status,
             deployment_blockers=deployment_blockers,
             sessions=tuple(
                 LowVolatilityForwardSessionView(

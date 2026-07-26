@@ -125,6 +125,15 @@ from autoquant.execution.compliance_approval import (
 )
 from autoquant.execution.control import KillSwitchReason
 from autoquant.execution.control_store import PostgresExecutionControlRepository
+from autoquant.execution.low_volatility_decision_signal import (
+    LowVolatilityDecisionTimePaperSignal,
+)
+from autoquant.execution.low_volatility_decision_signal_compiler import (
+    LowVolatilityDecisionTimeSignalCompiler,
+)
+from autoquant.execution.low_volatility_decision_signal_store import (
+    PostgresLowVolatilityDecisionTimeSignalRepository,
+)
 from autoquant.execution.low_volatility_paper_approval import (
     LowVolatilityPaperCandidateApproval,
     LowVolatilityPaperCandidateRevocation,
@@ -2806,7 +2815,7 @@ async def inspect_low_volatility_paper_deployment(
     contracts = PostgresLowVolatilityPaperDeploymentContractRepository.connect(dsn=dsn)
     compatibility_specs = PostgresLowVolatilityExecutionCompatibilityRepository.connect(dsn=dsn)
     compatibility_runs = PostgresLowVolatilityExecutionCompatibilityRunRepository.connect(dsn=dsn)
-    signals = PostgresLowVolatilityPaperSignalRepository.connect(dsn=dsn)
+    signals = PostgresLowVolatilityDecisionTimeSignalRepository.connect(dsn=dsn)
     try:
         report = await LowVolatilityPaperDeploymentGate(
             account_id=settings.paper_account_id,
@@ -2975,6 +2984,152 @@ def _low_volatility_paper_signal_payload(
         "signal_date": signal.signal_date.isoformat(),
         "signal_hash": signal.signal_hash,
         "status": status,
+    }
+
+
+async def prepare_low_volatility_decision_time_signal(
+    settings: AppSettings,
+    *,
+    session_date: date,
+    reconciliation_report_hash: str,
+    prepared_by: str,
+) -> dict[str, object]:
+    """Bind exact pre-open evidence without granting runtime authority."""
+
+    if settings.environment is not RuntimeEnvironment.PAPER:
+        raise MissingCapabilityError("paper environment is not configured")
+    if settings.live_trading_enabled:
+        raise MissingCapabilityError("live trading must remain hard-locked")
+    dsn = configured_dsn(
+        settings.postgres_dsn,
+        capability="PostgreSQL",
+    )
+    candidates = PostgresLowVolatilityPaperCandidateRepository.connect(dsn=dsn)
+    contracts = PostgresLowVolatilityPaperDeploymentContractRepository.connect(
+        dsn=dsn
+    )
+    compatibility_runs = (
+        PostgresLowVolatilityExecutionCompatibilityRunRepository.connect(
+            dsn=dsn
+        )
+    )
+    observations = PostgresLowVolatilityPaperSignalRepository.connect(dsn=dsn)
+    signals = PostgresLowVolatilityDecisionTimeSignalRepository.connect(dsn=dsn)
+    executions = PostgresPaperExecutionRepository.connect(dsn=dsn)
+    controls = PostgresExecutionControlRepository.connect(dsn=dsn)
+    control = PostgresControlRepository.connect(dsn=dsn)
+    try:
+        kill_switch = await controls.get(
+            account_id=settings.paper_account_id
+        )
+        if not kill_switch.active:
+            raise MissingCapabilityError(
+                "decision-time signal requires the kill switch to remain active"
+            )
+        active = await candidates.active(
+            account_id=settings.paper_account_id,
+            strategy_id=settings.paper_strategy_id,
+        )
+        if active is None:
+            raise LookupError("low-volatility paper candidate is not active")
+        candidate = active.approval
+        existing = await signals.for_session(
+            candidate_approval_hash=candidate.approval_hash,
+            session_date=session_date,
+        )
+        if existing is not None:
+            return _low_volatility_decision_time_signal_payload(
+                existing,
+                status="stored",
+            )
+        contract = await contracts.for_forward_spec(
+            candidate.forward_spec_hash
+        )
+        compatibility = await compatibility_runs.for_spec(
+            contract.compatibility_spec_hash
+        )
+        observation = await observations.for_session(
+            candidate_approval_hash=candidate.approval_hash,
+            session_date=session_date,
+        )
+        if observation is None:
+            raise LookupError(
+                "low-volatility observation signal does not exist"
+            )
+        reconciliation = await executions.load_reconciliation_report(
+            reconciliation_report_hash
+        )
+        internal_account = await executions.load_account_snapshot(
+            reconciliation.internal_snapshot_hash
+        )
+        broker_account = await executions.load_account_snapshot(
+            reconciliation.broker_snapshot_hash
+        )
+        prepared_at = datetime.now(UTC)
+        signal = LowVolatilityDecisionTimeSignalCompiler().compile(
+            contract=contract,
+            candidate=candidate,
+            compatibility=compatibility,
+            observation=observation,
+            internal_account=internal_account,
+            broker_account=broker_account,
+            reconciliation=reconciliation,
+            risk_policy=default_paper_policy(candidate.instruments),
+            kill_switch=kill_switch,
+            prepared_by=prepared_by,
+            prepared_at=prepared_at,
+        )
+        stored = await signals.save(signal)
+        payload = _low_volatility_decision_time_signal_payload(
+            stored,
+            status="prepared_without_activation_authority",
+        )
+        await control.append_audit_event(
+            "research.low_volatility.decision_time_signal.prepared",
+            stored.prepared_at,
+            payload,
+        )
+        return payload
+    finally:
+        await control.close()
+        await controls.close()
+        await executions.close()
+        await signals.close()
+        await observations.close()
+        await compatibility_runs.close()
+        await contracts.close()
+        await candidates.close()
+
+
+def _low_volatility_decision_time_signal_payload(
+    signal: LowVolatilityDecisionTimePaperSignal,
+    *,
+    status: str,
+) -> dict[str, object]:
+    if not isinstance(signal, LowVolatilityDecisionTimePaperSignal):
+        raise TypeError(
+            "decision-time payload requires exact signal evidence"
+        )
+    return {
+        "account_evidence_at": signal.account_evidence_at.isoformat(),
+        "account_id": signal.account_id,
+        "candidate_approval_hash": signal.candidate_approval_hash,
+        "compatibility_run_hash": signal.compatibility_run_hash,
+        "deployment_contract_hash": signal.deployment_contract_hash,
+        "execution_timing_compatible": True,
+        "held_position_count": len(signal.held_instruments),
+        "live_trading_locked": True,
+        "observation_signal_hash": signal.observation_signal_hash,
+        "paper_activation_authority_granted": False,
+        "reconciliation_report_hash": (
+            signal.reconciliation_report_hash
+        ),
+        "runtime_activation_allowed": False,
+        "session_date": signal.session_date.isoformat(),
+        "signal_hash": signal.signal_hash,
+        "status": status,
+        "strategy_id": signal.strategy_id,
+        "valuation_count": len(signal.valuation_instruments),
     }
 
 
@@ -4473,7 +4628,7 @@ async def inspect_paper_runtime_readiness(
     low_volatility_compatibility_runs: (
         PostgresLowVolatilityExecutionCompatibilityRunRepository | None
     ) = None
-    low_volatility_signals: PostgresLowVolatilityPaperSignalRepository | None = None
+    low_volatility_signals: PostgresLowVolatilityDecisionTimeSignalRepository | None = None
     try:
         clickhouse = await ClickHouseDailyRepository.connect(
             dsn=configured_dsn(
@@ -4500,7 +4655,7 @@ async def inspect_paper_runtime_readiness(
         low_volatility_compatibility_runs = (
             PostgresLowVolatilityExecutionCompatibilityRunRepository.connect(dsn=postgres_dsn)
         )
-        low_volatility_signals = PostgresLowVolatilityPaperSignalRepository.connect(
+        low_volatility_signals = PostgresLowVolatilityDecisionTimeSignalRepository.connect(
             dsn=postgres_dsn
         )
         cold_start_control = await controls.ensure_fail_closed(

@@ -670,6 +670,7 @@ class LowVolatilityForwardProgressView(BaseModel):
         default=None,
         pattern=r"^[0-9a-f]{64}$",
     )
+    decision_signal_status: str = "not_configured"
     deployment_blockers: tuple[str, ...] = ("deployment_gate_unavailable",)
     ready_for_runtime: bool = False
     runtime_activation_allowed: bool = False
@@ -740,6 +741,22 @@ class LowVolatilityForwardProgressView(BaseModel):
             or not self.deployment_blockers
             or len(set(self.deployment_blockers)) != len(self.deployment_blockers)
             or (self.daily_signal_hash is not None and self.candidate_approval_hash is None)
+            or self.decision_signal_status
+            not in {
+                "not_configured",
+                "not_available",
+                "prepared_without_activation_authority",
+            }
+            or (
+                self.daily_signal_hash is None
+                and self.decision_signal_status
+                == "prepared_without_activation_authority"
+            )
+            or (
+                self.daily_signal_hash is not None
+                and self.decision_signal_status
+                != "prepared_without_activation_authority"
+            )
             or self.deployment_contract_status
             not in {
                 "not_configured",

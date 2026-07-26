@@ -17,6 +17,9 @@ from autoquant.errors import MissingCapabilityError, PersistenceUnavailableError
 from autoquant.execution.control import KillSwitchReason
 from autoquant.execution.control_store import PostgresExecutionControlRepository
 from autoquant.execution.coordinator import PaperOrderCoordinator
+from autoquant.execution.low_volatility_decision_signal_store import (
+    PostgresLowVolatilityDecisionTimeSignalRepository,
+)
 from autoquant.execution.low_volatility_paper_approval_store import (
     PostgresLowVolatilityPaperCandidateRepository,
 )
@@ -25,9 +28,6 @@ from autoquant.execution.low_volatility_paper_deployment import (
 )
 from autoquant.execution.low_volatility_paper_deployment_contract_store import (
     PostgresLowVolatilityPaperDeploymentContractRepository,
-)
-from autoquant.execution.low_volatility_paper_signal_store import (
-    PostgresLowVolatilityPaperSignalRepository,
 )
 from autoquant.execution.market_clock import AShareMarketClock
 from autoquant.execution.paper_deployment import (
@@ -199,7 +199,7 @@ async def assemble_paper_runtime(
             PostgresLowVolatilityExecutionCompatibilityRunRepository.connect(dsn=postgres_dsn)
         )
         closers.append(low_volatility_compatibility_runs.close)
-        low_volatility_signals = PostgresLowVolatilityPaperSignalRepository.connect(
+        low_volatility_signals = PostgresLowVolatilityDecisionTimeSignalRepository.connect(
             dsn=postgres_dsn
         )
         closers.append(low_volatility_signals.close)

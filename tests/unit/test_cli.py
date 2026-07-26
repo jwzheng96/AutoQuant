@@ -1730,6 +1730,82 @@ def test_low_volatility_signal_prepare_is_observation_only() -> None:
     preparation.assert_awaited_once()
 
 
+def test_decision_time_signal_prepare_requires_confirmation() -> None:
+    preparation = AsyncMock()
+    with patch(
+        "autoquant.cli.prepare_low_volatility_decision_time_signal",
+        new=preparation,
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "low-volatility-decision-time-signal-prepare",
+                "--session-date",
+                "2026-07-27",
+                "--reconciliation-report-hash",
+                "a" * 64,
+                "--prepared-by",
+                "paper-risk-operator",
+            ],
+        )
+
+    assert result.exit_code == 2
+    assert preparation.await_count == 0
+
+
+def test_decision_time_signal_prepare_never_grants_authority() -> None:
+    payload = {
+        "account_evidence_at": "2026-07-27T01:04:59+00:00",
+        "account_id": "paper-main",
+        "candidate_approval_hash": "a" * 64,
+        "compatibility_run_hash": "b" * 64,
+        "deployment_contract_hash": "c" * 64,
+        "execution_timing_compatible": True,
+        "held_position_count": 2,
+        "live_trading_locked": True,
+        "observation_signal_hash": "d" * 64,
+        "paper_activation_authority_granted": False,
+        "reconciliation_report_hash": "e" * 64,
+        "runtime_activation_allowed": False,
+        "session_date": "2026-07-27",
+        "signal_hash": "f" * 64,
+        "status": "prepared_without_activation_authority",
+        "strategy_id": "low-volatility-paper",
+        "valuation_count": 300,
+    }
+    preparation = AsyncMock(return_value=payload)
+    with patch(
+        "autoquant.cli.prepare_low_volatility_decision_time_signal",
+        new=preparation,
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "low-volatility-decision-time-signal-prepare",
+                "--session-date",
+                "2026-07-27",
+                "--reconciliation-report-hash",
+                "e" * 64,
+                "--prepared-by",
+                "paper-risk-operator",
+                "--confirm-no-activation",
+            ],
+            env={
+                "AQ_ENVIRONMENT": "paper",
+                "AQ_POSTGRES_DSN": (
+                    "postgresql+asyncpg://sensitive"
+                ),
+            },
+        )
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == payload
+    assert payload["paper_activation_authority_granted"] is False
+    assert payload["runtime_activation_allowed"] is False
+    assert "sensitive" not in result.stdout
+    preparation.assert_awaited_once()
+
+
 def test_forward_evaluation_data_campaign_is_bounded_and_locked() -> None:
     payload = {
         "campaign_hash": "b" * 64,
