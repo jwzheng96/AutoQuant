@@ -9,7 +9,7 @@ from sqlalchemy.engine import RowMapping
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from autoquant.clock import SHANGHAI
-from autoquant.data.models import _canonical_hash, _require_nonblank
+from autoquant.data.models import _require_nonblank
 from autoquant.errors import (
     BrokerStateUnknownError,
     PersistenceUnavailableError,
@@ -27,7 +27,7 @@ from autoquant.execution.qmt_callback_reducer_store import (
     qmt_broker_trade_fact_from_row,
 )
 from autoquant.execution.qmt_readonly_store import (
-    QmtReadOnlyAcceptanceEvidence,
+    qmt_readonly_acceptance_from_row,
 )
 from autoquant.execution.qmt_session_store import qmt_session_token_hash
 
@@ -494,34 +494,7 @@ def _acceptance_matches(
 ) -> bool:
     if row is None:
         return False
-    try:
-        acceptance = QmtReadOnlyAcceptanceEvidence(
-            logical_account_id=str(row["logical_account_id"]),
-            observed_at=row["observed_at"],
-            baseline_evidence_hash=str(row["baseline_evidence_hash"]),
-            account_snapshot_hash=str(row["account_snapshot_hash"]),
-            package_manifest_hash=str(row["package_manifest_hash"]),
-            position_count=int(row["position_count"]),
-            order_count=int(row["order_count"]),
-            trade_count=int(row["trade_count"]),
-            callback_cursor=int(row["callback_cursor"]),
-            lease_session_id=int(row["lease_session_id"]),
-            lease_holder_id=str(row["lease_holder_id"]),
-            lease_token_hash=str(row["lease_token_hash"]),
-            lease_generation=int(row["lease_generation"]),
-        )
-        raw_payload = row["evidence_payload"]
-        payload = json.loads(raw_payload) if isinstance(raw_payload, str) else dict(raw_payload)
-    except (KeyError, TypeError, ValueError):
-        raise PersistenceUnavailableError(
-            "QMT acceptance evidence failed integrity verification"
-        ) from None
-    if (
-        str(row["evidence_hash"]) != acceptance.evidence_hash
-        or payload != acceptance.payload()
-        or _canonical_hash(payload) != acceptance.evidence_hash
-    ):
-        raise PersistenceUnavailableError("QMT acceptance evidence failed integrity verification")
+    acceptance = qmt_readonly_acceptance_from_row(row)
     return bool(
         acceptance.logical_account_id == report.logical_account_id
         and acceptance.baseline_evidence_hash == report.baseline_evidence_hash

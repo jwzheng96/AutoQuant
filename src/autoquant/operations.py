@@ -213,7 +213,11 @@ from autoquant.execution.qmt_lease_guard import (
     run_fenced_blocking,
 )
 from autoquant.execution.qmt_observer import QmtReadOnlyObserver
-from autoquant.execution.qmt_preflight import inspect_qmt_readiness
+from autoquant.execution.qmt_preflight import (
+    QmtClockAttestation,
+    QmtDatabaseClockVerifier,
+    inspect_qmt_readiness,
+)
 from autoquant.execution.qmt_quote_runtime import (
     ImportedXtDataClient,
     QmtFullTickSnapshotReader,
@@ -5347,11 +5351,19 @@ async def run_qmt_observer(settings: AppSettings) -> None:
         await ledger.check_connection()
         await reconciliations.check_connection()
         control = await controls.replay(account_id=settings.paper_account_id)
-        active_session_ids = await leases.active_session_ids(now=datetime.now(UTC))
+        clock_started_at = datetime.now(UTC)
+        database_observed_at = await leases.database_time()
+        clock_completed_at = datetime.now(UTC)
+        active_session_ids = await leases.active_session_ids(now=clock_completed_at)
         readiness = inspect_qmt_readiness(
             settings,
             kill_switch_active=control.active,
             active_session_ids=active_session_ids,
+            clock_attestation=QmtClockAttestation(
+                request_started_at=clock_started_at,
+                database_observed_at=database_observed_at,
+                request_completed_at=clock_completed_at,
+            ),
         )
         if not readiness.read_only_ready:
             blockers = ",".join(check.code.value for check in readiness.checks if not check.passed)
@@ -5398,6 +5410,10 @@ async def run_qmt_observer(settings: AppSettings) -> None:
             session=qmt,
             callbacks=coordinator,
             lease=lease_guard,
+            clock=QmtDatabaseClockVerifier(
+                repository=leases,
+                now=lambda: datetime.now(UTC),
+            ),
             acceptances=acceptances,
             reconciliations=reconciliations,
             lease_token=credentials.lease_token,
@@ -5525,11 +5541,19 @@ async def run_qmt_readonly_acceptance(
         acceptances = PostgresQmtReadOnlyAcceptanceRepository.connect(dsn=postgres_dsn)
         await acceptances.check_connection()
         control = await controls.replay(account_id=settings.paper_account_id)
-        active_session_ids = await leases.active_session_ids(now=datetime.now(UTC))
+        clock_started_at = datetime.now(UTC)
+        database_observed_at = await leases.database_time()
+        clock_completed_at = datetime.now(UTC)
+        active_session_ids = await leases.active_session_ids(now=clock_completed_at)
         readiness = inspect_qmt_readiness(
             settings,
             kill_switch_active=control.active,
             active_session_ids=active_session_ids,
+            clock_attestation=QmtClockAttestation(
+                request_started_at=clock_started_at,
+                database_observed_at=database_observed_at,
+                request_completed_at=clock_completed_at,
+            ),
         )
         if not readiness.read_only_ready:
             blockers = ",".join(check.code.value for check in readiness.checks if not check.passed)
@@ -5561,6 +5585,10 @@ async def run_qmt_readonly_acceptance(
 
         acceptance = await run_fenced_blocking(query_once)
         lease = await lease_guard.verify()
+        clock_attestation = await QmtDatabaseClockVerifier(
+            repository=leases,
+            now=lambda: datetime.now(UTC),
+        ).attest()
         latest_control = await controls.replay(account_id=settings.paper_account_id)
         if not latest_control.active:
             raise MissingCapabilityError("QMT acceptance requires the kill switch to remain active")
@@ -5568,6 +5596,7 @@ async def run_qmt_readonly_acceptance(
             baseline=acceptance.baseline,
             package_manifest_hash=acceptance.package_manifest_hash,
             lease=lease,
+            clock_attestation=clock_attestation,
         )
         evidence = await acceptances.append(
             evidence,

@@ -19,6 +19,7 @@ from autoquant.execution.qmt_callback_reducer_store import (
     QmtCallbackReductionResult,
 )
 from autoquant.execution.qmt_observer import QmtReadOnlyObserver
+from autoquant.execution.qmt_preflight import QmtClockAttestation
 from autoquant.execution.qmt_readonly import (
     build_qmt_readonly_baseline,
     normalize_qmt_asset,
@@ -153,6 +154,15 @@ class FakeLease:
         return _lease()
 
 
+class FakeClock:
+    async def attest(self) -> QmtClockAttestation:
+        return QmtClockAttestation(
+            request_started_at=NOW + timedelta(milliseconds=20),
+            database_observed_at=NOW + timedelta(milliseconds=25),
+            request_completed_at=NOW + timedelta(milliseconds=30),
+        )
+
+
 class FakeAcceptances:
     def __init__(self) -> None:
         self.items: list[QmtReadOnlyAcceptanceEvidence] = []
@@ -193,6 +203,7 @@ async def test_observer_persists_current_query_and_passed_reconciliation() -> No
         session=session,
         callbacks=callbacks,
         lease=FakeLease(),
+        clock=FakeClock(),
         acceptances=acceptances,
         reconciliations=reconciliations,
         lease_token=TOKEN,
@@ -217,6 +228,7 @@ async def test_observer_persists_racing_callback_before_retrying_query() -> None
         session=session,
         callbacks=callbacks,
         lease=FakeLease(),
+        clock=FakeClock(),
         acceptances=FakeAcceptances(),
         reconciliations=FakeReconciliations(),
         lease_token=TOKEN,
@@ -252,6 +264,7 @@ async def test_observer_fails_closed_after_bounded_query_races() -> None:
         session=AlwaysChangingSession(),
         callbacks=FakeCallbacks((0, 1, 1, 2, 2, 3)),
         lease=FakeLease(),
+        clock=FakeClock(),
         acceptances=acceptances,
         reconciliations=reconciliations,
         lease_token=TOKEN,

@@ -47,6 +47,9 @@ uv run autoquant qmt-check
 uv run autoquant paper-runtime-check
 ```
 
+`qmt-check` 还必须显示 `trusted_clock=pass`。它以 PostgreSQL 时钟约束 Windows 主机时间；
+时钟未知、最坏偏差超过 2 秒或测量往返超过 2 秒时，不得打开 XtTrader。
+
 `paper-runtime-check` 不导入 XtQuant、不连接 MiniQMT、不复位停机开关。成功状态
 `ready_for_quote_connection` 仅表示数据库证据允许打开行情连接，不表示允许模拟下单，更
 不表示允许实盘。

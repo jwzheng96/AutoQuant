@@ -52,6 +52,7 @@ from autoquant.execution.promotion_audit import (
     PostgresPaperPromotionFactRepository,
     PromotionGateCode,
 )
+from autoquant.execution.qmt_preflight import QmtClockAttestation
 from autoquant.execution.qmt_readonly import (
     build_qmt_readonly_baseline,
     normalize_qmt_asset,
@@ -150,6 +151,7 @@ async def registry_fixture() -> AsyncIterator[
             "migrations/postgres/023_research_universes.sql",
             "migrations/postgres/024_research_data_campaigns.sql",
             "migrations/postgres/036_paper_compliance_approvals.sql",
+            "migrations/postgres/052_qmt_clock_attestations.sql",
         )
     )
     report = QualityReport(
@@ -889,7 +891,17 @@ async def test_qmt_readonly_acceptance_persists_only_redacted_fenced_evidence(
         baseline=baseline,
         package_manifest_hash="e" * 64,
         lease=lease,
+        clock_attestation=QmtClockAttestation(
+            request_started_at=now + timedelta(milliseconds=11),
+            database_observed_at=now + timedelta(milliseconds=12),
+            request_completed_at=now + timedelta(milliseconds=13),
+        ),
     )
+    with pytest.raises(ValueError, match="trusted clock"):
+        await acceptances.append(
+            replace(evidence, clock_attestation=None),
+            now=now + timedelta(milliseconds=20),
+        )
 
     stored = await acceptances.append(
         evidence,
@@ -911,6 +923,38 @@ async def test_qmt_readonly_acceptance_persists_only_redacted_fenced_evidence(
         )
     assert broker_account_id not in str(payload)
     assert token.get_secret_value() not in str(payload)
+    assert "qmt-readonly-acceptance-v2" in str(payload)
+    assert "qmt-clock-attestation-v1" in str(payload)
+    with pytest.raises(SQLAlchemyError):
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    f"""
+                    INSERT INTO {schema}.qmt_readonly_acceptance_evidence
+                        (evidence_hash, logical_account_id, observed_at,
+                         baseline_evidence_hash, account_snapshot_hash,
+                         package_manifest_hash, position_count,
+                         order_count, trade_count, callback_cursor,
+                         lease_session_id, lease_holder_id,
+                         lease_token_hash, lease_generation,
+                         clock_attestation_hash,
+                         clock_attestation_payload, evidence_payload)
+                    SELECT :malformed_hash, logical_account_id,
+                           observed_at, baseline_evidence_hash,
+                           account_snapshot_hash, package_manifest_hash,
+                           position_count, order_count, trade_count,
+                           callback_cursor, lease_session_id,
+                           lease_holder_id, lease_token_hash,
+                           lease_generation, NULL, NULL, '{{}}'::jsonb
+                    FROM {schema}.qmt_readonly_acceptance_evidence
+                    WHERE evidence_hash = :evidence_hash
+                    """
+                ),
+                {
+                    "evidence_hash": evidence.evidence_hash,
+                    "malformed_hash": "f" * 64,
+                },
+            )
     with pytest.raises(SQLAlchemyError):
         async with engine.begin() as connection:
             await connection.execute(
@@ -1161,12 +1205,27 @@ async def _insert_qmt_acceptance(
                      package_manifest_hash, position_count, order_count,
                      trade_count, callback_cursor, lease_session_id,
                      lease_holder_id, lease_token_hash, lease_generation,
+                     clock_attestation_hash, clock_attestation_payload,
                      evidence_payload)
                 VALUES
                     (:evidence_hash, :account_id, :observed_at,
                      :baseline_hash, :snapshot_hash, :package_hash,
                      0, 0, 0, 0, 731102, 'windows-qmt-drill',
-                     :token_hash, 1, '{{}}'::jsonb)
+                     :token_hash, 1, CAST(:clock_hash AS text),
+                     jsonb_build_object(
+                         'trusted', true,
+                         'version', 'qmt-clock-attestation-v1'
+                     ),
+                     jsonb_build_object(
+                         'clock_attestation',
+                         jsonb_build_object(
+                             'trusted', true,
+                             'version', 'qmt-clock-attestation-v1'
+                         ),
+                         'clock_attestation_hash',
+                         CAST(:clock_hash AS text),
+                         'version', 'qmt-readonly-acceptance-v2'
+                     ))
                 """
             ),
             {
@@ -1177,5 +1236,6 @@ async def _insert_qmt_acceptance(
                 "snapshot_hash": "5" * 64,
                 "package_hash": "6" * 64,
                 "token_hash": "7" * 64,
+                "clock_hash": "a" * 64,
             },
         )

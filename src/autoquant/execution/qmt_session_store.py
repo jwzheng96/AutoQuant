@@ -162,6 +162,24 @@ class PostgresQmtSessionLeaseRepository:
     async def close(self) -> None:
         await self._engine.dispose()
 
+    async def database_time(self) -> datetime:
+        """Read the trusted PostgreSQL clock used to fence QMT host timestamps."""
+
+        try:
+            async with self._engine.connect() as connection:
+                value = await connection.scalar(
+                    text("SELECT clock_timestamp()")
+                )
+        except Exception:
+            raise PersistenceUnavailableError(
+                "QMT trusted database clock read failed"
+            ) from None
+        if not isinstance(value, datetime):
+            raise PersistenceUnavailableError(
+                "QMT trusted database clock returned an invalid value"
+            )
+        return to_utc(value, name="QMT trusted database clock")
+
     async def active_session_ids(self, *, now: datetime) -> tuple[int, ...]:
         instant = to_utc(now, name="lease observation time")
         try:

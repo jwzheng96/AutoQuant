@@ -16,6 +16,9 @@ from autoquant.execution.qmt_callback_reconciliation import (
     reconcile_qmt_callback_state,
 )
 from autoquant.execution.qmt_lease_guard import run_fenced_blocking
+from autoquant.execution.qmt_preflight import (
+    QmtClockAttestation,
+)
 from autoquant.execution.qmt_readonly_store import (
     QmtReadOnlyAcceptanceEvidence,
 )
@@ -44,6 +47,10 @@ class QmtDurableCallbackCoordinator(Protocol):
 
 class QmtLeaseVerifier(Protocol):
     async def verify(self) -> QmtSessionLease: ...
+
+
+class QmtClockVerifier(Protocol):
+    async def attest(self) -> QmtClockAttestation: ...
 
 
 class QmtAcceptanceWriter(Protocol):
@@ -89,6 +96,7 @@ class QmtReadOnlyObserver:
         session: QmtDurableReadOnlySession,
         callbacks: QmtDurableCallbackCoordinator,
         lease: QmtLeaseVerifier,
+        clock: QmtClockVerifier,
         acceptances: QmtAcceptanceWriter,
         reconciliations: QmtReconciliationWriter,
         lease_token: SecretStr,
@@ -105,6 +113,7 @@ class QmtReadOnlyObserver:
         self._session = session
         self._callbacks = callbacks
         self._lease = lease
+        self._clock = clock
         self._acceptances = acceptances
         self._reconciliations = reconciliations
         self._lease_token = lease_token
@@ -146,10 +155,12 @@ class QmtReadOnlyObserver:
                 )
                 continue
             active_lease = await self._lease.verify()
+            clock_attestation = await self._clock.attest()
             acceptance = QmtReadOnlyAcceptanceEvidence.from_baseline(
                 baseline=baseline,
                 package_manifest_hash=query.package_manifest_hash,
                 lease=active_lease,
+                clock_attestation=clock_attestation,
             )
             acceptance = await self._acceptances.append(
                 acceptance,

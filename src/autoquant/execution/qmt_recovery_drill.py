@@ -237,6 +237,9 @@ class PostgresQmtRecoveryDrillRepository:
                                 FROM {self._schema}.qmt_readonly_acceptance_evidence
                                 WHERE logical_account_id = :account_id
                                   AND observed_at <= :now
+                                  AND clock_attestation_hash IS NOT NULL
+                                  AND clock_attestation_payload
+                                      ->>'trusted' = 'true'
                                 ORDER BY observed_at DESC, evidence_hash DESC
                                 LIMIT 1
                                 """
@@ -383,6 +386,9 @@ class PostgresQmtRecoveryDrillRepository:
                                 WHERE logical_account_id = :account_id
                                   AND observed_at > :failure_at
                                   AND observed_at < :now
+                                  AND clock_attestation_hash IS NOT NULL
+                                  AND clock_attestation_payload
+                                      ->>'trusted' = 'true'
                                 ORDER BY observed_at DESC, evidence_hash DESC
                                 LIMIT 1
                                 """

@@ -117,10 +117,12 @@ uv run autoquant db-check
 uv run autoquant qmt-check
 ```
 
-`qmt-check` 输出十项 `pass`/`blocked`，但 `live_trading_ready` 永远为 `false`，也不会
-连接 MiniQMT。`session_id_unique` 来自 schema v12 的跨进程活动租约查询；数据库不可用、
-未迁移或相同会话号已有有效租约时保持 `blocked`。实际网关连接前仍必须原子获取租约，
-预检本身不占用会话号。
+`qmt-check` 输出十一项 `pass`/`blocked`，但 `live_trading_ready` 永远为 `false`，也不会
+连接 MiniQMT。`session_id_unique` 来自 schema v12 的跨进程活动租约查询；`trusted_clock`
+使用一次有界往返的 PostgreSQL `clock_timestamp()` 证明本机时间。往返超过 2 秒，或把
+往返不确定性计算在内后本机与数据库的最坏时间误差超过 2 秒，均保持 `blocked`。数据库
+不可用、未迁移或相同会话号已有有效租约时也保持 `blocked`。实际网关连接前仍必须原子
+获取租约，预检本身不占用会话号。
 
 ## 生成只读验收证据
 
@@ -136,8 +138,11 @@ uv run autoquant qmt-readonly-accept `
 SHA-256，连接并订阅配置账户，确认账户状态为正常，然后在回调游标不变化的窗口内依次读取
 资产、持仓、当日委托和当日成交；整组查询最多允许 5 秒。四项数据会经过账户一致性、
 资产平衡、委托/成交收敛校验。
-通过后仅把 schema v17 的脱敏验收证据写入 PostgreSQL；真实资金账号、余额、持仓明细、
-路径和租约原文都不会写入证据表或命令输出。
+取得租约和连接 MiniQMT 前会再次执行同一数据库时钟证明，不能使用过期的预检结果。
+通过后仅把 schema v52 的脱敏验收证据写入 PostgreSQL；它把本次查询后重新取得的可信
+时钟证明及其哈希绑定到验收哈希中。真实资金账号、余额、持仓明细、路径和租约原文都不会
+写入证据表或命令输出。历史 schema v17 证据仍可校验，但缺少时钟证明，不能替代新的
+Windows 验收。
 
 无论成功失败，命令都会停止 XtTrader 并释放会话租约。租约释放失败或任一查询事实不明确时
 命令失败，持久化停机开关保持或恢复为激活。该命令不包含任何下单、撤单或资金划拨调用。

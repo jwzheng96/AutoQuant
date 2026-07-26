@@ -947,6 +947,9 @@ class PostgresPaperPromotionFactRepository:
                                 SELECT evidence_hash, observed_at
                                 FROM {self._schema}.qmt_readonly_acceptance_evidence
                                 WHERE logical_account_id = :account_id
+                                  AND clock_attestation_hash IS NOT NULL
+                                  AND clock_attestation_payload
+                                      ->>'trusted' = 'true'
                                 ORDER BY observed_at DESC, evidence_hash DESC
                                 LIMIT 1
                                 """

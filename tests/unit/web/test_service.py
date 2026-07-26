@@ -785,10 +785,12 @@ async def test_qmt_status_reports_fresh_redacted_evidence_and_host_blockers() ->
         position_count=2,
         order_count=3,
         trade_count=1,
+        clock_attestation=MagicMock(trusted=True),
     )
     acceptances.latest = AsyncMock(return_value=evidence)
     sessions = MagicMock()
     sessions.active_session_ids = AsyncMock(return_value=())
+    sessions.database_time = AsyncMock(return_value=NOW)
     controls = MagicMock()
     controls.replay = AsyncMock(return_value=MagicMock(active=True))
     service = _service(
@@ -805,12 +807,52 @@ async def test_qmt_status_reports_fresh_redacted_evidence_and_host_blockers() ->
     assert isinstance(status, QmtReadOnlyStatus)
     assert status.status == "accepted"
     assert status.evidence_fresh is True
+    assert status.clock_attested is True
     assert status.current_host_read_only_ready is False
     assert status.latest_evidence_hash == "a" * 64
     assert status.position_count == 2
     assert status.live_trading_locked is True
     assert status.checks["windows_runtime"] == "blocked"
+    assert status.checks["trusted_clock"] == "pass"
     assert "qmt_disconnect_recovery_drill" in status.remaining_gates
+
+
+@pytest.mark.asyncio
+async def test_qmt_status_rejects_fresh_legacy_evidence_without_clock() -> None:
+    acceptances = MagicMock()
+    acceptances.latest = AsyncMock(
+        return_value=MagicMock(
+            evidence_hash="a" * 64,
+            observed_at=NOW - timedelta(minutes=1),
+            position_count=0,
+            order_count=0,
+            trade_count=0,
+            clock_attestation=None,
+        )
+    )
+    sessions = MagicMock()
+    sessions.active_session_ids = AsyncMock(return_value=())
+    sessions.database_time = AsyncMock(return_value=NOW)
+    controls = MagicMock()
+    controls.replay = AsyncMock(return_value=MagicMock(active=True))
+    service = _service(
+        operator=MagicMock(),
+        control=MagicMock(),
+        runner=AsyncMock(),
+        execution_controls=controls,
+        qmt_acceptances=acceptances,
+        qmt_sessions=sessions,
+    )
+
+    status = await service.qmt_readonly_status()
+
+    assert status.status == "stale"
+    assert status.evidence_fresh is False
+    assert status.clock_attested is False
+    assert (
+        "clock_attested_windows_qmt_readonly_acceptance"
+        in status.remaining_gates
+    )
 
 
 @pytest.mark.asyncio

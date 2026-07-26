@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -9,6 +10,7 @@ from typer.testing import CliRunner
 
 from autoquant.cli import app
 from autoquant.errors import MissingCapabilityError
+from autoquant.execution.qmt_preflight import QmtClockAttestation
 
 runner = CliRunner()
 MISSING_ENV = {
@@ -463,9 +465,20 @@ def test_web_console_starts_only_on_configured_loopback() -> None:
 
 
 def test_qmt_check_is_read_only_blocked_and_does_not_emit_configuration() -> None:
+    now = datetime(2026, 7, 26, 2, tzinfo=UTC)
     with patch(
         "autoquant.cli._qmt_preflight_db_state",
-        new=AsyncMock(return_value=(True, ())),
+        new=AsyncMock(
+            return_value=(
+                True,
+                (),
+                QmtClockAttestation(
+                    request_started_at=now,
+                    database_observed_at=now,
+                    request_completed_at=now,
+                ),
+            )
+        ),
     ):
         result = runner.invoke(
             app,
@@ -481,6 +494,7 @@ def test_qmt_check_is_read_only_blocked_and_does_not_emit_configuration() -> Non
     payload = json.loads(result.stdout)
     assert payload["status"] == "blocked"
     assert payload["live_trading_ready"] is False
+    assert payload["checks"]["trusted_clock"] == "pass"
     assert "sensitive" not in result.stdout
     assert "123456" not in result.stdout
 

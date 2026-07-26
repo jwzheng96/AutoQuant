@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlalchemy import text
 from sqlalchemy.engine import RowMapping
@@ -17,6 +17,7 @@ from autoquant.data.models import (
     _require_nonblank,
 )
 from autoquant.errors import PersistenceUnavailableError
+from autoquant.execution.qmt_preflight import QmtClockAttestation
 from autoquant.execution.qmt_readonly import QmtReadOnlyBaseline
 from autoquant.execution.qmt_session_store import QmtSessionLease
 
@@ -39,6 +40,7 @@ class QmtReadOnlyAcceptanceEvidence:
     lease_holder_id: str
     lease_token_hash: str
     lease_generation: int
+    clock_attestation: QmtClockAttestation | None = None
     evidence_hash: str = field(init=False)
 
     def __post_init__(self) -> None:
@@ -88,6 +90,17 @@ class QmtReadOnlyAcceptanceEvidence:
             raise ValueError(
                 "lease_holder_id must be a safe identifier"
             )
+        if self.clock_attestation is not None:
+            if (
+                not self.clock_attestation.trusted
+                or self.clock_attestation.request_started_at
+                < self.observed_at
+                or self.clock_attestation.request_started_at
+                > self.observed_at + timedelta(seconds=5)
+            ):
+                raise ValueError(
+                    "QMT acceptance requires a fresh trusted clock attestation"
+                )
         object.__setattr__(
             self,
             "evidence_hash",
@@ -101,6 +114,7 @@ class QmtReadOnlyAcceptanceEvidence:
         baseline: QmtReadOnlyBaseline,
         package_manifest_hash: str,
         lease: QmtSessionLease,
+        clock_attestation: QmtClockAttestation | None = None,
     ) -> QmtReadOnlyAcceptanceEvidence:
         return cls(
             logical_account_id=baseline.logical_account_id,
@@ -116,10 +130,11 @@ class QmtReadOnlyAcceptanceEvidence:
             lease_holder_id=lease.holder_id,
             lease_token_hash=lease.token_hash,
             lease_generation=lease.generation,
+            clock_attestation=clock_attestation,
         )
 
     def payload(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "account_snapshot_hash": self.account_snapshot_hash,
             "baseline_evidence_hash": self.baseline_evidence_hash,
             "callback_cursor": self.callback_cursor,
@@ -133,8 +148,20 @@ class QmtReadOnlyAcceptanceEvidence:
             "package_manifest_hash": self.package_manifest_hash,
             "position_count": self.position_count,
             "trade_count": self.trade_count,
-            "version": "qmt-readonly-acceptance-v1",
+            "version": (
+                "qmt-readonly-acceptance-v1"
+                if self.clock_attestation is None
+                else "qmt-readonly-acceptance-v2"
+            ),
         }
+        if self.clock_attestation is not None:
+            payload["clock_attestation"] = (
+                self.clock_attestation.payload()
+            )
+            payload["clock_attestation_hash"] = (
+                self.clock_attestation.attestation_hash
+            )
+        return payload
 
 
 class PostgresQmtReadOnlyAcceptanceRepository:
@@ -198,9 +225,9 @@ class PostgresQmtReadOnlyAcceptanceRepository:
             raise PersistenceUnavailableError(
                 "QMT acceptance schema check failed"
             ) from None
-        if table is None or not isinstance(version, int) or version < 17:
+        if table is None or not isinstance(version, int) or version < 52:
             raise PersistenceUnavailableError(
-                "QMT acceptance schema v17 is unavailable"
+                "QMT acceptance schema v52 is unavailable"
             )
 
     async def append(
@@ -213,6 +240,10 @@ class PostgresQmtReadOnlyAcceptanceRepository:
             raise TypeError(
                 "evidence must be QmtReadOnlyAcceptanceEvidence"
             )
+        if evidence.clock_attestation is None:
+            raise ValueError(
+                "new QMT acceptance requires a trusted clock attestation"
+            )
         instant = to_utc(now, name="QMT acceptance persistence time")
         if instant < evidence.observed_at:
             raise ValueError(
@@ -220,6 +251,20 @@ class PostgresQmtReadOnlyAcceptanceRepository:
             )
         parameters = {
             **evidence.payload(),
+            "clock_attestation_hash": (
+                None
+                if evidence.clock_attestation is None
+                else evidence.clock_attestation.attestation_hash
+            ),
+            "clock_attestation_payload": (
+                None
+                if evidence.clock_attestation is None
+                else json.dumps(
+                    evidence.clock_attestation.payload(),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            ),
             "evidence_hash": evidence.evidence_hash,
             "observed_at": evidence.observed_at,
             "evidence_payload": json.dumps(
@@ -297,6 +342,8 @@ class PostgresQmtReadOnlyAcceptanceRepository:
                              order_count, trade_count, callback_cursor,
                              lease_session_id, lease_holder_id,
                              lease_token_hash, lease_generation,
+                             clock_attestation_hash,
+                             clock_attestation_payload,
                              evidence_payload)
                         VALUES
                             (:evidence_hash, :logical_account_id,
@@ -306,6 +353,8 @@ class PostgresQmtReadOnlyAcceptanceRepository:
                              :order_count, :trade_count, :callback_cursor,
                              :lease_session_id, :lease_holder_id,
                              :lease_token_hash, :lease_generation,
+                             :clock_attestation_hash,
+                             CAST(:clock_attestation_payload AS jsonb),
                              CAST(:evidence_payload AS jsonb))
                         ON CONFLICT (evidence_hash) DO NOTHING
                         """
@@ -336,7 +385,7 @@ class PostgresQmtReadOnlyAcceptanceRepository:
             raise PersistenceUnavailableError(
                 "QMT acceptance evidence persistence failed"
             ) from None
-        stored = _from_row(row)
+        stored = qmt_readonly_acceptance_from_row(row)
         if stored != evidence:
             raise PersistenceUnavailableError(
                 "Stored QMT acceptance evidence does not match"
@@ -378,16 +427,37 @@ class PostgresQmtReadOnlyAcceptanceRepository:
             raise PersistenceUnavailableError(
                 "QMT acceptance evidence read failed"
             ) from None
-        return None if row is None else _from_row(row)
+        return (
+            None
+            if row is None
+            else qmt_readonly_acceptance_from_row(row)
+        )
 
 
-def _from_row(row: RowMapping) -> QmtReadOnlyAcceptanceEvidence:
+def qmt_readonly_acceptance_from_row(
+    row: RowMapping,
+) -> QmtReadOnlyAcceptanceEvidence:
     try:
         raw_payload = row["evidence_payload"]
         payload = (
             json.loads(raw_payload)
             if isinstance(raw_payload, str)
             else dict(raw_payload)
+        )
+        raw_clock_payload = row["clock_attestation_payload"]
+        clock_payload = (
+            None
+            if raw_clock_payload is None
+            else (
+                json.loads(raw_clock_payload)
+                if isinstance(raw_clock_payload, str)
+                else dict(raw_clock_payload)
+            )
+        )
+        clock_attestation = (
+            None
+            if clock_payload is None
+            else QmtClockAttestation.from_payload(clock_payload)
         )
         evidence = QmtReadOnlyAcceptanceEvidence(
             logical_account_id=str(row["logical_account_id"]),
@@ -405,11 +475,21 @@ def _from_row(row: RowMapping) -> QmtReadOnlyAcceptanceEvidence:
             lease_holder_id=str(row["lease_holder_id"]),
             lease_token_hash=str(row["lease_token_hash"]),
             lease_generation=int(row["lease_generation"]),
+            clock_attestation=clock_attestation,
         )
         if (
             payload != evidence.payload()
             or _canonical_hash(payload) != evidence.evidence_hash
             or str(row["evidence_hash"]) != evidence.evidence_hash
+            or (
+                clock_attestation is None
+                and row["clock_attestation_hash"] is not None
+            )
+            or (
+                clock_attestation is not None
+                and str(row["clock_attestation_hash"])
+                != clock_attestation.attestation_hash
+            )
         ):
             raise ValueError(
                 "QMT acceptance evidence payload is inconsistent"

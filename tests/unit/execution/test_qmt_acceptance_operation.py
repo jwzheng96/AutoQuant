@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 from pydantic import SecretStr
@@ -31,6 +32,7 @@ async def test_qmt_acceptance_hashes_vendor_before_guarded_connection() -> None:
     controls.replay.return_value = SimpleNamespace(active=True)
     leases = AsyncMock()
     leases.active_session_ids.return_value = ()
+    leases.database_time.return_value = datetime.now(UTC)
     acceptances = AsyncMock()
     readiness = SimpleNamespace(read_only_ready=True, checks=())
     bindings = MagicMock(package_manifest_hash="a" * 64)
@@ -115,6 +117,7 @@ async def test_qmt_acceptance_hashes_vendor_before_guarded_connection() -> None:
         baseline=baseline,
         package_manifest_hash=bindings.package_manifest_hash,
         lease=lease,
+        clock_attestation=ANY,
     )
     acceptances.append.assert_awaited_once()
     leases.acquire.assert_not_awaited()

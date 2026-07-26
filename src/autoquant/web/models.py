@@ -1187,6 +1187,7 @@ class QmtReadOnlyStatus(BaseModel):
     latest_observed_at: datetime | None = None
     evidence_age_seconds: int | None = Field(default=None, ge=0)
     evidence_fresh: bool
+    clock_attested: bool = False
     position_count: int | None = Field(default=None, ge=0)
     order_count: int | None = Field(default=None, ge=0)
     trade_count: int | None = Field(default=None, ge=0)
@@ -1218,6 +1219,8 @@ class QmtReadOnlyStatus(BaseModel):
             raise ValueError("QMT evidence summary is incomplete")
         if self.evidence_fresh and self.latest_evidence_hash is None:
             raise ValueError("fresh QMT evidence requires a persisted artifact")
+        if self.evidence_fresh and not self.clock_attested:
+            raise ValueError("fresh QMT evidence requires a trusted clock proof")
         if self.status not in {"accepted", "blocked", "stale"}:
             raise ValueError("QMT read-only status is invalid")
         return self

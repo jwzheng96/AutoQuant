@@ -227,7 +227,9 @@ async function loadTrading() {
     setText(
       "qmt-acceptance-state",
       data.qmt?.evidence_fresh
-        ? "已记录新鲜脱敏证据（仅只读）"
+        ? "已记录新鲜脱敏证据与可信时钟证明（仅只读）"
+        : data.qmt?.latest_evidence_hash && !data.qmt?.clock_attested
+          ? "历史证据缺少可信时钟证明"
         : data.qmt?.status === "stale"
           ? "证据已过期"
           : "尚未记录",

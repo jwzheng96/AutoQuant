@@ -59,6 +59,11 @@ async def test_session_lease_is_fenced_renewable_releasable_and_reacquirable(
     leases: tuple[PostgresQmtSessionLeaseRepository, AsyncEngine, str],
 ) -> None:
     repository, engine, schema = leases
+    clock_started_at = datetime.now(UTC)
+    database_observed_at = await repository.database_time()
+    clock_completed_at = datetime.now(UTC)
+    assert clock_started_at - timedelta(seconds=1) <= database_observed_at
+    assert database_observed_at <= clock_completed_at + timedelta(seconds=1)
     acquired = await repository.acquire(
         session_id=731001,
         holder_id="gateway-a",

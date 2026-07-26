@@ -8,6 +8,7 @@ import pytest
 
 from autoquant.errors import BrokerStateUnknownError
 from autoquant.execution.qmt_gateway import QmtCallbackKind
+from autoquant.execution.qmt_preflight import QmtClockAttestation
 from autoquant.execution.qmt_readonly_store import (
     QmtReadOnlyAcceptanceEvidence,
 )
@@ -348,7 +349,15 @@ def test_acceptance_evidence_never_contains_broker_account_identifier() -> None:
         baseline=baseline,
         package_manifest_hash=HASH,
         lease=lease,
+        clock_attestation=QmtClockAttestation(
+            request_started_at=NOW + timedelta(milliseconds=20),
+            database_observed_at=NOW + timedelta(milliseconds=25),
+            request_completed_at=NOW + timedelta(milliseconds=30),
+        ),
     )
 
     assert ACCOUNT not in repr(evidence.payload())
     assert evidence.logical_account_id == LOGICAL_ACCOUNT
+    assert evidence.payload()["version"] == "qmt-readonly-acceptance-v2"
+    assert evidence.clock_attestation is not None
+    assert evidence.clock_attestation.trusted is True

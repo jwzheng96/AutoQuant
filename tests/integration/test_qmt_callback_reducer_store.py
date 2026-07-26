@@ -46,6 +46,7 @@ from autoquant.execution.qmt_canary_contract import (
 from autoquant.execution.qmt_canary_store import PostgresQmtCanaryOrderLedger
 from autoquant.execution.qmt_gateway import QmtCallbackBuffer, QmtCallbackKind
 from autoquant.execution.qmt_models import QmtOrderStatus
+from autoquant.execution.qmt_preflight import QmtClockAttestation
 from autoquant.execution.qmt_readonly import (
     QmtReadOnlyBaseline,
     build_qmt_readonly_baseline,
@@ -166,6 +167,7 @@ async def reducer_fixture() -> AsyncIterator[
             "migrations/postgres/041_qmt_callback_persistence_receipts.sql",
             "migrations/postgres/042_qmt_callback_state_reduction.sql",
             "migrations/postgres/043_qmt_callback_reconciliation.sql",
+            "migrations/postgres/052_qmt_clock_attestations.sql",
         )
     )
     try:
@@ -381,6 +383,17 @@ async def test_qmt_reducer_converges_restart_replays_and_fences_trade_conflict(
         baseline=baseline,
         package_manifest_hash="9" * 64,
         lease=lease,
+        clock_attestation=QmtClockAttestation(
+            request_started_at=(
+                baseline.query_completed_at + timedelta(milliseconds=1)
+            ),
+            database_observed_at=(
+                baseline.query_completed_at + timedelta(milliseconds=2)
+            ),
+            request_completed_at=(
+                baseline.query_completed_at + timedelta(milliseconds=3)
+            ),
+        ),
     )
     await acceptance_store.append(
         acceptance,
@@ -434,6 +447,20 @@ async def test_qmt_reducer_converges_restart_replays_and_fences_trade_conflict(
         baseline=rejected_baseline,
         package_manifest_hash="9" * 64,
         lease=lease,
+        clock_attestation=QmtClockAttestation(
+            request_started_at=(
+                rejected_baseline.query_completed_at
+                + timedelta(milliseconds=1)
+            ),
+            database_observed_at=(
+                rejected_baseline.query_completed_at
+                + timedelta(milliseconds=2)
+            ),
+            request_completed_at=(
+                rejected_baseline.query_completed_at
+                + timedelta(milliseconds=3)
+            ),
+        ),
     )
     await acceptance_store.append(
         rejected_acceptance,

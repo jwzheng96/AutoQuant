@@ -44,7 +44,10 @@ from autoquant.execution.promotion_audit import (
     PaperPromotionPolicy,
     PostgresPaperPromotionFactRepository,
 )
-from autoquant.execution.qmt_preflight import inspect_qmt_readiness
+from autoquant.execution.qmt_preflight import (
+    QmtClockAttestation,
+    inspect_qmt_readiness,
+)
 from autoquant.execution.qmt_readonly_store import (
     PostgresQmtReadOnlyAcceptanceRepository,
 )
@@ -1402,11 +1405,21 @@ class ConsoleService:
             if self._execution_controls is None
             else await self._execution_controls.replay(account_id=self._settings.paper_account_id)
         )
-        active_session_ids = await self._qmt_sessions.active_session_ids(now=self._now())
+        clock_started_at = self._now()
+        database_observed_at = await self._qmt_sessions.database_time()
+        clock_completed_at = self._now()
+        active_session_ids = await self._qmt_sessions.active_session_ids(
+            now=clock_completed_at
+        )
         readiness = inspect_qmt_readiness(
             self._settings,
             kill_switch_active=(None if control is None else control.active),
             active_session_ids=active_session_ids,
+            clock_attestation=QmtClockAttestation(
+                request_started_at=clock_started_at,
+                database_observed_at=database_observed_at,
+                request_completed_at=clock_completed_at,
+            ),
         )
         checks = {
             check.code.value: "pass" if check.passed else "blocked" for check in readiness.checks
@@ -1429,7 +1442,19 @@ class ConsoleService:
                 remaining_gates=tuple(gates),
             )
         age = self._now().astimezone(UTC) - evidence.observed_at
-        evidence_fresh = timedelta(0) <= age <= _QMT_ACCEPTANCE_MAX_AGE
+        clock_attested = (
+            evidence.clock_attestation is not None
+            and evidence.clock_attestation.trusted
+        )
+        evidence_fresh = (
+            clock_attested
+            and timedelta(0) <= age <= _QMT_ACCEPTANCE_MAX_AGE
+        )
+        if not clock_attested:
+            gates.insert(
+                0,
+                "clock_attested_windows_qmt_readonly_acceptance",
+            )
         if not evidence_fresh:
             gates.insert(0, "fresh_windows_qmt_readonly_acceptance")
         return QmtReadOnlyStatus(
@@ -1440,6 +1465,7 @@ class ConsoleService:
             latest_observed_at=evidence.observed_at,
             evidence_age_seconds=max(0, int(age.total_seconds())),
             evidence_fresh=evidence_fresh,
+            clock_attested=clock_attested,
             position_count=evidence.position_count,
             order_count=evidence.order_count,
             trade_count=evidence.trade_count,

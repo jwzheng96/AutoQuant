@@ -398,6 +398,7 @@ cd AutoQuant
 /Users/zjw/.local/bin/uv run autoquant config-check
 /Users/zjw/.local/bin/uv run autoquant tushare-check
 /Users/zjw/.local/bin/uv run autoquant qmt-check
+# qmt-check requires trusted_clock=pass from a bounded PostgreSQL clock observation.
 # Refresh an upcoming session before its pre-open window:
 /Users/zjw/.local/bin/uv run autoquant refresh-trading-calendar \
   --start 2026-07-24 --end 2026-07-24
@@ -432,7 +433,7 @@ passes every sample-out gate and an operator explicitly approves the resulting p
 artifact. The current infrastructure canary is not profitable strategy evidence.
 
 On an authorized Windows node, `autoquant qmt-readonly-accept` acquires a bounded QMT
-session lease and persists only redacted schema v17 acceptance evidence after coherent
+session lease and persists only redacted schema v52 acceptance evidence after coherent
 asset, position, order, and trade queries. It does not persist the broker account identifier
 or expose any broker mutation method; live order submission and cancellation remain hard
 locked. The authenticated trading console displays only the latest evidence time and

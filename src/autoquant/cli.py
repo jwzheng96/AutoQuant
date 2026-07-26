@@ -29,7 +29,10 @@ from autoquant.execution.control_store import PostgresExecutionControlRepository
 from autoquant.execution.low_volatility_paper_approval import (
     LowVolatilityPaperRevocationReason,
 )
-from autoquant.execution.qmt_preflight import inspect_qmt_readiness
+from autoquant.execution.qmt_preflight import (
+    QmtClockAttestation,
+    inspect_qmt_readiness,
+)
 from autoquant.execution.qmt_recovery_drill import QmtRecoveryDrillKind
 from autoquant.execution.qmt_session_store import PostgresQmtSessionLeaseRepository
 from autoquant.operations import (
@@ -333,14 +336,29 @@ def db_check() -> None:
     _emit({"clickhouse": "ok", "postgres": "ok", "status": "ok"})
 
 
-async def _qmt_preflight_db_state(settings: AppSettings) -> tuple[bool, tuple[int, ...]]:
+async def _qmt_preflight_db_state(
+    settings: AppSettings,
+) -> tuple[bool, tuple[int, ...], QmtClockAttestation]:
     dsn = _require_dsn(settings.postgres_dsn, capability="PostgreSQL")
     controls = PostgresExecutionControlRepository.connect(dsn=dsn)
     sessions = PostgresQmtSessionLeaseRepository.connect(dsn=dsn)
     try:
         control = await controls.replay(account_id=settings.paper_account_id)
-        active_session_ids = await sessions.active_session_ids(now=datetime.now(UTC))
-        return control.active, active_session_ids
+        clock_started_at = datetime.now(UTC)
+        database_observed_at = await sessions.database_time()
+        clock_completed_at = datetime.now(UTC)
+        active_session_ids = await sessions.active_session_ids(
+            now=clock_completed_at
+        )
+        return (
+            control.active,
+            active_session_ids,
+            QmtClockAttestation(
+                request_started_at=clock_started_at,
+                database_observed_at=database_observed_at,
+                request_completed_at=clock_completed_at,
+            ),
+        )
     finally:
         await controls.close()
         await sessions.close()
@@ -352,14 +370,20 @@ def qmt_check() -> None:
 
     settings = _settings()
     try:
-        kill_switch_active, active_session_ids = asyncio.run(_qmt_preflight_db_state(settings))
+        (
+            kill_switch_active,
+            active_session_ids,
+            clock_attestation,
+        ) = asyncio.run(_qmt_preflight_db_state(settings))
     except (AutoQuantError, LookupError, ValueError):
         kill_switch_active = None
         active_session_ids = None
+        clock_attestation = None
     report = inspect_qmt_readiness(
         settings,
         kill_switch_active=kill_switch_active,
         active_session_ids=active_session_ids,
+        clock_attestation=clock_attestation,
     )
     _emit(
         {
