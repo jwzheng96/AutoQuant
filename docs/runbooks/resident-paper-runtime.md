@@ -116,6 +116,17 @@ holder/token/generation 组合成不可变证据，再由 PostgreSQL 在一次�
 `scheduler_runtime_liveness` 门槛；事件哈希链完整但租约失效或写入陈旧时，也不能作为
 持续模拟盘运行证据。
 
+独立监控节点可定时执行：
+
+```bash
+uv run autoquant paper-watchdog-check
+```
+
+该命令只读 PostgreSQL，不连接 XtData、MiniQMT 或任何订单接口。仅 `healthy` 返回退出码
+0，其余状态返回退出码 2，并输出稳定的 JSON，可直接交给 cron、systemd、Prometheus
+exporter 或告警脚本处理。监控进程必须与 `run-paper` 分离，避免驻留进程自身卡死时同时
+失去检测能力。
+
 ## 行情恢复
 
 XtData 回调线程只复制原始标量到有界队列。任何异常都会使整条行情失效，不能继续使用

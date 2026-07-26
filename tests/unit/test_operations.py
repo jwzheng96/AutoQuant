@@ -26,6 +26,7 @@ from autoquant.operations import (
     _validate_campaign_dataset,
     approve_paper_sma_strategy,
     create_compliance_approval,
+    inspect_paper_runtime_health,
     retry_research_data_campaign_item,
     revoke_paper_strategy,
     run_low_volatility_forward_window,
@@ -37,6 +38,59 @@ from autoquant.web.research_data_store import (
 )
 
 NOW = datetime(2026, 7, 23, 8, tzinfo=UTC)
+
+
+@pytest.mark.asyncio
+async def test_paper_runtime_health_uses_database_backed_scheduler_evidence() -> None:
+    repository = MagicMock()
+    repository.runtime_health = AsyncMock(
+        return_value=SimpleNamespace(
+            checked_at=NOW,
+            latest_event_age=timedelta(seconds=45),
+            event_fresh=False,
+            latest_error_code=None,
+            latest_phase="morning_continuous",
+            latest_status="no_intents",
+            lease_active=True,
+            healthy=False,
+            state=SimpleNamespace(value="stale"),
+        )
+    )
+    repository.close = AsyncMock()
+    settings = AppSettings(
+        _env_file=None,
+        environment=RuntimeEnvironment.PAPER,
+        postgres_dsn="postgresql+asyncpg://localhost/autoquant",
+        paper_poll_interval_seconds=1,
+        paper_scheduler_lease_ttl_seconds=30,
+        paper_scheduler_renewal_seconds=10,
+    )
+    with patch(
+        "autoquant.operations.PostgresPaperSchedulerRepository.connect",
+        return_value=repository,
+    ):
+        payload = await inspect_paper_runtime_health(settings)
+
+    assert payload == {
+        "broker_mutation_allowed": False,
+        "checked_at": NOW.isoformat(),
+        "event_age_seconds": 45,
+        "event_fresh": False,
+        "latest_error_code": None,
+        "latest_phase": "morning_continuous",
+        "latest_status": "no_intents",
+        "lease_active": True,
+        "live_trading_locked": True,
+        "maximum_silence_seconds": 30,
+        "runtime_state": "stale",
+        "status": "blocked",
+    }
+    repository.runtime_health.assert_awaited_once_with(
+        account_id="paper-main",
+        strategy_id="validated-sma-paper",
+        maximum_silence=timedelta(seconds=30),
+    )
+    repository.close.assert_awaited_once()
 
 
 def _research_campaign_status(

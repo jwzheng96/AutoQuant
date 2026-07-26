@@ -4961,6 +4961,56 @@ async def inspect_paper_runtime_readiness(
             await clickhouse.client.close()
 
 
+async def inspect_paper_runtime_health(
+    settings: AppSettings,
+) -> dict[str, object]:
+    """Inspect resident scheduler liveness using only PostgreSQL time and facts."""
+
+    if settings.environment is not RuntimeEnvironment.PAPER:
+        raise MissingCapabilityError("paper environment is not configured")
+    repository = PostgresPaperSchedulerRepository.connect(
+        dsn=configured_dsn(
+            settings.postgres_dsn,
+            capability="PostgreSQL",
+        )
+    )
+    maximum_silence = timedelta(
+        seconds=max(
+            settings.paper_scheduler_lease_ttl_seconds,
+            float(settings.paper_poll_interval_seconds) * 3,
+        )
+    )
+    try:
+        health = await repository.runtime_health(
+            account_id=settings.paper_account_id,
+            strategy_id=settings.paper_strategy_id,
+            maximum_silence=maximum_silence,
+        )
+        return {
+            "broker_mutation_allowed": False,
+            "checked_at": health.checked_at.isoformat(),
+            "event_age_seconds": (
+                None
+                if health.latest_event_age is None
+                else max(
+                    0,
+                    int(health.latest_event_age.total_seconds()),
+                )
+            ),
+            "event_fresh": health.event_fresh,
+            "latest_error_code": health.latest_error_code,
+            "latest_phase": health.latest_phase,
+            "latest_status": health.latest_status,
+            "lease_active": health.lease_active,
+            "live_trading_locked": True,
+            "maximum_silence_seconds": int(maximum_silence.total_seconds()),
+            "runtime_state": health.state.value,
+            "status": "ok" if health.healthy else "blocked",
+        }
+    finally:
+        await repository.close()
+
+
 async def inspect_paper_promotion(
     settings: AppSettings,
 ) -> dict[str, object]:

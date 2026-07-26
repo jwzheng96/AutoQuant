@@ -64,6 +64,7 @@ from autoquant.operations import (
     inspect_low_volatility_paper_deployment,
     inspect_paper_pre_open,
     inspect_paper_promotion,
+    inspect_paper_runtime_health,
     inspect_paper_runtime_readiness,
     inspect_portfolio_validation,
     inspect_research_data_campaign,
@@ -536,6 +537,21 @@ def paper_runtime_check() -> None:
     except (AutoQuantError, LookupError, ValueError):
         _fail("paper runtime readiness check failed")
     _emit(payload)
+
+
+@app.command("paper-watchdog-check")
+def paper_watchdog_check() -> None:
+    """Exit nonzero when the resident paper scheduler is not currently healthy."""
+
+    try:
+        payload = asyncio.run(inspect_paper_runtime_health(_settings()))
+    except MissingCapabilityError as error:
+        _fail(str(error))
+    except (AutoQuantError, LookupError, ValueError):
+        _fail("paper runtime watchdog check failed closed")
+    _emit(payload)
+    if payload["status"] != "ok":
+        raise typer.Exit(code=2)
 
 
 @app.command("promotion-check")

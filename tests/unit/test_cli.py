@@ -145,6 +145,57 @@ def test_paper_runtime_check_reports_stable_capability_blocker() -> None:
     }
 
 
+def test_paper_watchdog_check_is_machine_readable_and_fail_closed() -> None:
+    payload = {
+        "broker_mutation_allowed": False,
+        "checked_at": "2026-07-26T04:00:00+00:00",
+        "event_age_seconds": None,
+        "event_fresh": False,
+        "latest_error_code": None,
+        "latest_phase": None,
+        "latest_status": None,
+        "lease_active": False,
+        "live_trading_locked": True,
+        "maximum_silence_seconds": 30,
+        "runtime_state": "stopped",
+        "status": "blocked",
+    }
+    with patch(
+        "autoquant.cli.inspect_paper_runtime_health",
+        new=AsyncMock(return_value=payload),
+    ):
+        result = runner.invoke(app, ["paper-watchdog-check"])
+
+    assert result.exit_code == 2
+    assert json.loads(result.stdout) == payload
+    assert "token" not in result.stdout.lower()
+
+
+def test_paper_watchdog_check_exits_zero_only_when_healthy() -> None:
+    payload = {
+        "broker_mutation_allowed": False,
+        "checked_at": "2026-07-26T04:00:00+00:00",
+        "event_age_seconds": 1,
+        "event_fresh": True,
+        "latest_error_code": None,
+        "latest_phase": "morning_continuous",
+        "latest_status": "no_intents",
+        "lease_active": True,
+        "live_trading_locked": True,
+        "maximum_silence_seconds": 30,
+        "runtime_state": "healthy",
+        "status": "ok",
+    }
+    with patch(
+        "autoquant.cli.inspect_paper_runtime_health",
+        new=AsyncMock(return_value=payload),
+    ):
+        result = runner.invoke(app, ["paper-watchdog-check"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == payload
+
+
 def test_promotion_check_emits_redacted_blockers_and_exits_nonzero() -> None:
     payload = {
         "blockers": ["paper_session_count", "compliance_approval"],
