@@ -42,6 +42,7 @@ uv run autoquant promotion-check
 | `kill_switch_active` | 持久化紧急停机处于 active |
 | `strategy_approved` | 配置策略存在有效的模拟盘批准记录 |
 | `qmt_acceptance_fresh` | 脱敏 QMT 只读验收证据不超过 24 小时，且不能来自未来 |
+| `qmt_callback_reconciliation` | 与该只读验收哈希精确绑定的最新回调对账必须为 `passed`；断线、乱序、缺失或冲突都阻断晋级 |
 | `paper_session_count` | 最近 180 日证据中至少 60 个收盘会话 |
 | `scheduler_coverage` | 最近 60 个会话每天至少 216 个连续竞价健康分钟 |
 | `scheduler_failure_free` | 上述窗口没有 scheduler 失败或错误码 |

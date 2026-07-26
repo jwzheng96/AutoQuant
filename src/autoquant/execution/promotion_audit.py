@@ -34,6 +34,7 @@ class PromotionGateCode(StrEnum):
     KILL_SWITCH_ACTIVE = "kill_switch_active"
     STRATEGY_APPROVED = "strategy_approved"
     QMT_ACCEPTANCE_FRESH = "qmt_acceptance_fresh"
+    QMT_CALLBACK_RECONCILIATION = "qmt_callback_reconciliation"
     PAPER_SESSION_COUNT = "paper_session_count"
     SCHEDULER_COVERAGE = "scheduler_coverage"
     SCHEDULER_FAILURE_FREE = "scheduler_failure_free"
@@ -289,6 +290,8 @@ class PaperPromotionFacts:
     active_registration_hash: str | None
     qmt_evidence_hash: str | None
     qmt_observed_at: datetime | None
+    qmt_reconciliation_report_hash: str | None
+    qmt_reconciliation_state: str | None
     compliance_approval_hash: str | None
     compliance_valid_until: datetime | None
     sessions: tuple[PaperSessionPromotionEvidence, ...]
@@ -327,6 +330,10 @@ class PaperPromotionFacts:
             ),
             ("qmt_evidence_hash", self.qmt_evidence_hash),
             (
+                "qmt_reconciliation_report_hash",
+                self.qmt_reconciliation_report_hash,
+            ),
+            (
                 "compliance_approval_hash",
                 self.compliance_approval_hash,
             ),
@@ -343,6 +350,17 @@ class PaperPromotionFacts:
         )
         if (self.qmt_evidence_hash is None) != (qmt_time is None):
             raise ValueError("QMT promotion evidence is incomplete")
+        if (self.qmt_reconciliation_report_hash is None) != (
+            self.qmt_reconciliation_state is None
+        ):
+            raise ValueError("QMT promotion reconciliation evidence is incomplete")
+        if (
+            self.qmt_reconciliation_state is not None
+            and self.qmt_reconciliation_state not in {"passed", "rejected"}
+        ):
+            raise ValueError("QMT promotion reconciliation state is invalid")
+        if self.qmt_evidence_hash is None and self.qmt_reconciliation_report_hash is not None:
+            raise ValueError("QMT reconciliation requires its acceptance evidence")
         object.__setattr__(self, "qmt_observed_at", qmt_time)
         compliance_time = (
             None
@@ -451,6 +469,10 @@ class PaperPromotionFacts:
                 value.isoformat() for value in self.kill_switch_drill_dates
             ],
             "qmt_evidence_hash": self.qmt_evidence_hash,
+            "qmt_reconciliation_report_hash": (
+                self.qmt_reconciliation_report_hash
+            ),
+            "qmt_reconciliation_state": self.qmt_reconciliation_state,
             "qmt_recovery_drill_kinds": [value.value for value in self.qmt_recovery_drill_kinds],
             "qmt_observed_at": (
                 None if self.qmt_observed_at is None else _datetime_text(self.qmt_observed_at)
@@ -635,6 +657,18 @@ class PaperPromotionAuditor:
                 qmt_fresh,
                 ("missing" if qmt_age is None else f"{int(qmt_age.total_seconds())}s"),
                 (f"<={int(policy.maximum_qmt_acceptance_age.total_seconds())}s"),
+            ),
+            PromotionGate(
+                PromotionGateCode.QMT_CALLBACK_RECONCILIATION,
+                qmt_fresh
+                and facts.qmt_reconciliation_report_hash is not None
+                and facts.qmt_reconciliation_state == "passed",
+                (
+                    "missing"
+                    if facts.qmt_reconciliation_state is None
+                    else facts.qmt_reconciliation_state
+                ),
+                "passed_for_exact_acceptance",
             ),
             PromotionGate(
                 PromotionGateCode.PAPER_SESSION_COUNT,
@@ -944,13 +978,28 @@ class PostgresPaperPromotionFactRepository:
                         await connection.execute(
                             text(
                                 f"""
-                                SELECT evidence_hash, observed_at
-                                FROM {self._schema}.qmt_readonly_acceptance_evidence
-                                WHERE logical_account_id = :account_id
-                                  AND clock_attestation_hash IS NOT NULL
-                                  AND clock_attestation_payload
+                                SELECT e.evidence_hash, e.observed_at,
+                                       r.report_hash,
+                                       r.state AS reconciliation_state
+                                FROM
+                                    {self._schema}.qmt_readonly_acceptance_evidence e
+                                LEFT JOIN LATERAL (
+                                    SELECT report_hash, state
+                                    FROM
+                                        {self._schema}.qmt_callback_reconciliation_reports
+                                    WHERE acceptance_evidence_hash =
+                                          e.evidence_hash
+                                    ORDER BY observed_at DESC,
+                                             created_at DESC,
+                                             report_hash DESC
+                                    LIMIT 1
+                                ) r ON true
+                                WHERE e.logical_account_id = :account_id
+                                  AND e.clock_attestation_hash IS NOT NULL
+                                  AND e.clock_attestation_payload
                                       ->>'trusted' = 'true'
-                                ORDER BY observed_at DESC, evidence_hash DESC
+                                ORDER BY e.observed_at DESC,
+                                         e.evidence_hash DESC
                                 LIMIT 1
                                 """
                             ),
@@ -1251,6 +1300,16 @@ class PostgresPaperPromotionFactRepository:
             ),
             qmt_evidence_hash=(None if qmt is None else str(qmt["evidence_hash"])),
             qmt_observed_at=(None if qmt is None else qmt["observed_at"]),
+            qmt_reconciliation_report_hash=(
+                None
+                if qmt is None or qmt["report_hash"] is None
+                else str(qmt["report_hash"])
+            ),
+            qmt_reconciliation_state=(
+                None
+                if qmt is None or qmt["reconciliation_state"] is None
+                else str(qmt["reconciliation_state"])
+            ),
             compliance_approval_hash=(
                 None if compliance is None else str(compliance["approval_hash"])
             ),

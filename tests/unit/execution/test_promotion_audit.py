@@ -117,6 +117,8 @@ def _facts(
         active_registration_hash="b" * 64,
         qmt_evidence_hash="c" * 64,
         qmt_observed_at=CAPTURED_AT - timedelta(hours=1),
+        qmt_reconciliation_report_hash="e" * 64,
+        qmt_reconciliation_state="passed",
         compliance_approval_hash=None,
         compliance_valid_until=None,
         sessions=sessions,
@@ -154,6 +156,8 @@ def test_empty_evidence_fails_closed_with_a_deterministic_report() -> None:
         active_registration_hash=None,
         qmt_evidence_hash=None,
         qmt_observed_at=None,
+        qmt_reconciliation_report_hash=None,
+        qmt_reconciliation_state=None,
         fills=(),
         filled_order_count=0,
         total_order_count=0,
@@ -169,6 +173,7 @@ def test_empty_evidence_fails_closed_with_a_deterministic_report() -> None:
     assert PromotionGateCode.KILL_SWITCH_ACTIVE in first.blockers
     assert PromotionGateCode.PAPER_SESSION_COUNT in first.blockers
     assert PromotionGateCode.QMT_ACCEPTANCE_FRESH in first.blockers
+    assert PromotionGateCode.QMT_CALLBACK_RECONCILIATION in first.blockers
 
 
 def test_complete_paper_evidence_still_requires_external_safety_artifacts() -> None:
@@ -247,6 +252,21 @@ def test_qmt_time_and_scheduler_failures_are_fail_closed() -> None:
         facts,
         PromotionGateCode.SCHEDULER_FAILURE_FREE,
     ).passed
+
+
+def test_qmt_reconciliation_must_pass_for_the_exact_acceptance() -> None:
+    facts = replace(
+        _facts(),
+        qmt_reconciliation_state="rejected",
+    )
+
+    gate = _gate(
+        facts,
+        PromotionGateCode.QMT_CALLBACK_RECONCILIATION,
+    )
+
+    assert gate.passed is False
+    assert gate.actual == "rejected"
 
 
 def test_performance_gates_use_compounded_session_returns() -> None:

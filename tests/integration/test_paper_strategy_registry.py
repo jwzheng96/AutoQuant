@@ -52,6 +52,9 @@ from autoquant.execution.promotion_audit import (
     PostgresPaperPromotionFactRepository,
     PromotionGateCode,
 )
+from autoquant.execution.qmt_callback_reconciliation import (
+    QmtCallbackReconciliationReport,
+)
 from autoquant.execution.qmt_preflight import QmtClockAttestation
 from autoquant.execution.qmt_readonly import (
     build_qmt_readonly_baseline,
@@ -151,6 +154,7 @@ async def registry_fixture() -> AsyncIterator[
             "migrations/postgres/023_research_universes.sql",
             "migrations/postgres/024_research_data_campaigns.sql",
             "migrations/postgres/036_paper_compliance_approvals.sql",
+            "migrations/postgres/043_qmt_callback_reconciliation.sql",
             "migrations/postgres/052_qmt_clock_attestations.sql",
         )
     )
@@ -835,7 +839,7 @@ async def test_qmt_readonly_acceptance_persists_only_redacted_fenced_evidence(
         str,
     ],
 ) -> None:
-    _, _, engine, schema = registry_fixture
+    _, registration, engine, schema = registry_fixture
     controls = PostgresExecutionControlRepository(
         engine=engine,
         schema=schema,
@@ -925,6 +929,94 @@ async def test_qmt_readonly_acceptance_persists_only_redacted_fenced_evidence(
     assert token.get_secret_value() not in str(payload)
     assert "qmt-readonly-acceptance-v2" in str(payload)
     assert "qmt-clock-attestation-v1" in str(payload)
+    reconciliation = QmtCallbackReconciliationReport(
+        logical_account_id=evidence.logical_account_id,
+        gateway_holder_id=evidence.lease_holder_id,
+        qmt_session_id=evidence.lease_session_id,
+        qmt_lease_generation=evidence.lease_generation,
+        acceptance_evidence_hash=evidence.evidence_hash,
+        baseline_evidence_hash=evidence.baseline_evidence_hash,
+        callback_processing_hash="0" * 64,
+        callback_cursor=evidence.callback_cursor,
+        projection_hashes=(),
+        trade_fact_hashes=(),
+        matched_broker_order_ids=(),
+        matched_trade_ids=(),
+        issues=(),
+        observed_at=evidence.observed_at,
+    )
+    async with engine.begin() as connection:
+        await connection.execute(
+            text(
+                f"""
+                INSERT INTO {schema}.qmt_callback_reconciliation_reports
+                    (report_hash, logical_account_id,
+                     gateway_holder_id, qmt_session_id,
+                     qmt_lease_generation,
+                     acceptance_evidence_hash,
+                     baseline_evidence_hash,
+                     callback_processing_hash, callback_cursor,
+                     state, projection_hashes,
+                     trade_fact_hashes,
+                     matched_broker_order_ids,
+                     matched_trade_ids, issues, observed_at,
+                     report_version, report_payload)
+                VALUES
+                    (:report_hash, :logical_account_id,
+                     :gateway_holder_id, :qmt_session_id,
+                     :qmt_lease_generation,
+                     :acceptance_evidence_hash,
+                     :baseline_evidence_hash,
+                     :callback_processing_hash, :callback_cursor,
+                     :state, CAST(:projection_hashes AS jsonb),
+                     CAST(:trade_fact_hashes AS jsonb),
+                     CAST(:matched_broker_order_ids AS jsonb),
+                     CAST(:matched_trade_ids AS jsonb),
+                     CAST(:issues AS jsonb), :observed_at,
+                     :report_version, CAST(:report_payload AS jsonb))
+                """
+            ),
+            {
+                "acceptance_evidence_hash": reconciliation.acceptance_evidence_hash,
+                "baseline_evidence_hash": reconciliation.baseline_evidence_hash,
+                "callback_cursor": reconciliation.callback_cursor,
+                "callback_processing_hash": reconciliation.callback_processing_hash,
+                "gateway_holder_id": reconciliation.gateway_holder_id,
+                "issues": json.dumps([]),
+                "logical_account_id": reconciliation.logical_account_id,
+                "matched_broker_order_ids": json.dumps([]),
+                "matched_trade_ids": json.dumps([]),
+                "observed_at": reconciliation.observed_at,
+                "projection_hashes": json.dumps([]),
+                "qmt_lease_generation": reconciliation.qmt_lease_generation,
+                "qmt_session_id": reconciliation.qmt_session_id,
+                "report_hash": reconciliation.report_hash,
+                "report_payload": json.dumps(
+                    reconciliation.payload(),
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ),
+                "report_version": reconciliation.version,
+                "state": reconciliation.state.value,
+                "trade_fact_hashes": json.dumps([]),
+            },
+        )
+    promotion_facts = await PostgresPaperPromotionFactRepository(
+        engine=engine,
+        schema=schema,
+    ).read(
+        account_id=evidence.logical_account_id,
+        strategy_id=registration.strategy_id,
+        now=now + timedelta(milliseconds=20),
+        lookback_days=180,
+        policy_hash=PaperPromotionPolicy().policy_hash,
+    )
+    assert promotion_facts.qmt_evidence_hash == evidence.evidence_hash
+    assert (
+        promotion_facts.qmt_reconciliation_report_hash
+        == reconciliation.report_hash
+    )
+    assert promotion_facts.qmt_reconciliation_state == "passed"
     with pytest.raises(SQLAlchemyError):
         async with engine.begin() as connection:
             await connection.execute(
