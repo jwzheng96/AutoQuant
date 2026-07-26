@@ -892,7 +892,10 @@ external scheduler can alert instead of treating partial progress as success. A 
 conflict or terminal shard failure still requires investigation and the separate explicitly
 authorized retry command. A campaign already containing terminal failures returns
 `retry_authorization_required` without claiming its remaining queued items. Schedule this command
-on one host; do not wrap it in a permanent tight loop. The original
+on one host; do not wrap it in a permanent tight loop. Each batch additionally holds a
+PostgreSQL session advisory lock scoped to the campaign hash. A concurrent collector returns
+`collector_busy` without claiming data or consuming vendor quota, and a terminated worker loses
+the lock when PostgreSQL closes its connection. The original
 `low-volatility-forward-cycle-run` remains available for one-attempt diagnostics.
 
 ## Future-only low-volatility evidence correction

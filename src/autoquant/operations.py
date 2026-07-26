@@ -1982,7 +1982,14 @@ async def run_low_volatility_forward_cycle(
         "session_date": target.isoformat(),
         "status": "batch_progress",
     }
-    if batch["status"] == "completed" and isinstance(batch["manifest_hash"], str):
+    batch_detail = batch.get("batch")
+    worker_busy = (
+        isinstance(batch_detail, dict)
+        and batch_detail.get("worker_busy") is True
+    )
+    if worker_busy:
+        payload["status"] = "collector_busy"
+    elif batch["status"] == "completed" and isinstance(batch["manifest_hash"], str):
         frozen = await finalize_low_volatility_forward_session(
             settings,
             forward_spec_hash=forward_spec_hash,
@@ -2025,6 +2032,7 @@ async def run_low_volatility_forward_window(
     ):
         raise ValueError("interval_seconds must be between 0 and 600")
     terminal = {
+        "collector_busy",
         "failed",
         "retry_authorization_required",
         "session_frozen",
@@ -4040,6 +4048,24 @@ async def run_research_data_campaign(
     last_inactive_bytes = 0
     last_inactive_parts = 0
     try:
+        worker_lock_acquired = await repository.try_acquire_worker_lock(
+            campaign_hash=campaign_hash,
+        )
+        if not worker_lock_acquired:
+            status = await repository.status(campaign_hash=campaign_hash)
+            payload = _research_data_campaign_payload(status)
+            payload["batch"] = {
+                "completed_count": 0,
+                "failed_count": 0,
+                "inactive_bytes": 0,
+                "inactive_parts": 0,
+                "maintenance_wait": False,
+                "processed_count": 0,
+                "recovered_count": 0,
+                "requeued_count": 0,
+                "worker_busy": True,
+            }
+            return payload
         status = await repository.status(campaign_hash=campaign_hash)
         recovered = await repository.recover_running(campaign_hash=status.spec.campaign_hash)
         source = tushare_source(settings)
@@ -4153,6 +4179,7 @@ async def run_research_data_campaign(
             "processed_count": processed,
             "recovered_count": recovered,
             "requeued_count": requeued,
+            "worker_busy": False,
         }
         return payload
     finally:

@@ -72,6 +72,9 @@ finish one 300-instrument session in a scheduled job; it stops after one freeze 
 failure, retry-authorization, or completed-gate state and reports exhaustion as a nonzero exit.
 Campaign status output includes aggregate terminal error codes, while a pre-existing failed
 campaign returns `retry_authorization_required` before any remaining queued shard is claimed.
+Each worker batch also holds a PostgreSQL session advisory lock keyed by campaign hash. A second
+host reports `collector_busy` without claiming a shard or calling the vendor; the lock is
+automatically released when its database connection closes, including process termination.
 PostgreSQL schema v44 adds the terminal forward evaluation that was previously missing. The
 `low-volatility-forward-evaluate` command refuses to write anything before all 126 prefix
 sessions exist, reconstructs every hash-addressed source and evaluation shard, runs the unchanged

@@ -25,6 +25,7 @@ from autoquant.operations import (
     create_compliance_approval,
     revoke_paper_strategy,
     run_low_volatility_forward_window,
+    run_research_data_campaign,
 )
 
 NOW = datetime(2026, 7, 23, 8, tzinfo=UTC)
@@ -165,6 +166,7 @@ async def test_forward_window_stops_waiting_without_sleep_or_vendor_loop() -> No
 @pytest.mark.parametrize(
     "terminal_status",
     (
+        "collector_busy",
         "waiting_for_data_availability",
         "retry_authorization_required",
     ),
@@ -237,6 +239,66 @@ async def test_forward_window_rejects_unbounded_or_nonfinite_timing() -> None:
             pause_seconds=Decimal("1.25"),
             interval_seconds=Decimal("NaN"),
         )
+
+
+@pytest.mark.asyncio
+async def test_research_campaign_busy_worker_does_not_open_vendor_or_market() -> None:
+    status = SimpleNamespace(
+        spec=SimpleNamespace(
+            campaign_hash="a" * 64,
+            campaign_key="integration-worker-lock-v1",
+            policy_hash="b" * 64,
+            snapshot_hashes=("c" * 64,),
+            instruments=("000001.XSHE",),
+            start_date=date(2026, 7, 23),
+            end_date=date(2026, 7, 23),
+        ),
+        created_at=NOW,
+        status="queued",
+        items=(
+            SimpleNamespace(
+                state="queued",
+                error_code=None,
+            ),
+        ),
+        manifest=None,
+    )
+    repository = MagicMock()
+    repository.try_acquire_worker_lock = AsyncMock(return_value=False)
+    repository.status = AsyncMock(return_value=status)
+    repository.close = AsyncMock()
+    control = MagicMock()
+    control.close = AsyncMock()
+    source = MagicMock()
+    with (
+        patch(
+            "autoquant.operations.PostgresResearchDataCampaignRepository.connect",
+            return_value=repository,
+        ),
+        patch(
+            "autoquant.operations.PostgresControlRepository.connect",
+            return_value=control,
+        ),
+        patch("autoquant.operations.tushare_source", new=source),
+        patch(
+            "autoquant.operations.ClickHouseDailyRepository.connect",
+            new=AsyncMock(),
+        ) as market_connect,
+    ):
+        result = await run_research_data_campaign(
+            _settings(),
+            campaign_hash="a" * 64,
+            max_items=25,
+            pause_seconds=Decimal("1.25"),
+        )
+
+    assert result["status"] == "queued"
+    assert result["batch"]["worker_busy"] is True
+    assert result["batch"]["processed_count"] == 0
+    source.assert_not_called()
+    market_connect.assert_not_awaited()
+    repository.close.assert_awaited_once()
+    control.close.assert_awaited_once()
 
 
 def test_validation_campaign_dataset_requires_aligned_history() -> None:

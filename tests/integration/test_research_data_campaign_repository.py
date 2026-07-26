@@ -69,6 +69,7 @@ async def repositories() -> AsyncIterator[
         PostgresDynamicValidationRepository,
         PostgresFundamentalResearchSpecRepository,
         PostgresFundamentalDatasetRepository,
+        str,
     ]
 ]:
     schema = f"autoquant_test_{uuid4().hex}"
@@ -117,6 +118,7 @@ async def repositories() -> AsyncIterator[
             validations,
             fundamental_specs,
             fundamental_data,
+            schema,
         )
     finally:
         await fundamental_data.close()
@@ -170,6 +172,7 @@ async def test_campaign_recovers_retries_and_finalizes_verified_shards(
         PostgresDynamicValidationRepository,
         PostgresFundamentalResearchSpecRepository,
         PostgresFundamentalDatasetRepository,
+        str,
     ],
 ) -> None:
     (
@@ -179,6 +182,7 @@ async def test_campaign_recovers_retries_and_finalizes_verified_shards(
         validations,
         fundamental_specs,
         fundamental_data,
+        schema,
     ) = repositories
     spec = ResearchDataCampaignSpec(
         campaign_key="integration-csi300-history-v1",
@@ -202,6 +206,21 @@ async def test_campaign_recovers_retries_and_finalizes_verified_shards(
 
     created = await campaigns.create(spec, created_at=NOW)
     repeated = await campaigns.create(spec, created_at=NOW)
+    contender = PostgresResearchDataCampaignRepository.connect(
+        dsn=POSTGRES_DSN,
+        schema=schema,
+    )
+    try:
+        assert await campaigns.try_acquire_worker_lock(campaign_hash=spec.campaign_hash)
+        assert not await contender.try_acquire_worker_lock(campaign_hash=spec.campaign_hash)
+        await campaigns.release_worker_lock()
+        assert await contender.try_acquire_worker_lock(campaign_hash=spec.campaign_hash)
+    finally:
+        await contender.close()
+    assert await campaigns.try_acquire_worker_lock(
+        campaign_hash=spec.campaign_hash
+    )
+    await campaigns.release_worker_lock()
     first = await campaigns.claim_next(campaign_hash=spec.campaign_hash, now=NOW)
     assert first is not None
     assert first.instrument == "000001.XSHE"

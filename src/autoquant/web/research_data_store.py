@@ -53,6 +53,8 @@ class PostgresResearchDataCampaignRepository:
             raise ValueError("schema must be a safe PostgreSQL identifier")
         self._engine = engine
         self._schema = schema
+        self._worker_lock_connection: AsyncConnection | None = None
+        self._worker_lock_identity: str | None = None
 
     @classmethod
     def connect(
@@ -72,7 +74,73 @@ class PostgresResearchDataCampaignRepository:
         return cls(engine=engine, schema=schema)
 
     async def close(self) -> None:
+        await self.release_worker_lock()
         await self._engine.dispose()
+
+    async def try_acquire_worker_lock(
+        self,
+        *,
+        campaign_hash: str,
+    ) -> bool:
+        """Hold one PostgreSQL session lock for the lifetime of a worker batch."""
+
+        _require_lowercase_sha256(campaign_hash, name="research data campaign hash")
+        if self._worker_lock_connection is not None:
+            raise ValueError("research data campaign worker lock is already held")
+        identity = f"autoquant:research-data-campaign:{campaign_hash}"
+        connection: AsyncConnection | None = None
+        try:
+            connection = await self._engine.connect()
+            acquired = bool(
+                await connection.scalar(
+                    text(
+                        """
+                        SELECT pg_try_advisory_lock(
+                            hashtextextended(:identity, 0)
+                        )
+                        """
+                    ),
+                    {"identity": identity},
+                )
+            )
+            await connection.commit()
+        except Exception:
+            if connection is not None:
+                await connection.close()
+            raise PersistenceUnavailableError("research data campaign worker lock failed") from None
+        if not acquired:
+            await connection.close()
+            return False
+        self._worker_lock_connection = connection
+        self._worker_lock_identity = identity
+        return True
+
+    async def release_worker_lock(self) -> None:
+        connection = self._worker_lock_connection
+        identity = self._worker_lock_identity
+        self._worker_lock_connection = None
+        self._worker_lock_identity = None
+        if connection is None:
+            return
+        try:
+            if identity is not None:
+                await connection.scalar(
+                    text(
+                        """
+                        SELECT pg_advisory_unlock(
+                            hashtextextended(:identity, 0)
+                        )
+                        """
+                    ),
+                    {"identity": identity},
+                )
+                await connection.commit()
+        except Exception:
+            # A session close releases PostgreSQL advisory locks even when an
+            # explicit unlock cannot be confirmed.
+            pass
+        finally:
+            await connection.close()
 
     async def read_manifest(
         self,
