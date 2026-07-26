@@ -263,9 +263,24 @@ async def test_campaign_recovers_retries_and_finalizes_verified_shards(
         now=NOW,
     )
     assert terminal.state == "failed"
+    with pytest.raises(ValueError, match="state changed"):
+        await campaigns.retry_failed_item(
+            campaign_hash=spec.campaign_hash,
+            sequence=second.sequence,
+            expected_instrument=terminal.instrument,
+            expected_attempts=terminal.attempts,
+            expected_max_attempts=terminal.max_attempts,
+            expected_error_code="stale_error_code",
+        )
+    still_terminal = await campaigns.status(campaign_hash=spec.campaign_hash)
+    assert still_terminal.items[second.sequence - 1].state == "failed"
     authorized = await campaigns.retry_failed_item(
         campaign_hash=spec.campaign_hash,
         sequence=second.sequence,
+        expected_instrument=terminal.instrument,
+        expected_attempts=terminal.attempts,
+        expected_max_attempts=terminal.max_attempts,
+        expected_error_code="deterministic_mapping_error",
     )
     assert authorized.state == "queued"
     assert authorized.max_attempts == 6

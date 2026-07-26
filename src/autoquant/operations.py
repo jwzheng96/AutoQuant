@@ -97,6 +97,7 @@ from autoquant.data.fundamental_ingestion import (
     FundamentalIngestionService,
 )
 from autoquant.data.fundamental_quality import FundamentalQualityGate
+from autoquant.data.models import _canonical_hash, _require_lowercase_sha256
 from autoquant.data.research_data_campaign import ResearchDataCampaignSpec
 from autoquant.data.research_input import (
     ExactManifestResearchDatasetReader,
@@ -798,6 +799,30 @@ async def inspect_research_data_campaign(
     )
     try:
         return _research_data_campaign_payload(await repository.status(campaign_hash=campaign_hash))
+    finally:
+        await repository.close()
+
+
+async def inspect_research_data_campaign_retry_plan(
+    settings: AppSettings,
+    *,
+    campaign_hash: str,
+) -> dict[str, object]:
+    """Compile a hash-bound, read-only plan for terminal shard recovery."""
+
+    if settings.live_trading_enabled:
+        raise MissingCapabilityError(
+            "research data retry planning requires live trading locked"
+        )
+    repository = PostgresResearchDataCampaignRepository.connect(
+        dsn=configured_dsn(
+            settings.postgres_dsn,
+            capability="PostgreSQL",
+        )
+    )
+    try:
+        status = await repository.status(campaign_hash=campaign_hash)
+        return _research_data_campaign_retry_plan_payload(status)
     finally:
         await repository.close()
 
@@ -4196,12 +4221,14 @@ async def retry_research_data_campaign_item(
     *,
     campaign_hash: str,
     sequence: int,
+    retry_item_hash: str,
     authorized_by: str,
 ) -> dict[str, object]:
     """Explicitly requeue one terminal data shard while live stays locked."""
 
     if settings.live_trading_enabled:
         raise MissingCapabilityError("research data retry requires live trading locked")
+    _require_lowercase_sha256(retry_item_hash, name="research data retry item hash")
     if (
         not authorized_by.strip()
         or authorized_by != authorized_by.strip()
@@ -4212,19 +4239,50 @@ async def retry_research_data_campaign_item(
     repository = PostgresResearchDataCampaignRepository.connect(dsn=dsn)
     control = PostgresControlRepository.connect(dsn=dsn)
     try:
-        item = await repository.retry_failed_item(
-            campaign_hash=campaign_hash,
-            sequence=sequence,
+        status_before = await repository.status(campaign_hash=campaign_hash)
+        plan = _research_data_campaign_retry_plan_payload(status_before)
+        failed_items = plan["failed_items"]
+        if not isinstance(failed_items, list):
+            raise ValueError("research data retry plan is invalid")
+        selected = next(
+            (
+                value
+                for value in failed_items
+                if isinstance(value, dict)
+                and value.get("sequence") == sequence
+            ),
+            None,
         )
+        if (
+            selected is None
+            or selected.get("retry_item_hash") != retry_item_hash
+            or selected.get("retryable") is not True
+        ):
+            raise ValueError(
+                "research data retry item hash is stale or item is not retryable"
+            )
         await control.append_audit_event(
             "research.data.campaign.item.retry_authorized",
             datetime.now(UTC),
             {
+                "additional_attempts": 3,
                 "authorized_by": authorized_by,
                 "campaign_hash": campaign_hash,
-                "instrument": item.instrument,
+                "instrument": selected["instrument"],
+                "prior_attempts": selected["attempts"],
+                "prior_error_code": selected["error_code"],
+                "prior_max_attempts": selected["max_attempts"],
+                "retry_item_hash": retry_item_hash,
                 "sequence": sequence,
             },
+        )
+        await repository.retry_failed_item(
+            campaign_hash=campaign_hash,
+            sequence=sequence,
+            expected_instrument=str(selected["instrument"]),
+            expected_attempts=int(str(selected["attempts"])),
+            expected_max_attempts=int(str(selected["max_attempts"])),
+            expected_error_code=str(selected["error_code"]),
         )
         status = await repository.status(campaign_hash=campaign_hash)
         return _research_data_campaign_payload(status)
@@ -4303,6 +4361,76 @@ def _research_data_campaign_payload(
         "start_date": status.spec.start_date.isoformat(),
         "status": status.status,
         "terminal_error_counts": terminal_error_counts,
+    }
+
+
+def _research_data_campaign_retry_plan_payload(
+    status: ResearchDataCampaignStatus,
+) -> dict[str, object]:
+    failed_items: list[dict[str, object]] = []
+    failed_sequences: list[int] = []
+    for item in status.items:
+        if item.state != "failed":
+            continue
+        if item.error_code is None:
+            raise ValueError("failed research data item must record an error code")
+        additional_attempts = 3
+        retryable = item.max_attempts + additional_attempts <= 10
+        binding = {
+            "additional_attempts": additional_attempts,
+            "attempts": item.attempts,
+            "campaign_hash": status.spec.campaign_hash,
+            "error_code": item.error_code,
+            "instrument": item.instrument,
+            "max_attempts": item.max_attempts,
+            "sequence": item.sequence,
+            "version": "research-data-retry-item-v1",
+        }
+        failed_sequences.append(item.sequence)
+        failed_items.append(
+            {
+                "attempts": item.attempts,
+                "error_code": item.error_code,
+                "instrument": item.instrument,
+                "max_attempts": item.max_attempts,
+                "next_max_attempts": (
+                    item.max_attempts + additional_attempts
+                    if retryable
+                    else None
+                ),
+                "retry_item_hash": _canonical_hash(binding),
+                "retryable": retryable,
+                "sequence": item.sequence,
+            }
+        )
+    if failed_sequences != sorted(failed_sequences):
+        raise ValueError("failed research data items must be sequence-sorted")
+    plan_binding = {
+        "campaign_hash": status.spec.campaign_hash,
+        "failed_item_hashes": [
+            value["retry_item_hash"] for value in failed_items
+        ],
+        "version": "research-data-retry-plan-v1",
+    }
+    retryable_item_count = sum(
+        value["retryable"] is True for value in failed_items
+    )
+    return {
+        "blocked_item_count": len(failed_items) - retryable_item_count,
+        "campaign_hash": status.spec.campaign_hash,
+        "campaign_key": status.spec.campaign_key,
+        "failed_item_count": len(failed_items),
+        "failed_items": failed_items,
+        "live_trading_locked": True,
+        "plan_hash": _canonical_hash(plan_binding),
+        "retry_authorization_required": bool(failed_items),
+        "retryable_item_count": retryable_item_count,
+        "status": (
+            "retry_authorization_required"
+            if failed_items
+            else "no_failed_items"
+        ),
+        "version": "research-data-retry-plan-v1",
     }
 
 

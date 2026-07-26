@@ -75,6 +75,9 @@ campaign returns `retry_authorization_required` before any remaining queued shar
 The authenticated progress API and research console expose the matching campaign hash, item
 counts, terminal error totals and retry-authorization requirement read-only, so an operator can
 see the full recovery debt without starting a collector.
+`research-data-campaign-retry-plan` additionally binds every failed sequence, instrument,
+failure code and attempt counter to an item hash. The explicit retry command requires that
+current hash and rejects stale authorization before changing queue state.
 Each worker batch also holds a PostgreSQL session advisory lock keyed by campaign hash. A second
 host reports `collector_busy` without claiming a shard or calling the vendor; the lock is
 automatically released when its database connection closes, including process termination.

@@ -64,6 +64,7 @@ from autoquant.operations import (
     inspect_paper_runtime_readiness,
     inspect_portfolio_validation,
     inspect_research_data_campaign,
+    inspect_research_data_campaign_retry_plan,
     inspect_research_input_shard,
     inspect_validation_campaign,
     prepare_low_volatility_decision_time_signal,
@@ -1059,6 +1060,26 @@ def research_data_campaign_status(
         raise typer.Exit(code=2)
 
 
+@app.command("research-data-campaign-retry-plan")
+def research_data_campaign_retry_plan(
+    campaign_hash: Annotated[str, typer.Option("--campaign-hash")],
+) -> None:
+    """Inspect exact failed shards and compile hash-bound retry inputs."""
+
+    try:
+        payload = asyncio.run(
+            inspect_research_data_campaign_retry_plan(
+                _settings(),
+                campaign_hash=campaign_hash,
+            )
+        )
+    except (AutoQuantError, LookupError, ValueError):
+        _fail("research data campaign retry planning failed")
+    _emit(payload)
+    if payload["status"] == "retry_authorization_required":
+        raise typer.Exit(code=2)
+
+
 @app.command("research-input-plan-compile")
 def research_input_plan_compile(
     manifest_hash: Annotated[str, typer.Option("--manifest-hash")],
@@ -1936,6 +1957,10 @@ def research_data_campaign_retry(
         int,
         typer.Option("--sequence", min=1),
     ],
+    retry_item_hash: Annotated[
+        str,
+        typer.Option("--retry-item-hash"),
+    ],
     authorized_by: Annotated[str, typer.Option("--authorized-by")],
     confirm_data_retry: Annotated[
         bool,
@@ -1952,6 +1977,7 @@ def research_data_campaign_retry(
                 _settings(),
                 campaign_hash=campaign_hash,
                 sequence=sequence,
+                retry_item_hash=retry_item_hash,
                 authorized_by=authorized_by,
             )
         )

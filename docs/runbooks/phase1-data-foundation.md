@@ -414,9 +414,13 @@ reached. Let ClickHouse remove old parts before rerunning; do not bypass the
 guard by deleting storage directories or weakening merge durability.
 
 ```bash
+uv run autoquant research-data-campaign-retry-plan \
+  --campaign-hash <campaign-hash>
+
 uv run autoquant research-data-campaign-retry \
   --campaign-hash <campaign-hash> \
   --sequence <failed-sequence> \
+  --retry-item-hash <matching-retry-item-hash> \
   --authorized-by operator \
   --confirm-data-retry
 ```
@@ -424,7 +428,10 @@ uv run autoquant research-data-campaign-retry \
 `research-data-campaign-status` includes `terminal_error_counts` so the operator can prove the
 failure class before authorizing a retry. Do not retry `daily_quality_rejected` merely because a
 record exists at the vendor. When the quality report says `record_not_visible`, wait until the
-record's frozen availability policy has elapsed.
+record's frozen availability policy has elapsed. The read-only retry plan emits one hash for
+each exact failed item. Retry rejects a stale hash if its sequence, instrument, failure code,
+attempt counters or campaign identity changed between inspection and authorization. Generate a
+fresh plan after every successful retry; the command never requeues an item itself.
 
 When every shard is complete, the worker creates one immutable aggregate
 research manifest binding the policy hash, all monthly snapshot hashes and all

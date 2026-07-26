@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
@@ -12,6 +13,7 @@ import pytest
 from autoquant.config import AppSettings, RuntimeEnvironment
 from autoquant.data.daily_ingestion import ValidatedDailyDataset
 from autoquant.data.daily_models import DailyCoverageEvidence
+from autoquant.data.research_data_campaign import ResearchDataCampaignSpec
 from autoquant.errors import (
     MissingCapabilityError,
     PersistenceUnavailableError,
@@ -20,15 +22,237 @@ from autoquant.operations import (
     _month_intervals,
     _next_low_volatility_forward_session,
     _RecyclingDailyDatasetReader,
+    _research_data_campaign_retry_plan_payload,
     _validate_campaign_dataset,
     approve_paper_sma_strategy,
     create_compliance_approval,
+    retry_research_data_campaign_item,
     revoke_paper_strategy,
     run_low_volatility_forward_window,
     run_research_data_campaign,
 )
+from autoquant.web.research_data_store import (
+    ResearchDataCampaignItem,
+    ResearchDataCampaignStatus,
+)
 
 NOW = datetime(2026, 7, 23, 8, tzinfo=UTC)
+
+
+def _research_campaign_status(
+    *,
+    error_code: str = "daily_quality_rejected",
+) -> ResearchDataCampaignStatus:
+    spec = ResearchDataCampaignSpec(
+        campaign_key="retry-plan-unit-v1",
+        policy_hash="a" * 64,
+        snapshot_hashes=("b" * 64,),
+        instruments=("000001.XSHE", "600000.XSHG"),
+        start_date=date(2026, 7, 24),
+        end_date=date(2026, 7, 24),
+        requested_by="unit-test",
+    )
+    return ResearchDataCampaignStatus(
+        spec=spec,
+        created_at=NOW,
+        status="failed",
+        items=(
+            ResearchDataCampaignItem(
+                sequence=1,
+                instrument="000001.XSHE",
+                state="failed",
+                attempts=1,
+                max_attempts=3,
+                manifest_hash=None,
+                started_at=NOW,
+                completed_at=NOW,
+                error_code=error_code,
+            ),
+            ResearchDataCampaignItem(
+                sequence=2,
+                instrument="600000.XSHG",
+                state="queued",
+                attempts=0,
+                max_attempts=3,
+                manifest_hash=None,
+                started_at=None,
+                completed_at=None,
+                error_code=None,
+            ),
+        ),
+        manifest=None,
+    )
+
+
+def test_research_campaign_retry_plan_binds_exact_terminal_state() -> None:
+    plan = _research_data_campaign_retry_plan_payload(
+        _research_campaign_status()
+    )
+
+    assert plan["status"] == "retry_authorization_required"
+    assert plan["failed_item_count"] == 1
+    assert plan["retryable_item_count"] == 1
+    assert plan["blocked_item_count"] == 0
+    assert plan["live_trading_locked"] is True
+    failed_items = cast(list[dict[str, object]], plan["failed_items"])
+    assert failed_items == [
+        {
+            "attempts": 1,
+            "error_code": "daily_quality_rejected",
+            "instrument": "000001.XSHE",
+            "max_attempts": 3,
+            "next_max_attempts": 6,
+            "retry_item_hash": failed_items[0]["retry_item_hash"],
+            "retryable": True,
+            "sequence": 1,
+        }
+    ]
+    assert len(str(plan["plan_hash"])) == 64
+    assert len(str(failed_items[0]["retry_item_hash"])) == 64
+
+    changed = _research_data_campaign_retry_plan_payload(
+        _research_campaign_status(error_code="vendor_permission_denied")
+    )
+    changed_items = cast(list[dict[str, object]], changed["failed_items"])
+    assert changed["plan_hash"] != plan["plan_hash"]
+    assert (
+        changed_items[0]["retry_item_hash"]
+        != failed_items[0]["retry_item_hash"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_research_campaign_retry_rejects_stale_item_hash_before_write() -> None:
+    repository = MagicMock()
+    repository.status = AsyncMock(return_value=_research_campaign_status())
+    repository.retry_failed_item = AsyncMock()
+    repository.close = AsyncMock()
+    control = MagicMock()
+    control.append_audit_event = AsyncMock()
+    control.close = AsyncMock()
+    with (
+        patch(
+            "autoquant.operations.PostgresResearchDataCampaignRepository.connect",
+            return_value=repository,
+        ),
+        patch(
+            "autoquant.operations.PostgresControlRepository.connect",
+            return_value=control,
+        ),
+    ):
+        with pytest.raises(ValueError, match="stale"):
+            await retry_research_data_campaign_item(
+                _settings(),
+                campaign_hash=_research_campaign_status().spec.campaign_hash,
+                sequence=1,
+                retry_item_hash="f" * 64,
+                authorized_by="risk-operator",
+            )
+
+    repository.retry_failed_item.assert_not_awaited()
+    control.append_audit_event.assert_not_awaited()
+    repository.close.assert_awaited_once()
+    control.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_research_campaign_retry_does_not_write_without_audit() -> None:
+    before = _research_campaign_status()
+    plan = _research_data_campaign_retry_plan_payload(before)
+    failed_items = cast(list[dict[str, object]], plan["failed_items"])
+    repository = MagicMock()
+    repository.status = AsyncMock(return_value=before)
+    repository.retry_failed_item = AsyncMock()
+    repository.close = AsyncMock()
+    control = MagicMock()
+    control.append_audit_event = AsyncMock(
+        side_effect=PersistenceUnavailableError("audit unavailable")
+    )
+    control.close = AsyncMock()
+    with (
+        patch(
+            "autoquant.operations.PostgresResearchDataCampaignRepository.connect",
+            return_value=repository,
+        ),
+        patch(
+            "autoquant.operations.PostgresControlRepository.connect",
+            return_value=control,
+        ),
+    ):
+        with pytest.raises(PersistenceUnavailableError, match="audit unavailable"):
+            await retry_research_data_campaign_item(
+                _settings(),
+                campaign_hash=before.spec.campaign_hash,
+                sequence=1,
+                retry_item_hash=str(failed_items[0]["retry_item_hash"]),
+                authorized_by="risk-operator",
+            )
+
+    repository.retry_failed_item.assert_not_awaited()
+    repository.close.assert_awaited_once()
+    control.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_research_campaign_retry_audits_exact_bound_failure() -> None:
+    before = _research_campaign_status()
+    plan = _research_data_campaign_retry_plan_payload(before)
+    failed_items = cast(list[dict[str, object]], plan["failed_items"])
+    retry_item_hash = str(failed_items[0]["retry_item_hash"])
+    after = ResearchDataCampaignStatus(
+        spec=before.spec,
+        created_at=before.created_at,
+        status="queued",
+        items=(
+            replace(
+                before.items[0],
+                state="queued",
+                max_attempts=6,
+                started_at=None,
+                completed_at=None,
+                error_code="operator_retry_authorized",
+            ),
+            before.items[1],
+        ),
+        manifest=None,
+    )
+    repository = MagicMock()
+    repository.status = AsyncMock(side_effect=(before, after))
+    repository.retry_failed_item = AsyncMock(return_value=after.items[0])
+    repository.close = AsyncMock()
+    control = MagicMock()
+    control.append_audit_event = AsyncMock()
+    control.close = AsyncMock()
+    with (
+        patch(
+            "autoquant.operations.PostgresResearchDataCampaignRepository.connect",
+            return_value=repository,
+        ),
+        patch(
+            "autoquant.operations.PostgresControlRepository.connect",
+            return_value=control,
+        ),
+    ):
+        result = await retry_research_data_campaign_item(
+            _settings(),
+            campaign_hash=before.spec.campaign_hash,
+            sequence=1,
+            retry_item_hash=retry_item_hash,
+            authorized_by="risk-operator",
+        )
+
+    assert result["status"] == "queued"
+    repository.retry_failed_item.assert_awaited_once_with(
+        campaign_hash=before.spec.campaign_hash,
+        sequence=1,
+        expected_instrument="000001.XSHE",
+        expected_attempts=1,
+        expected_max_attempts=3,
+        expected_error_code="daily_quality_rejected",
+    )
+    audit_payload = control.append_audit_event.await_args.args[2]
+    assert audit_payload["prior_error_code"] == "daily_quality_rejected"
+    assert audit_payload["retry_item_hash"] == retry_item_hash
 
 
 def test_universe_backfill_months_are_bounded_and_exact() -> None:

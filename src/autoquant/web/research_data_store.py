@@ -529,11 +529,22 @@ class PostgresResearchDataCampaignRepository:
         *,
         campaign_hash: str,
         sequence: int,
+        expected_instrument: str,
+        expected_attempts: int,
+        expected_max_attempts: int,
+        expected_error_code: str,
         additional_attempts: int = 3,
     ) -> ResearchDataCampaignItem:
         _require_lowercase_sha256(campaign_hash, name="research data campaign hash")
         if sequence < 1:
             raise ValueError("sequence must be positive")
+        if (
+            not expected_instrument
+            or expected_attempts < 0
+            or expected_max_attempts < 1
+            or not expected_error_code
+        ):
+            raise ValueError("expected failed item state is invalid")
         if additional_attempts < 1 or additional_attempts > 3:
             raise ValueError("additional_attempts must be between 1 and 3")
         try:
@@ -552,6 +563,10 @@ class PostgresResearchDataCampaignRepository:
                                 WHERE campaign_hash = :campaign_hash
                                   AND sequence = :sequence
                                   AND state = 'failed'
+                                  AND instrument = :expected_instrument
+                                  AND attempts = :expected_attempts
+                                  AND max_attempts = :expected_max_attempts
+                                  AND error_code = :expected_error_code
                                   AND max_attempts + :additional_attempts <= 10
                                 RETURNING *
                                 """
@@ -559,6 +574,10 @@ class PostgresResearchDataCampaignRepository:
                             {
                                 "additional_attempts": additional_attempts,
                                 "campaign_hash": campaign_hash,
+                                "expected_attempts": expected_attempts,
+                                "expected_error_code": expected_error_code,
+                                "expected_instrument": expected_instrument,
+                                "expected_max_attempts": expected_max_attempts,
                                 "sequence": sequence,
                             },
                         )
@@ -572,7 +591,8 @@ class PostgresResearchDataCampaignRepository:
             ) from None
         if row is None:
             raise ValueError(
-                "research data item is not retryable or attempt ceiling would be exceeded"
+                "research data item state changed, is not retryable, or "
+                "attempt ceiling would be exceeded"
             )
         return _item(row)
 
