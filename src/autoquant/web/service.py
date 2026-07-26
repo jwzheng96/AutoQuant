@@ -1229,6 +1229,20 @@ class ConsoleService:
             if self._scheduler is None
             else await self._scheduler.replay(account_id=self._settings.paper_account_id)
         )
+        scheduler_health = (
+            None
+            if self._scheduler is None
+            else await self._scheduler.runtime_health(
+                account_id=self._settings.paper_account_id,
+                strategy_id=self._settings.paper_strategy_id,
+                maximum_silence=timedelta(
+                    seconds=max(
+                        self._settings.paper_scheduler_lease_ttl_seconds,
+                        float(self._settings.paper_poll_interval_seconds) * 3,
+                    )
+                ),
+            )
+        )
         control = (
             None
             if self._execution_controls is None
@@ -1270,9 +1284,45 @@ class ConsoleService:
             latest_scheduler_at=(
                 None if scheduler_summary is None else scheduler_summary.latest_evaluated_at
             ),
+            scheduler_runtime_status=(
+                "unavailable" if scheduler_health is None else scheduler_health.state.value
+            ),
+            scheduler_runtime_healthy=(
+                False if scheduler_health is None else scheduler_health.healthy
+            ),
+            scheduler_lease_active=(
+                False if scheduler_health is None else scheduler_health.lease_active
+            ),
+            scheduler_event_fresh=(
+                False if scheduler_health is None else scheduler_health.event_fresh
+            ),
+            scheduler_event_age_seconds=(
+                None
+                if scheduler_health is None or scheduler_health.latest_event_age is None
+                else max(
+                    0,
+                    int(scheduler_health.latest_event_age.total_seconds()),
+                )
+            ),
+            scheduler_latest_status=(
+                None if scheduler_health is None else scheduler_health.latest_status
+            ),
+            scheduler_latest_phase=(
+                None if scheduler_health is None else scheduler_health.latest_phase
+            ),
+            scheduler_latest_error_code=(
+                None if scheduler_health is None else scheduler_health.latest_error_code
+            ),
+            scheduler_health_checked_at=(
+                None if scheduler_health is None else scheduler_health.checked_at
+            ),
             remaining_gates=(
+                *(
+                    ()
+                    if scheduler_health is not None and scheduler_health.healthy
+                    else ("scheduler_runtime_liveness",)
+                ),
                 "external_realtime_quote_adapter",
-                "scheduler_runtime_wiring",
                 "operational_kill_switch_reset_drill",
                 "paper_evidence_period",
                 "qmt_windows_read_only_reconciliation",

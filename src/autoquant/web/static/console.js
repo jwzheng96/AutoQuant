@@ -211,7 +211,21 @@ async function loadTrading() {
     setText("kill-switch-state", data.execution?.kill_switch_active ? "ACTIVE" : "RESET");
     setText("kill-switch-reason", data.execution?.kill_switch_reason ?? "—");
     setText("simulated-broker-state", data.execution?.simulated_broker_recovery_verified ? "持久化模拟券商事实链已验证" : "模拟券商不可用");
-    setText("scheduler-evidence-state", data.execution?.scheduler_recovery_verified ? "调度周期哈希链已验证" : "调度证据不可用");
+    const schedulerRuntimeLabels = {
+      healthy: "驻留调度器健康，租约与最新数据库写入均有效",
+      starting: "驻留调度器正在启动，尚无周期证据",
+      stopped: "驻留调度器已停止或租约失效",
+      stale: "驻留调度器静默超时，最新周期证据已陈旧",
+      failed: `驻留调度器最近周期失败：${data.execution?.scheduler_latest_error_code ?? "unknown"}`,
+      identity_mismatch: "调度器租约、策略或事件身份不一致",
+      unavailable: "调度运行健康状态不可用",
+    };
+    setText(
+      "scheduler-evidence-state",
+      data.execution?.scheduler_recovery_verified
+        ? schedulerRuntimeLabels[data.execution?.scheduler_runtime_status] ?? "调度运行状态未知"
+        : "调度证据哈希链不可用",
+    );
     setText("scheduler-cycle-count", data.execution?.scheduler_cycle_count ?? 0);
     setText("paper-strategy-state", data.strategy?.active ? "样本外证据已批准（仅模拟盘）" : "未批准");
     setText("paper-strategy-version", data.strategy?.strategy_version ?? data.strategy?.strategy_id ?? "—");

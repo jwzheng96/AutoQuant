@@ -1163,9 +1163,22 @@ class PaperExecutionStatus(BaseModel):
     scheduler_recovery_verified: bool = False
     scheduler_cycle_count: int = Field(default=0, ge=0)
     latest_scheduler_at: datetime | None = None
+    scheduler_runtime_status: str = "unavailable"
+    scheduler_runtime_healthy: bool = False
+    scheduler_lease_active: bool = False
+    scheduler_event_fresh: bool = False
+    scheduler_event_age_seconds: int | None = Field(default=None, ge=0)
+    scheduler_latest_status: str | None = None
+    scheduler_latest_phase: str | None = None
+    scheduler_latest_error_code: str | None = None
+    scheduler_health_checked_at: datetime | None = None
     remaining_gates: tuple[str, ...]
 
-    @field_validator("latest_reconciliation_at", "latest_scheduler_at")
+    @field_validator(
+        "latest_reconciliation_at",
+        "latest_scheduler_at",
+        "scheduler_health_checked_at",
+    )
     @classmethod
     def require_aware_reconciliation_time(cls, value: datetime | None) -> datetime | None:
         if value is None:
@@ -1173,6 +1186,32 @@ class PaperExecutionStatus(BaseModel):
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("reconciliation time must be timezone-aware")
         return value.astimezone(UTC)
+
+    @model_validator(mode="after")
+    def require_consistent_scheduler_health(self) -> Self:
+        if self.scheduler_runtime_status not in {
+            "unavailable",
+            "healthy",
+            "starting",
+            "stopped",
+            "stale",
+            "failed",
+            "identity_mismatch",
+        }:
+            raise ValueError("scheduler runtime status is invalid")
+        if self.scheduler_runtime_healthy != (self.scheduler_runtime_status == "healthy"):
+            raise ValueError("scheduler runtime health is inconsistent")
+        if self.scheduler_runtime_healthy and (
+            not self.scheduler_lease_active
+            or not self.scheduler_event_fresh
+            or self.scheduler_event_age_seconds is None
+            or self.scheduler_latest_status is None
+            or self.scheduler_health_checked_at is None
+        ):
+            raise ValueError("healthy scheduler requires current runtime evidence")
+        if (self.scheduler_latest_status is None) != (self.scheduler_latest_phase is None):
+            raise ValueError("scheduler latest cycle summary is incomplete")
+        return self
 
 
 class QmtReadOnlyStatus(BaseModel):

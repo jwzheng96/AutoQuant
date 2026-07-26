@@ -12,6 +12,7 @@ from autoquant.execution.control import KillSwitchReason
 from autoquant.execution.low_volatility_paper_deployment import (
     LowVolatilityPaperDeploymentBlocker,
 )
+from autoquant.execution.paper_scheduler_store import PaperSchedulerHealthState
 from autoquant.execution.portfolio_validation import (
     PortfolioOosComponentEvidence,
     PortfolioOosFold,
@@ -528,6 +529,18 @@ async def test_execution_status_requires_gateway_even_after_verified_recovery() 
     scheduler_summary.event_count = 7
     scheduler_summary.latest_evaluated_at = NOW
     scheduler.replay = AsyncMock(return_value=scheduler_summary)
+    scheduler_health = MagicMock(
+        state=PaperSchedulerHealthState.HEALTHY,
+        healthy=True,
+        lease_active=True,
+        event_fresh=True,
+        latest_event_age=timedelta(seconds=1),
+        latest_status="no_intents",
+        latest_phase="morning_continuous",
+        latest_error_code=None,
+        checked_at=NOW,
+    )
+    scheduler.runtime_health = AsyncMock(return_value=scheduler_health)
     service = _service(
         operator=MagicMock(),
         control=MagicMock(),
@@ -543,7 +556,64 @@ async def test_execution_status_requires_gateway_even_after_verified_recovery() 
     assert status.gateway_available is False
     assert status.scheduler_recovery_verified is True
     assert status.scheduler_cycle_count == 7
-    assert "scheduler_runtime_wiring" in status.remaining_gates
+    assert status.scheduler_runtime_status == "healthy"
+    assert status.scheduler_runtime_healthy is True
+    assert status.scheduler_lease_active is True
+    assert status.scheduler_event_fresh is True
+    assert status.scheduler_event_age_seconds == 1
+    assert "scheduler_runtime_liveness" not in status.remaining_gates
+
+
+@pytest.mark.asyncio
+async def test_execution_status_exposes_silent_scheduler_failure() -> None:
+    executions = MagicMock()
+    executions.verify_recovery = AsyncMock(
+        return_value=MagicMock(
+            recovery_verified=True,
+            order_count=0,
+            event_count=0,
+            reconciliation_count=0,
+            open_order_count=0,
+            latest_reconciliation_at=None,
+            latest_reconciled=None,
+        )
+    )
+    scheduler = MagicMock()
+    scheduler.replay = AsyncMock(
+        return_value=MagicMock(
+            recovery_verified=True,
+            event_count=12,
+            latest_evaluated_at=NOW - timedelta(minutes=5),
+        )
+    )
+    scheduler.runtime_health = AsyncMock(
+        return_value=MagicMock(
+            state=PaperSchedulerHealthState.STALE,
+            healthy=False,
+            lease_active=True,
+            event_fresh=False,
+            latest_event_age=timedelta(minutes=5),
+            latest_status="no_intents",
+            latest_phase="morning_continuous",
+            latest_error_code=None,
+            checked_at=NOW,
+        )
+    )
+    service = _service(
+        operator=MagicMock(),
+        control=MagicMock(),
+        runner=AsyncMock(),
+        executions=executions,
+        scheduler=scheduler,
+    )
+
+    status = await service.execution_status()
+
+    assert status.scheduler_recovery_verified is True
+    assert status.scheduler_runtime_status == "stale"
+    assert status.scheduler_runtime_healthy is False
+    assert status.scheduler_event_age_seconds == 300
+    assert "scheduler_runtime_liveness" in status.remaining_gates
 
 
 @pytest.mark.asyncio

@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
+from enum import StrEnum
 
 from sqlalchemy import text
 from sqlalchemy.engine import RowMapping
@@ -56,6 +57,81 @@ class PaperSchedulerRecovery:
     latest_evaluated_at: datetime | None
     latest_cycle_hash: str | None
     recovery_verified: bool
+
+
+class PaperSchedulerHealthState(StrEnum):
+    HEALTHY = "healthy"
+    STARTING = "starting"
+    STOPPED = "stopped"
+    STALE = "stale"
+    FAILED = "failed"
+    IDENTITY_MISMATCH = "identity_mismatch"
+
+
+@dataclass(frozen=True, slots=True)
+class PaperSchedulerRuntimeHealth:
+    account_id: str
+    strategy_id: str
+    state: PaperSchedulerHealthState
+    checked_at: datetime
+    maximum_silence: timedelta
+    lease_active: bool
+    lease_holder_id: str | None
+    latest_event_persisted_at: datetime | None
+    latest_event_age: timedelta | None
+    latest_status: str | None
+    latest_phase: str | None
+    latest_error_code: str | None
+
+    def __post_init__(self) -> None:
+        for value, name in (
+            (self.account_id, "scheduler health account_id"),
+            (self.strategy_id, "scheduler health strategy_id"),
+        ):
+            if not value or value != value.strip():
+                raise ValueError(f"{name} is invalid")
+        if not isinstance(self.state, PaperSchedulerHealthState):
+            raise TypeError("scheduler health state is invalid")
+        checked_at = to_utc(self.checked_at, name="scheduler health checked_at")
+        if self.maximum_silence <= timedelta(0):
+            raise ValueError("scheduler maximum silence must be positive")
+        if type(self.lease_active) is not bool:
+            raise TypeError("scheduler lease_active must be bool")
+        if self.lease_active and self.lease_holder_id is None:
+            raise ValueError("active scheduler lease requires a holder")
+        event_at = (
+            None
+            if self.latest_event_persisted_at is None
+            else to_utc(
+                self.latest_event_persisted_at,
+                name="scheduler event persisted_at",
+            )
+        )
+        if (event_at is None) != (self.latest_event_age is None):
+            raise ValueError("scheduler event freshness evidence is incomplete")
+        if self.latest_event_age is not None and self.latest_event_age < timedelta(0):
+            raise ValueError("scheduler event age cannot be negative")
+        if (self.latest_status is None) != (self.latest_phase is None):
+            raise ValueError("scheduler latest cycle identity is incomplete")
+        if self.state is PaperSchedulerHealthState.HEALTHY and (
+            not self.lease_active
+            or event_at is None
+            or self.latest_event_age is None
+            or self.latest_event_age > self.maximum_silence
+            or self.latest_status == "failed"
+            or self.latest_error_code is not None
+        ):
+            raise ValueError("healthy scheduler state requires fresh successful evidence")
+        object.__setattr__(self, "checked_at", checked_at)
+        object.__setattr__(self, "latest_event_persisted_at", event_at)
+
+    @property
+    def healthy(self) -> bool:
+        return self.state is PaperSchedulerHealthState.HEALTHY
+
+    @property
+    def event_fresh(self) -> bool:
+        return self.latest_event_age is not None and self.latest_event_age <= self.maximum_silence
 
 
 class PostgresPaperSchedulerRepository:
@@ -221,6 +297,115 @@ class PostgresPaperSchedulerRepository:
             recovery_verified=True,
         )
 
+    async def runtime_health(
+        self,
+        *,
+        account_id: str,
+        strategy_id: str,
+        maximum_silence: timedelta,
+    ) -> PaperSchedulerRuntimeHealth:
+        if not account_id or account_id != account_id.strip():
+            raise ValueError("scheduler health account_id is invalid")
+        if not strategy_id or strategy_id != strategy_id.strip():
+            raise ValueError("scheduler health strategy_id is invalid")
+        if maximum_silence <= timedelta(0) or maximum_silence > timedelta(minutes=10):
+            raise ValueError("scheduler maximum silence must be positive and at most ten minutes")
+        try:
+            async with self._engine.connect() as connection:
+                await connection.exec_driver_sql(
+                    "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"
+                )
+                checked_at = await connection.scalar(text("SELECT clock_timestamp()"))
+                event = (
+                    (
+                        await connection.execute(
+                            text(
+                                f"""
+                                SELECT strategy_id, status, phase, error_code,
+                                       created_at
+                                FROM {self._schema}.paper_scheduler_events
+                                WHERE account_id = :account_id
+                                ORDER BY sequence DESC
+                                LIMIT 1
+                                """
+                            ),
+                            {"account_id": account_id},
+                        )
+                    )
+                    .mappings()
+                    .one_or_none()
+                )
+                lease = (
+                    (
+                        await connection.execute(
+                            text(
+                                f"""
+                                SELECT strategy_id, holder_id, released_at,
+                                       expires_at
+                                FROM {self._schema}.paper_scheduler_leases
+                                WHERE account_id = :account_id
+                                """
+                            ),
+                            {"account_id": account_id},
+                        )
+                    )
+                    .mappings()
+                    .one_or_none()
+                )
+                await connection.rollback()
+        except Exception:
+            raise PersistenceUnavailableError(
+                "Paper scheduler runtime health read failed"
+            ) from None
+        if not isinstance(checked_at, datetime):
+            raise PersistenceUnavailableError("Paper scheduler database clock is unavailable")
+        database_now = to_utc(checked_at, name="scheduler database time")
+        lease_active = bool(
+            lease is not None
+            and lease["released_at"] is None
+            and lease["expires_at"] > database_now
+        )
+        lease_holder_id = str(lease["holder_id"]) if lease_active and lease is not None else None
+        event_at = (
+            None
+            if event is None
+            else to_utc(
+                event["created_at"],
+                name="scheduler event persisted_at",
+            )
+        )
+        event_age = None if event_at is None else database_now - event_at
+        event_strategy = None if event is None else str(event["strategy_id"])
+        lease_strategy = None if lease is None else str(lease["strategy_id"])
+        state = _scheduler_health_state(
+            strategy_id=strategy_id,
+            lease_active=lease_active,
+            lease_strategy_id=lease_strategy,
+            event_strategy_id=event_strategy,
+            event_age=event_age,
+            maximum_silence=maximum_silence,
+            latest_status=(None if event is None else str(event["status"])),
+            latest_error_code=(
+                None if event is None or event["error_code"] is None else str(event["error_code"])
+            ),
+        )
+        return PaperSchedulerRuntimeHealth(
+            account_id=account_id,
+            strategy_id=strategy_id,
+            state=state,
+            checked_at=database_now,
+            maximum_silence=maximum_silence,
+            lease_active=lease_active,
+            lease_holder_id=lease_holder_id,
+            latest_event_persisted_at=event_at,
+            latest_event_age=event_age,
+            latest_status=None if event is None else str(event["status"]),
+            latest_phase=None if event is None else str(event["phase"]),
+            latest_error_code=(
+                None if event is None or event["error_code"] is None else str(event["error_code"])
+            ),
+        )
+
     async def _select_state(
         self, connection: AsyncConnection, account_id: str
     ) -> RowMapping | None:
@@ -350,6 +535,32 @@ def _event_from_row(row: RowMapping) -> PaperSchedulerEvent:
         evaluated_at=row["evaluated_at"],
         event_hash=str(row["event_hash"]),
     )
+
+
+def _scheduler_health_state(
+    *,
+    strategy_id: str,
+    lease_active: bool,
+    lease_strategy_id: str | None,
+    event_strategy_id: str | None,
+    event_age: timedelta | None,
+    maximum_silence: timedelta,
+    latest_status: str | None,
+    latest_error_code: str | None,
+) -> PaperSchedulerHealthState:
+    if lease_active and lease_strategy_id != strategy_id:
+        return PaperSchedulerHealthState.IDENTITY_MISMATCH
+    if event_strategy_id is not None and event_strategy_id != strategy_id:
+        return PaperSchedulerHealthState.IDENTITY_MISMATCH
+    if not lease_active:
+        return PaperSchedulerHealthState.STOPPED
+    if event_age is None:
+        return PaperSchedulerHealthState.STARTING
+    if event_age < timedelta(0) or event_age > maximum_silence:
+        return PaperSchedulerHealthState.STALE
+    if latest_status == "failed" or latest_error_code is not None:
+        return PaperSchedulerHealthState.FAILED
+    return PaperSchedulerHealthState.HEALTHY
 
 
 def _columns_match_payload(row: RowMapping, payload: dict[str, object]) -> bool:

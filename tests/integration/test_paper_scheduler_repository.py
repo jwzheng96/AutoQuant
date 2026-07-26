@@ -9,6 +9,7 @@ from uuid import uuid4
 
 import pytest
 import pytest_asyncio
+from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
@@ -20,7 +21,11 @@ from autoquant.execution.paper_scheduler import (
     PaperSchedulerCycle,
     PaperSchedulerStatus,
 )
+from autoquant.execution.paper_scheduler_lease_store import (
+    PostgresPaperSchedulerLeaseRepository,
+)
 from autoquant.execution.paper_scheduler_store import (
+    PaperSchedulerHealthState,
     PostgresPaperSchedulerRepository,
 )
 
@@ -48,6 +53,7 @@ async def scheduler_store() -> AsyncIterator[
         for path in (
             "migrations/postgres/001_phase1.sql",
             "migrations/postgres/013_paper_scheduler_events.sql",
+            "migrations/postgres/014_paper_scheduler_leases.sql",
         )
     )
     try:
@@ -137,6 +143,76 @@ async def test_scheduler_cycles_serialize_concurrent_appends(
 
     assert {event.sequence for event in events} == {1, 2}
     assert recovery.event_count == 2
+
+
+@pytest.mark.asyncio
+async def test_scheduler_runtime_health_binds_database_time_lease_and_latest_cycle(
+    scheduler_store: tuple[PostgresPaperSchedulerRepository, AsyncEngine, str],
+) -> None:
+    repository, engine, schema = scheduler_store
+    leases = PostgresPaperSchedulerLeaseRepository(
+        engine=engine,
+        schema=schema,
+    )
+    token = SecretStr("scheduler-runtime-health-token-0001")
+    lease_now = datetime.now(UTC)
+    await leases.acquire(
+        account_id="paper-main",
+        strategy_id="integration-strategy-v1",
+        holder_id="paper-runtime-01",
+        token=token,
+        now=lease_now,
+        ttl=timedelta(seconds=30),
+    )
+    await repository.append(_cycle(seconds=0, status=PaperSchedulerStatus.IDLE))
+
+    healthy = await repository.runtime_health(
+        account_id="paper-main",
+        strategy_id="integration-strategy-v1",
+        maximum_silence=timedelta(seconds=30),
+    )
+
+    assert healthy.state is PaperSchedulerHealthState.HEALTHY
+    assert healthy.healthy is True
+    assert healthy.lease_active is True
+    assert healthy.lease_holder_id == "paper-runtime-01"
+    assert healthy.event_fresh is True
+    assert healthy.latest_status == "idle"
+    assert healthy.latest_error_code is None
+
+    stale = await repository.runtime_health(
+        account_id="paper-main",
+        strategy_id="integration-strategy-v1",
+        maximum_silence=timedelta(microseconds=1),
+    )
+    assert stale.state is PaperSchedulerHealthState.STALE
+    assert stale.lease_active is True
+    assert stale.event_fresh is False
+
+    await repository.append(_cycle(seconds=1, status=PaperSchedulerStatus.FAILED))
+    failed = await repository.runtime_health(
+        account_id="paper-main",
+        strategy_id="integration-strategy-v1",
+        maximum_silence=timedelta(seconds=30),
+    )
+    assert failed.state is PaperSchedulerHealthState.FAILED
+    assert failed.healthy is False
+    assert failed.latest_error_code == "scheduler_dependency_failed"
+
+    await leases.release(
+        account_id="paper-main",
+        strategy_id="integration-strategy-v1",
+        holder_id="paper-runtime-01",
+        token=token,
+        now=max(datetime.now(UTC), lease_now),
+    )
+    stopped = await repository.runtime_health(
+        account_id="paper-main",
+        strategy_id="integration-strategy-v1",
+        maximum_silence=timedelta(seconds=30),
+    )
+    assert stopped.state is PaperSchedulerHealthState.STOPPED
+    assert stopped.lease_active is False
 
 
 @pytest.mark.asyncio

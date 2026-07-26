@@ -101,6 +101,21 @@ holder/token/generation 组合成不可变证据，再由 PostgreSQL 在一次�
 正常维护优先使用控制台中断进程。中断会停止调度、反订阅行情、尝试释放租约并保持停机
 开关 active。若进程崩溃，租约到期后才允许新实例接管；不得通过修改数据库绕过租约。
 
+## 运行健康与静默停摆
+
+交易控制台不会把“历史事件能够重放”当作“驻留进程当前健康”。`GET /api/v1/trading`
+中的 execution 状态同时检查：
+
+- PostgreSQL 中仍有效且策略身份一致的 scheduler 租约；
+- 最新 scheduler 事件的数据库写入时间，而不是运行主机自报时间；
+- 最新事件的策略身份、阶段、状态和错误码；
+- 最新写入距数据库当前时间不超过 `max(lease_ttl, 3 × poll_interval)`。
+
+`scheduler_runtime_status` 可能为 `healthy`、`starting`、`stopped`、`stale`、
+`failed` 或 `identity_mismatch`。除 `healthy` 外都会保留
+`scheduler_runtime_liveness` 门槛；事件哈希链完整但租约失效或写入陈旧时，也不能作为
+持续模拟盘运行证据。
+
 ## 行情恢复
 
 XtData 回调线程只复制原始标量到有界队列。任何异常都会使整条行情失效，不能继续使用
