@@ -55,9 +55,50 @@ GET /api/v1/operations/readiness?campaign_hash=<64位小写SHA-256>
 处理并停止后续操作。不得把 `status=ready` 解释为实盘许可；它最多表示可以进入受控的
 模拟盘启动/验收步骤，真实交易仍由代码级发布锁禁止。
 
+## 导出和离线验真
+
+不要从终端复制截断的 JSON。使用原子导出命令生成仅当前用户可读的完整工件：
+
+```powershell
+uv run autoquant operations-readiness-export `
+  --campaign-hash <可选的数据活动哈希> `
+  --output .\evidence\readiness-20260803.json
+```
+
+输出目录必须事先存在，目标文件默认不允许覆盖；确需替换同一路径时显式增加
+`--replace`。导出器会先严格复验顶层字段、安全边界、时区时间戳和 `report_hash`，再在
+同目录写临时文件、刷新到磁盘并原子替换。即使报告为 `blocked`，工件也会成功归档，随后
+命令返回 2，防止脚本把“已有报告”误判成“已经就绪”。
+
+接收方无需数据库或 MiniQMT 即可离线验证：
+
+```powershell
+uv run autoquant operations-readiness-verify `
+  --input .\evidence\readiness-20260803.json
+```
+
+验证会拒绝符号链接、非 UTF-8/超大/多余字段、被篡改的分区、失效安全字段和错误哈希。
+有效但仍阻断的工件同样返回 2；只有有效且没有阻断项的工件返回 0。
+
+Windows QMT 节点应使用冻结环境包装器，避免命令执行时下载或更新依赖：
+
+```powershell
+.\scripts\windows\export-readiness-evidence.ps1 `
+  -ProjectPath (Resolve-Path .) `
+  -UvPath "$env:USERPROFILE\.local\bin\uv.exe" `
+  -OutputPath (Join-Path (Resolve-Path .\evidence) 'readiness-20260803.json') `
+  -CampaignHash <可选的数据活动哈希> `
+  -WhatIf
+```
+
+先检查 `-WhatIf` 输出，再去掉该参数。包装器要求 `.env` 明确包含
+`AQ_ENVIRONMENT=paper`、锁文件和 Windows 虚拟环境均存在，并只调用
+`uv run --frozen --no-sync autoquant operations-readiness-export`。它不运行 QMT 验收、补偿
+授权或任何券商接口。
+
 ## Windows 交接顺序
 
-1. 先运行本报告，保存原始 JSON、提交 SHA 和目标主机时间；
+1. 先导出并离线验证本报告，保存完整 JSON、提交 SHA 和目标主机时间；
 2. 按 `qmt.*` 阻断项完成路径、账号、64 位 Python、会话号和 PostgreSQL 时钟配置；
 3. 运行 `qmt-readonly-accept --confirm-read-only`，全程不得给交易权限；
 4. 再次运行本报告，确认新的 `report_hash` 和 QMT 只读证据；

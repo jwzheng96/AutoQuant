@@ -5,6 +5,7 @@ import json
 from collections.abc import Mapping
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
 from typing import Annotated, NoReturn
 from uuid import UUID
 
@@ -98,6 +99,10 @@ from autoquant.operations import (
     start_qmt_recovery_drill,
     tushare_source,
     unlock_paper_runtime,
+)
+from autoquant.readiness_artifact import (
+    load_operations_readiness_artifact,
+    write_operations_readiness_artifact,
 )
 from autoquant.web.models import (
     MomentumCandidateRequest,
@@ -607,6 +612,73 @@ def operations_readiness_report(
         _fail("operations readiness report failed closed")
     _emit(payload)
     if payload["status"] != "ready":
+        raise typer.Exit(code=2)
+
+
+def _readiness_artifact_summary(
+    payload: Mapping[str, object],
+    *,
+    artifact_written: bool,
+) -> dict[str, object]:
+    blockers = payload.get("blockers")
+    return {
+        "artifact_valid": True,
+        "artifact_written": artifact_written,
+        "blocker_count": len(blockers) if isinstance(blockers, list) else 0,
+        "broker_mutation_allowed": False,
+        "collection_started": False,
+        "live_trading_locked": True,
+        "report_hash": payload["report_hash"],
+        "status": payload["status"],
+        "storage_mutation_allowed": False,
+        "vendor_request_started": False,
+    }
+
+
+@app.command("operations-readiness-export")
+def operations_readiness_export(
+    output: Annotated[Path, typer.Option("--output")],
+    campaign_hash: Annotated[
+        str | None,
+        typer.Option("--campaign-hash"),
+    ] = None,
+    replace: Annotated[bool, typer.Option("--replace")] = False,
+) -> None:
+    """Atomically export one validated, read-only readiness JSON artifact."""
+
+    try:
+        payload = asyncio.run(
+            inspect_operations_readiness(
+                _settings(),
+                campaign_hash=campaign_hash,
+            )
+        )
+        artifact = write_operations_readiness_artifact(
+            output,
+            payload,
+            replace=replace,
+        )
+    except MissingCapabilityError as error:
+        _fail(str(error))
+    except (AutoQuantError, LookupError, OSError, ValueError):
+        _fail("operations readiness artifact export failed closed")
+    _emit(_readiness_artifact_summary(artifact, artifact_written=True))
+    if artifact["status"] != "ready":
+        raise typer.Exit(code=2)
+
+
+@app.command("operations-readiness-verify")
+def operations_readiness_verify(
+    input_path: Annotated[Path, typer.Option("--input")],
+) -> None:
+    """Verify one offline readiness artifact without databases or MiniQMT."""
+
+    try:
+        artifact = load_operations_readiness_artifact(input_path)
+    except (OSError, ValueError):
+        _fail("operations readiness artifact verification failed closed")
+    _emit(_readiness_artifact_summary(artifact, artifact_written=False))
+    if artifact["status"] != "ready":
         raise typer.Exit(code=2)
 
 

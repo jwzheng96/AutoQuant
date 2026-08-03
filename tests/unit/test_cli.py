@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, patch
 from typer.testing import CliRunner
 
 from autoquant.cli import app
+from autoquant.data.models import _canonical_hash
 from autoquant.errors import MissingCapabilityError
 from autoquant.execution.qmt_preflight import QmtClockAttestation
 
@@ -283,6 +284,87 @@ def test_operations_readiness_report_emits_one_redacted_blocked_snapshot() -> No
     assert json.loads(result.stdout) == payload
     assert inspect.await_args.kwargs["campaign_hash"] == "b" * 64
     assert "token" not in result.stdout.lower()
+
+
+def test_operations_readiness_artifact_exports_and_verifies_offline(
+    tmp_path: Path,
+) -> None:
+    sections = {
+        "paper_runtime": {"status": "unavailable"},
+        "paper_watchdog": {"status": "blocked"},
+        "promotion": {"status": "blocked"},
+        "qmt": {"status": "blocked"},
+    }
+    version = "operations-readiness-report-v1"
+    payload = {
+        "blockers": ["paper_runtime.unavailable", "qmt.windows_runtime"],
+        "broker_mutation_allowed": False,
+        "collection_started": False,
+        "generated_at": "2026-08-03T08:00:00+00:00",
+        "live_trading_locked": True,
+        "report_hash": _canonical_hash({"sections": sections, "version": version}),
+        "sections": sections,
+        "status": "blocked",
+        "storage_mutation_allowed": False,
+        "vendor_request_started": False,
+        "version": version,
+    }
+    output = tmp_path / "readiness.json"
+    with patch(
+        "autoquant.cli.inspect_operations_readiness",
+        new=AsyncMock(return_value=payload),
+    ):
+        exported = runner.invoke(
+            app,
+            ["operations-readiness-export", "--output", str(output)],
+            env={"AQ_ENVIRONMENT": "paper"},
+        )
+
+    verified = runner.invoke(
+        app,
+        ["operations-readiness-verify", "--input", str(output)],
+        env={},
+    )
+
+    assert exported.exit_code == 2
+    assert verified.exit_code == 2
+    export_summary = json.loads(exported.stdout)
+    verify_summary = json.loads(verified.stdout)
+    assert export_summary["artifact_written"] is True
+    assert verify_summary["artifact_written"] is False
+    assert export_summary["artifact_valid"] is True
+    assert verify_summary["artifact_valid"] is True
+    assert export_summary["report_hash"] == payload["report_hash"]
+    assert verify_summary["report_hash"] == payload["report_hash"]
+    assert output.is_file()
+    assert "sections" not in exported.stdout
+
+
+def test_operations_readiness_artifact_verification_rejects_tampering(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "tampered.json"
+    path.write_text(
+        json.dumps(
+            {
+                "broker_mutation_allowed": True,
+                "status": "ready",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(
+        app,
+        ["operations-readiness-verify", "--input", str(path)],
+        env={},
+    )
+
+    assert result.exit_code == 2
+    assert json.loads(result.stdout) == {
+        "error": "operations readiness artifact verification failed closed",
+        "status": "failed",
+    }
 
 
 def test_compliance_approval_requires_confirmation_and_is_redacted() -> None:

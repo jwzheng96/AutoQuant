@@ -124,6 +124,10 @@ uv run autoquant qmt-check
 不可用、未迁移或相同会话号已有有效租约时也保持 `blocked`。实际网关连接前仍必须原子
 获取租约，预检本身不占用会话号。
 
+预检后按 [运维就绪证据报告](operations-readiness-report.md) 使用
+`scripts\windows\export-readiness-evidence.ps1` 生成并离线验证 Windows 节点工件。不要
+复制控制台片段代替工件；报告为 `blocked` 时仍可归档，但退出码 2 必须阻止后续启动。
+
 ## 生成只读验收证据
 
 完成预检并确认 MiniQMT 已人工登录后，在 Windows 节点运行：
