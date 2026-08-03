@@ -1,6 +1,9 @@
 .env
 .env.*
 !.env.example
+*.private.pem
+*-private.pem
+evidence/
 .superpowers/
 .worktrees/
 .pytest_cache/

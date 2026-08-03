@@ -80,6 +80,39 @@ uv run autoquant operations-readiness-verify `
 验证会拒绝符号链接、非 UTF-8/超大/多余字段、被篡改的分区、失效安全字段和错误哈希。
 有效但仍阻断的工件同样返回 2；只有有效且没有阻断项的工件返回 0。
 
+上述 SHA-256 只能验证内容一致性，不能单独证明来源。首次部署时在受控 Windows 节点生成
+Ed25519 密钥对；私钥必须放在项目目录之外，且命令不会覆盖已有密钥：
+
+```powershell
+uv run autoquant operations-readiness-keygen `
+  --private-key "$env:USERPROFILE\.autoquant\keys\readiness.private.pem" `
+  --public-key "$env:USERPROFILE\.autoquant\keys\readiness.public.pem" `
+  --confirm-new-key
+```
+
+把命令输出的 `key_id` 和公钥通过独立可信渠道交给复核人并固定下来。私钥不得提交、复制
+到数据库或放入共享目录；Windows 上还必须用 NTFS ACL 限制为运行账户只读。轮换时生成
+新文件名和新 `key_id`，不能覆盖旧信任锚。
+
+导出后生成脱离式签名，并用预先固定的公钥验证来源、完整字节和 24 小时新鲜度：
+
+```powershell
+uv run autoquant operations-readiness-sign `
+  --input .\evidence\readiness-20260803.json `
+  --private-key "$env:USERPROFILE\.autoquant\keys\readiness.private.pem" `
+  --signature-output .\evidence\readiness-20260803.sig.json
+
+uv run autoquant operations-readiness-verify-signed `
+  --input .\evidence\readiness-20260803.json `
+  --signature .\evidence\readiness-20260803.sig.json `
+  --public-key <复核方固定的公钥路径> `
+  --max-age-hours 24
+```
+
+签名绑定原始 JSON 的精确字节、内部 `report_hash`、签名时间和公钥指纹。换行变化、重算
+内部哈希、替换公钥、错钥、未来时间或过期工件都会失败关闭。公钥必须预先固定；若把工件
+和攻击者自带的公钥一起接受，签名不提供来源保证。
+
 Windows QMT 节点应使用冻结环境包装器，避免命令执行时下载或更新依赖：
 
 ```powershell
@@ -87,14 +120,17 @@ Windows QMT 节点应使用冻结环境包装器，避免命令执行时下载�
   -ProjectPath (Resolve-Path .) `
   -UvPath "$env:USERPROFILE\.local\bin\uv.exe" `
   -OutputPath (Join-Path (Resolve-Path .\evidence) 'readiness-20260803.json') `
+  -SignatureOutputPath (Join-Path (Resolve-Path .\evidence) 'readiness-20260803.sig.json') `
+  -SigningPrivateKeyPath "$env:USERPROFILE\.autoquant\keys\readiness.private.pem" `
+  -SigningPublicKeyPath <复核方固定的公钥路径> `
   -CampaignHash <可选的数据活动哈希> `
   -WhatIf
 ```
 
 先检查 `-WhatIf` 输出，再去掉该参数。包装器要求 `.env` 明确包含
 `AQ_ENVIRONMENT=paper`、锁文件和 Windows 虚拟环境均存在，并只调用
-`uv run --frozen --no-sync autoquant operations-readiness-export`。它不运行 QMT 验收、补偿
-授权或任何券商接口。
+冻结的导出、Ed25519 签名和签名验真命令。三步状态和安全字段必须一致，包装器才输出最终
+摘要。它不运行 QMT 验收、补偿授权或任何券商接口。
 
 ## Windows 交接顺序
 

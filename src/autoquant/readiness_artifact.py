@@ -97,8 +97,10 @@ def validate_operations_readiness_artifact(payload: object) -> dict[str, object]
     return report
 
 
-def load_operations_readiness_artifact(path: Path) -> dict[str, object]:
-    """Load a bounded UTF-8 JSON artifact without accepting partial content."""
+def read_operations_readiness_artifact(
+    path: Path,
+) -> tuple[dict[str, object], bytes]:
+    """Read a bounded regular file once for validation and exact-byte signing."""
 
     if not path.is_file() or path.is_symlink():
         raise ValueError("operations readiness artifact file is invalid")
@@ -109,10 +111,17 @@ def load_operations_readiness_artifact(path: Path) -> dict[str, object]:
     if size < 2 or size > _MAXIMUM_ARTIFACT_BYTES:
         raise ValueError("operations readiness artifact file size is invalid")
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        encoded = path.read_bytes()
+        payload = json.loads(encoded.decode("utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError):
         raise ValueError("operations readiness artifact JSON is invalid") from None
-    return validate_operations_readiness_artifact(payload)
+    return validate_operations_readiness_artifact(payload), encoded
+
+
+def load_operations_readiness_artifact(path: Path) -> dict[str, object]:
+    """Load a bounded UTF-8 JSON artifact without accepting partial content."""
+
+    return read_operations_readiness_artifact(path)[0]
 
 
 def write_operations_readiness_artifact(

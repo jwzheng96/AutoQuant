@@ -104,6 +104,11 @@ from autoquant.readiness_artifact import (
     load_operations_readiness_artifact,
     write_operations_readiness_artifact,
 )
+from autoquant.readiness_signature import (
+    generate_readiness_signing_key_pair,
+    sign_operations_readiness_artifact,
+    verify_operations_readiness_signature,
+)
 from autoquant.web.models import (
     MomentumCandidateRequest,
     PortfolioWalkForwardJobRequest,
@@ -678,6 +683,105 @@ def operations_readiness_verify(
     except (OSError, ValueError):
         _fail("operations readiness artifact verification failed closed")
     _emit(_readiness_artifact_summary(artifact, artifact_written=False))
+    if artifact["status"] != "ready":
+        raise typer.Exit(code=2)
+
+
+@app.command("operations-readiness-keygen")
+def operations_readiness_keygen(
+    private_key: Annotated[Path, typer.Option("--private-key")],
+    public_key: Annotated[Path, typer.Option("--public-key")],
+    confirm_new_key: Annotated[
+        bool,
+        typer.Option("--confirm-new-key"),
+    ] = False,
+) -> None:
+    """Generate a non-overwriting Ed25519 readiness evidence trust anchor."""
+
+    if not confirm_new_key:
+        _fail("readiness signing key generation requires explicit confirmation")
+    try:
+        key_id = generate_readiness_signing_key_pair(private_key, public_key)
+    except (OSError, ValueError):
+        _fail("readiness signing key generation failed closed")
+    _emit(
+        {
+            "algorithm": "ed25519",
+            "broker_mutation_allowed": False,
+            "key_id": key_id,
+            "live_trading_locked": True,
+            "private_key_written": True,
+            "public_key_written": True,
+            "status": "created",
+        }
+    )
+
+
+@app.command("operations-readiness-sign")
+def operations_readiness_sign(
+    input_path: Annotated[Path, typer.Option("--input")],
+    private_key: Annotated[Path, typer.Option("--private-key")],
+    signature_output: Annotated[Path, typer.Option("--signature-output")],
+    replace: Annotated[bool, typer.Option("--replace")] = False,
+) -> None:
+    """Create a detached Ed25519 signature without exposing key material."""
+
+    try:
+        artifact, signature = sign_operations_readiness_artifact(
+            input_path,
+            private_key,
+            signature_output,
+            now=datetime.now(UTC),
+            replace=replace,
+        )
+    except (OSError, ValueError):
+        _fail("operations readiness artifact signing failed closed")
+    payload = _readiness_artifact_summary(artifact, artifact_written=False)
+    payload.update(
+        {
+            "algorithm": signature["algorithm"],
+            "key_id": signature["key_id"],
+            "signature_written": True,
+            "signed_at": signature["signed_at"],
+        }
+    )
+    _emit(payload)
+    if artifact["status"] != "ready":
+        raise typer.Exit(code=2)
+
+
+@app.command("operations-readiness-verify-signed")
+def operations_readiness_verify_signed(
+    input_path: Annotated[Path, typer.Option("--input")],
+    signature: Annotated[Path, typer.Option("--signature")],
+    public_key: Annotated[Path, typer.Option("--public-key")],
+    max_age_hours: Annotated[
+        int,
+        typer.Option("--max-age-hours", min=1, max=168),
+    ] = 24,
+) -> None:
+    """Verify a pinned signer, exact artifact bytes, and evidence freshness."""
+
+    try:
+        artifact, signature_payload = verify_operations_readiness_signature(
+            input_path,
+            signature,
+            public_key,
+            now=datetime.now(UTC),
+            maximum_age=timedelta(hours=max_age_hours),
+        )
+    except (OSError, ValueError):
+        _fail("signed operations readiness verification failed closed")
+    payload = _readiness_artifact_summary(artifact, artifact_written=False)
+    payload.update(
+        {
+            "algorithm": signature_payload["algorithm"],
+            "key_id": signature_payload["key_id"],
+            "signature_valid": True,
+            "signed_at": signature_payload["signed_at"],
+        }
+    )
+    _emit(payload)
     if artifact["status"] != "ready":
         raise typer.Exit(code=2)
 

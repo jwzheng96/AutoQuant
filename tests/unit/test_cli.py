@@ -12,6 +12,7 @@ from autoquant.cli import app
 from autoquant.data.models import _canonical_hash
 from autoquant.errors import MissingCapabilityError
 from autoquant.execution.qmt_preflight import QmtClockAttestation
+from autoquant.readiness_artifact import write_operations_readiness_artifact
 
 runner = CliRunner()
 MISSING_ENV = {
@@ -365,6 +366,101 @@ def test_operations_readiness_artifact_verification_rejects_tampering(
         "error": "operations readiness artifact verification failed closed",
         "status": "failed",
     }
+
+
+def test_operations_readiness_signing_commands_require_confirmation_and_pinned_key(
+    tmp_path: Path,
+) -> None:
+    sections = {
+        "paper_runtime": {"status": "unavailable"},
+        "paper_watchdog": {"status": "blocked"},
+        "promotion": {"status": "blocked"},
+        "qmt": {"status": "blocked"},
+    }
+    version = "operations-readiness-report-v1"
+    artifact = {
+        "blockers": ["qmt.windows_runtime"],
+        "broker_mutation_allowed": False,
+        "collection_started": False,
+        "generated_at": datetime.now(UTC).isoformat(),
+        "live_trading_locked": True,
+        "report_hash": _canonical_hash({"sections": sections, "version": version}),
+        "sections": sections,
+        "status": "blocked",
+        "storage_mutation_allowed": False,
+        "vendor_request_started": False,
+        "version": version,
+    }
+    artifact_path = tmp_path / "readiness.json"
+    private_key = tmp_path / "private.pem"
+    public_key = tmp_path / "public.pem"
+    signature = tmp_path / "readiness.sig.json"
+    write_operations_readiness_artifact(
+        artifact_path,
+        artifact,
+        replace=False,
+    )
+
+    denied = runner.invoke(
+        app,
+        [
+            "operations-readiness-keygen",
+            "--private-key",
+            str(private_key),
+            "--public-key",
+            str(public_key),
+        ],
+    )
+    assert denied.exit_code == 2
+    assert not private_key.exists()
+    created = runner.invoke(
+        app,
+        [
+            "operations-readiness-keygen",
+            "--private-key",
+            str(private_key),
+            "--public-key",
+            str(public_key),
+            "--confirm-new-key",
+        ],
+    )
+    signed = runner.invoke(
+        app,
+        [
+            "operations-readiness-sign",
+            "--input",
+            str(artifact_path),
+            "--private-key",
+            str(private_key),
+            "--signature-output",
+            str(signature),
+        ],
+    )
+    verified = runner.invoke(
+        app,
+        [
+            "operations-readiness-verify-signed",
+            "--input",
+            str(artifact_path),
+            "--signature",
+            str(signature),
+            "--public-key",
+            str(public_key),
+        ],
+    )
+
+    assert created.exit_code == 0
+    assert signed.exit_code == 2
+    assert verified.exit_code == 2
+    created_payload = json.loads(created.stdout)
+    signed_payload = json.loads(signed.stdout)
+    verified_payload = json.loads(verified.stdout)
+    assert created_payload["key_id"] == signed_payload["key_id"]
+    assert signed_payload["key_id"] == verified_payload["key_id"]
+    assert signed_payload["signature_written"] is True
+    assert verified_payload["signature_valid"] is True
+    assert "private.pem" not in created.stdout
+    assert "PRIVATE KEY" not in created.stdout
 
 
 def test_compliance_approval_requires_confirmation_and_is_redacted() -> None:

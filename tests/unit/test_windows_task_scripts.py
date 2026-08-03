@@ -72,8 +72,14 @@ def test_windows_readiness_export_is_frozen_redacted_and_fails_closed() -> None:
     assert "--frozen" in content
     assert "--no-sync" in content
     assert "ConvertFrom-Json" in content
-    assert "$nativeExitCode -notin @(0, 2)" in content
-    assert "$summary.artifact_written -ne $true" in content
+    assert "$exportExitCode -notin @(0, 2)" in content
+    assert "$exportSummary.artifact_written -ne $true" in content
+    assert "operations-readiness-sign" in content
+    assert "$signSummary.signature_written -ne $true" in content
+    assert "operations-readiness-verify-signed" in content
+    assert "$verifySummary.signature_valid -ne $true" in content
+    assert "$verifySummary.key_id -ne $signSummary.key_id" in content
+    assert "$verifySummary.report_hash -ne $exportSummary.report_hash" in content
     assert "storage_mutation_allowed = $false" in content
     assert "broker_mutation_allowed = $false" in content
     assert "vendor_request_started = $false" in content
