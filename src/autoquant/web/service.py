@@ -59,7 +59,11 @@ from autoquant.execution.store import PostgresPaperExecutionRepository
 from autoquant.execution.validated_sma_portfolio import (
     ValidatedSmaPortfolioRegistration,
 )
-from autoquant.operations import run_daily_ingestion
+from autoquant.operations import (
+    _research_data_campaign_retry_plan_payload,
+    authorize_research_data_campaign_retry_plan,
+    run_daily_ingestion,
+)
 from autoquant.web.backtest_store import PostgresBacktestRepository
 from autoquant.web.fundamental_validation_store import (
     FundamentalValidationIndexRecord,
@@ -117,6 +121,9 @@ from autoquant.web.models import (
     QmtBrokerTradeView,
     QmtOperationsStatus,
     QmtReadOnlyStatus,
+    ResearchDataRetryPlanAuthorizationRequest,
+    ResearchDataRetryPlanAuthorizationView,
+    ResearchDataRetryPlanView,
     ResearchManifest,
     ResearchUniverseSnapshotDetail,
     ResearchUniverseSnapshotView,
@@ -152,6 +159,7 @@ from autoquant.web.validation_store import (
 )
 
 IngestionRunner = Callable[[AppSettings, tuple[str, ...], date, date], Awaitable[dict[str, object]]]
+RetryPlanAuthorizer = Callable[..., Awaitable[dict[str, object]]]
 _QMT_ACCEPTANCE_MAX_AGE = timedelta(hours=24)
 
 
@@ -255,6 +263,18 @@ class ConsoleServicePort(Protocol):
         self,
     ) -> LowVolatilityForwardProgressView: ...
 
+    async def research_data_retry_plan(
+        self, *, campaign_hash: str
+    ) -> ResearchDataRetryPlanView: ...
+
+    async def authorize_research_data_retry_plan(
+        self,
+        request: ResearchDataRetryPlanAuthorizationRequest,
+        *,
+        campaign_hash: str,
+        authorized_by: str,
+    ) -> ResearchDataRetryPlanAuthorizationView: ...
+
     async def risk_status(self) -> RiskControlStatus: ...
 
     async def execution_status(self) -> PaperExecutionStatus: ...
@@ -333,6 +353,9 @@ class ConsoleService:
         qmt_operations_repository: PostgresQmtOperationsRepository | None = None,
         promotion_repository: (PostgresPaperPromotionFactRepository | None) = None,
         ingestion_runner: IngestionRunner = run_daily_ingestion,
+        retry_plan_authorizer: RetryPlanAuthorizer = (
+            authorize_research_data_campaign_retry_plan
+        ),
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
         poll_interval: float = 1.0,
     ) -> None:
@@ -393,6 +416,7 @@ class ConsoleService:
         self._qmt_operations = qmt_operations_repository
         self._promotion = promotion_repository
         self._ingestion_runner = ingestion_runner
+        self._retry_plan_authorizer = retry_plan_authorizer
         self._now = now
         self._poll_interval = poll_interval
         self._wake = asyncio.Event()
@@ -1154,6 +1178,34 @@ class ConsoleService:
                 for record in records
             ),
         )
+
+    async def research_data_retry_plan(
+        self,
+        *,
+        campaign_hash: str,
+    ) -> ResearchDataRetryPlanView:
+        if self._research_data_campaigns is None:
+            raise LookupError("research data retry planning is unavailable")
+        status = await self._research_data_campaigns.status(
+            campaign_hash=campaign_hash,
+        )
+        payload = _research_data_campaign_retry_plan_payload(status)
+        return ResearchDataRetryPlanView.model_validate(payload)
+
+    async def authorize_research_data_retry_plan(
+        self,
+        request: ResearchDataRetryPlanAuthorizationRequest,
+        *,
+        campaign_hash: str,
+        authorized_by: str,
+    ) -> ResearchDataRetryPlanAuthorizationView:
+        payload = await self._retry_plan_authorizer(
+            self._settings,
+            campaign_hash=campaign_hash,
+            retry_plan_hash=request.retry_plan_hash,
+            authorized_by=authorized_by,
+        )
+        return ResearchDataRetryPlanAuthorizationView.model_validate(payload)
 
     async def risk_status(self) -> RiskControlStatus:
         if self._risk is None:

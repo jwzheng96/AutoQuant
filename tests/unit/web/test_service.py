@@ -22,6 +22,7 @@ from autoquant.execution.validated_sma import ValidatedSmaRegistration
 from autoquant.execution.validated_sma_portfolio import (
     ValidatedSmaPortfolioRegistration,
 )
+from autoquant.operations import authorize_research_data_campaign_retry_plan
 from autoquant.web.models import (
     BacktestRun,
     BacktestRunRequest,
@@ -33,6 +34,7 @@ from autoquant.web.models import (
     PortfolioValidationExperiment,
     PortfolioWalkForwardJobRequest,
     QmtReadOnlyStatus,
+    ResearchDataRetryPlanAuthorizationRequest,
     RiskControlStatus,
     ValidationExperiment,
     WalkForwardJobRequest,
@@ -88,6 +90,7 @@ def _service(
     compatibility_runs: MagicMock | None = None,
     low_volatility_deployment: MagicMock | None = None,
     research_data_campaigns: MagicMock | None = None,
+    retry_plan_authorizer: AsyncMock | None = None,
     market: MagicMock | None = None,
     now: datetime = NOW,
 ) -> ConsoleService:
@@ -120,6 +123,11 @@ def _service(
         low_volatility_compatibility_run_repository=(compatibility_runs),
         low_volatility_deployment_reader=(low_volatility_deployment),
         research_data_campaign_repository=(research_data_campaigns),
+        retry_plan_authorizer=(
+            authorize_research_data_campaign_retry_plan
+            if retry_plan_authorizer is None
+            else retry_plan_authorizer
+        ),
         now=lambda: now,
         poll_interval=0.01,
     )
@@ -261,6 +269,74 @@ async def test_forward_progress_exposes_missing_sessions_and_keeps_locks() -> No
     assert progress.deployment_contract_status == "not_frozen"
     assert progress.ready_for_runtime is False
     assert progress.live_trading_locked is True
+
+
+@pytest.mark.asyncio
+async def test_retry_plan_preview_and_authorization_are_hash_bound_and_nonexecuting() -> None:
+    campaign_hash = "a" * 64
+    research_data_campaigns = MagicMock()
+    research_data_campaigns.status = AsyncMock(
+        return_value=SimpleNamespace(
+            spec=SimpleNamespace(
+                campaign_hash=campaign_hash,
+                campaign_key="low-vol-forward:aaaaaaaaaaaaaaaa:20260724",
+            ),
+            items=(
+                SimpleNamespace(
+                    sequence=1,
+                    instrument="000001.XSHE",
+                    state="failed",
+                    attempts=1,
+                    max_attempts=3,
+                    error_code="daily_quality_rejected",
+                ),
+            ),
+        )
+    )
+    authorizer = AsyncMock()
+    service = _service(
+        operator=MagicMock(),
+        control=MagicMock(),
+        runner=AsyncMock(),
+        research_data_campaigns=research_data_campaigns,
+        retry_plan_authorizer=authorizer,
+    )
+
+    plan = await service.research_data_retry_plan(campaign_hash=campaign_hash)
+    authorizer.return_value = {
+        "authorized_plan_hash": plan.plan_hash,
+        "campaign_hash": campaign_hash,
+        "live_trading_locked": True,
+        "requeued_item_count": 1,
+        "status": "queued",
+    }
+    authorization = await service.authorize_research_data_retry_plan(
+        ResearchDataRetryPlanAuthorizationRequest(
+            retry_plan_hash=plan.plan_hash,
+            confirm_full_plan_retry=True,
+        ),
+        campaign_hash=campaign_hash,
+        authorized_by="operator",
+    )
+
+    assert plan.retry_authorization_required is True
+    assert plan.vendor_request_started is False
+    assert plan.collection_started is False
+    assert plan.live_trading_locked is True
+    assert authorization.requeued_item_count == 1
+    assert authorization.vendor_request_started is False
+    assert authorization.collection_started is False
+    assert authorization.broker_mutation_allowed is False
+    assert authorization.live_trading_locked is True
+    research_data_campaigns.status.assert_awaited_once_with(
+        campaign_hash=campaign_hash,
+    )
+    authorizer.assert_awaited_once_with(
+        service._settings,
+        campaign_hash=campaign_hash,
+        retry_plan_hash=plan.plan_hash,
+        authorized_by="operator",
+    )
 
 
 @pytest.mark.asyncio

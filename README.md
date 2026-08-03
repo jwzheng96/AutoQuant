@@ -83,6 +83,10 @@ For campaigns with many failed shards,
 confirmation flag. It records one plan-level authorization and requeues the complete bound set
 in a single PostgreSQL transaction; a stale or non-retryable item rolls back the entire set.
 Authorization never calls the data vendor or starts a collector, and live trading stays locked.
+The authenticated research console exposes the exact plan and failed-item hashes read-only.
+Its authorization form additionally requires CSRF validation, the authenticated operator
+identity, a true full-plan confirmation and a manually pasted current plan hash. A successful
+browser request still only requeues the bound shards; collection remains a separate operation.
 Each worker batch also holds a PostgreSQL session advisory lock keyed by campaign hash. A second
 host reports `collector_busy` without claiming a shard or calling the vendor; the lock is
 automatically released when its database connection closes, including process termination.

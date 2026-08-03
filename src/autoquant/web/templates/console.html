@@ -227,6 +227,23 @@
             </div>
             <div class="table-wrap"><table><thead><tr><th>交易日</th><th>股票池日</th><th>标的数</th><th>完成时间</th><th>绑定哈希</th><th>数据清单</th></tr></thead><tbody id="low-volatility-forward-sessions-table"></tbody></table></div>
           </article>
+          <section id="research-data-retry-plan" class="research-detail" hidden>
+            <article class="panel">
+              <div class="panel-title"><div><p class="eyebrow">HASH-BOUND RECOVERY</p><h3>失败分片重试计划</h3></div><span class="pill warning">只授权，不启动采集</span></div>
+              <p class="form-help">计划绑定每个失败分片的序号、标的、错误和尝试次数。必须手工粘贴完整计划哈希；任一分片状态变化都会拒绝或回滚整批操作。该操作不会调用 Tushare，也不会改变模拟盘或实盘锁。</p>
+              <dl class="summary-list">
+                <div><dt>采集活动</dt><dd id="research-data-retry-campaign">—</dd></div>
+                <div><dt>计划哈希</dt><dd id="research-data-retry-plan-hash">—</dd></div>
+                <div><dt>可重试/失败</dt><dd id="research-data-retry-count">—</dd></div>
+              </dl>
+              <div class="table-wrap"><table><thead><tr><th>#</th><th>标的</th><th>错误</th><th>已尝试</th><th>当前上限</th><th>授权后上限</th><th>分片哈希</th></tr></thead><tbody id="research-data-retry-items"></tbody></table></div>
+              <form id="research-data-retry-form" class="research-form">
+                <label>手工粘贴完整计划哈希<input id="research-data-retry-confirm-hash" type="text" minlength="64" maxlength="64" autocomplete="off" required></label>
+                <label class="check-label"><input id="research-data-retry-confirm" type="checkbox" required>确认整份计划，仅重新排队</label>
+                <button class="secondary-button" type="submit">授权整份计划</button>
+              </form>
+            </article>
+          </section>
           <div class="section-heading research-section-heading"><div><p class="eyebrow">CROSS-SECTIONAL PORTFOLIO</p><h2>组合级嵌套走步验证</h2></div><button id="refresh-portfolio-validations" class="secondary-button" type="button">刷新组合实验</button></div>
           <article class="panel">
             <form id="portfolio-validation-form" class="research-form">

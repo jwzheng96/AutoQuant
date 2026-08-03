@@ -4,7 +4,7 @@ import re
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from enum import StrEnum
-from typing import Self
+from typing import Literal, Self
 from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -855,6 +855,74 @@ class LowVolatilityForwardProgressView(BaseModel):
         ):
             raise ValueError("low-volatility forward progress is inconsistent")
         return self
+
+
+class ResearchDataRetryItemView(BaseModel):
+    sequence: int = Field(ge=1)
+    instrument: str = Field(pattern=r"^[0-9]{6}\.(?:XSHG|XSHE)$")
+    error_code: str = Field(min_length=1, max_length=80)
+    attempts: int = Field(ge=0)
+    max_attempts: int = Field(ge=1, le=10)
+    next_max_attempts: int | None = Field(default=None, ge=1, le=10)
+    retryable: bool
+    retry_item_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def require_retry_item_consistency(self) -> Self:
+        if self.retryable != (self.next_max_attempts is not None):
+            raise ValueError("research data retry item is inconsistent")
+        if self.next_max_attempts is not None and self.next_max_attempts <= self.max_attempts:
+            raise ValueError("research data retry attempt ceiling must increase")
+        return self
+
+
+class ResearchDataRetryPlanView(BaseModel):
+    version: Literal["research-data-retry-plan-v1"]
+    status: Literal["retry_authorization_required", "no_failed_items"]
+    campaign_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    campaign_key: str
+    plan_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    failed_item_count: int = Field(ge=0)
+    retryable_item_count: int = Field(ge=0)
+    blocked_item_count: int = Field(ge=0)
+    failed_items: tuple[ResearchDataRetryItemView, ...]
+    retry_authorization_required: bool
+    vendor_request_started: Literal[False] = False
+    collection_started: Literal[False] = False
+    live_trading_locked: Literal[True] = True
+
+    @model_validator(mode="after")
+    def require_retry_plan_consistency(self) -> Self:
+        sequences = tuple(value.sequence for value in self.failed_items)
+        if (
+            sequences != tuple(sorted(sequences))
+            or len(set(sequences)) != len(sequences)
+            or self.failed_item_count != len(self.failed_items)
+            or self.retryable_item_count != sum(value.retryable for value in self.failed_items)
+            or self.blocked_item_count
+            != self.failed_item_count - self.retryable_item_count
+            or self.retry_authorization_required != bool(self.failed_items)
+            or (self.status == "retry_authorization_required")
+            != self.retry_authorization_required
+        ):
+            raise ValueError("research data retry plan view is inconsistent")
+        return self
+
+
+class ResearchDataRetryPlanAuthorizationRequest(BaseModel):
+    retry_plan_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    confirm_full_plan_retry: Literal[True]
+
+
+class ResearchDataRetryPlanAuthorizationView(BaseModel):
+    campaign_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    authorized_plan_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    requeued_item_count: int = Field(ge=1)
+    status: Literal["queued", "running", "completed", "failed"]
+    vendor_request_started: Literal[False] = False
+    collection_started: Literal[False] = False
+    broker_mutation_allowed: Literal[False] = False
+    live_trading_locked: Literal[True] = True
 
 
 class MomentumCandidateRequest(BaseModel):

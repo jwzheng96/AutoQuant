@@ -85,6 +85,7 @@ from autoquant.web.models import (
     DailyIngestionJobRequest,
     KillSwitchActivationRequest,
     PortfolioWalkForwardJobRequest,
+    ResearchDataRetryPlanAuthorizationRequest,
     WalkForwardJobRequest,
 )
 from autoquant.web.portfolio_validation_store import (
@@ -440,6 +441,51 @@ def create_app(
                 detail="low-volatility forward progress not found",
             ) from None
         return progress.model_dump(mode="json")
+
+    @app.get("/api/v1/research-data-campaigns/{campaign_hash}/retry-plan")
+    async def research_data_retry_plan(
+        request: Request,
+        campaign_hash: Annotated[str, ApiPath(pattern=r"^[0-9a-f]{64}$")],
+        _: str = Depends(authenticated_user),
+    ) -> dict[str, object]:
+        try:
+            plan = await active_service(request).research_data_retry_plan(
+                campaign_hash=campaign_hash,
+            )
+        except LookupError:
+            raise HTTPException(
+                status_code=404,
+                detail="research data retry plan not found",
+            ) from None
+        return plan.model_dump(mode="json")
+
+    @app.post("/api/v1/research-data-campaigns/{campaign_hash}/retry-plan/authorize")
+    async def authorize_research_data_retry_plan(
+        request: Request,
+        campaign_hash: Annotated[str, ApiPath(pattern=r"^[0-9a-f]{64}$")],
+        payload: ResearchDataRetryPlanAuthorizationRequest,
+        user: str = Depends(authenticated_user),
+        _: None = Depends(csrf_protected),
+    ) -> dict[str, object]:
+        try:
+            authorization = await active_service(
+                request
+            ).authorize_research_data_retry_plan(
+                payload,
+                campaign_hash=campaign_hash,
+                authorized_by=user,
+            )
+        except LookupError:
+            raise HTTPException(
+                status_code=404,
+                detail="research data retry plan not found",
+            ) from None
+        except ValueError:
+            raise HTTPException(
+                status_code=409,
+                detail="research data retry plan is stale or invalid",
+            ) from None
+        return authorization.model_dump(mode="json")
 
     @app.get("/api/v1/portfolio-validations")
     async def portfolio_validations(

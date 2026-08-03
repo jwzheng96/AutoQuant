@@ -37,6 +37,10 @@ from autoquant.web.models import (
     PromotionGateView,
     QmtOperationsStatus,
     QmtReadOnlyStatus,
+    ResearchDataRetryItemView,
+    ResearchDataRetryPlanAuthorizationRequest,
+    ResearchDataRetryPlanAuthorizationView,
+    ResearchDataRetryPlanView,
     ResearchManifest,
     RiskControlStatus,
     ValidationCampaignComponentView,
@@ -61,6 +65,9 @@ class FakeConsoleService:
         self.fundamental_result_hash = "f" * 64
         self.low_volatility_result_hash = "1" * 64
         self.kill_switch_activations: list[tuple[str, str, str]] = []
+        self.retry_plan_authorizations: list[
+            tuple[str, str, str]
+        ] = []
 
     async def start(self) -> None:
         self.started = True
@@ -319,6 +326,54 @@ class FakeConsoleService:
             calendar_conflict_dates=(),
             status="collecting_forward_sessions",
             sessions=(session,),
+        )
+
+    async def research_data_retry_plan(
+        self,
+        *,
+        campaign_hash: str,
+    ) -> ResearchDataRetryPlanView:
+        return ResearchDataRetryPlanView(
+            version="research-data-retry-plan-v1",
+            status="retry_authorization_required",
+            campaign_hash=campaign_hash,
+            campaign_key="low-vol-forward:9999999999999999:20260724",
+            plan_hash="b" * 64,
+            failed_item_count=1,
+            retryable_item_count=1,
+            blocked_item_count=0,
+            failed_items=(
+                ResearchDataRetryItemView(
+                    sequence=1,
+                    instrument="000001.XSHE",
+                    error_code="daily_quality_rejected",
+                    attempts=1,
+                    max_attempts=3,
+                    next_max_attempts=6,
+                    retryable=True,
+                    retry_item_hash="c" * 64,
+                ),
+            ),
+            retry_authorization_required=True,
+        )
+
+    async def authorize_research_data_retry_plan(
+        self,
+        request: ResearchDataRetryPlanAuthorizationRequest,
+        *,
+        campaign_hash: str,
+        authorized_by: str,
+    ) -> ResearchDataRetryPlanAuthorizationView:
+        if request.retry_plan_hash != "b" * 64:
+            raise ValueError("stale retry plan")
+        self.retry_plan_authorizations.append(
+            (campaign_hash, request.retry_plan_hash, authorized_by)
+        )
+        return ResearchDataRetryPlanAuthorizationView(
+            campaign_hash=campaign_hash,
+            authorized_plan_hash=request.retry_plan_hash,
+            requeued_item_count=1,
+            status="queued",
         )
 
     def _low_volatility_summary(
@@ -692,6 +747,72 @@ def test_low_volatility_forward_progress_is_authenticated_and_locked() -> None:
     assert "low-volatility-forward-compatibility" in research.text
     assert "low-volatility-forward-deployment" in research.text
     assert "low-volatility-forward-signal" in research.text
+
+
+def test_research_data_retry_plan_requires_auth_csrf_confirmation_and_current_hash() -> None:
+    service = FakeConsoleService()
+    app = create_app(_settings(), service=service)
+    campaign_hash = "a" * 64
+    path = f"/api/v1/research-data-campaigns/{campaign_hash}/retry-plan"
+
+    with TestClient(app) as client:
+        denied = client.get(path)
+        plan = client.get(path, auth=_auth())
+        page = client.get("/research", auth=_auth())
+        match = re.search(r'name="autoquant-csrf" content="([^"]+)"', page.text)
+        assert match is not None
+        missing_confirmation = client.post(
+            f"{path}/authorize",
+            auth=_auth(),
+            headers={"X-AutoQuant-CSRF": match.group(1)},
+            json={"retry_plan_hash": "b" * 64},
+        )
+        missing_csrf = client.post(
+            f"{path}/authorize",
+            auth=_auth(),
+            json={
+                "retry_plan_hash": "b" * 64,
+                "confirm_full_plan_retry": True,
+            },
+        )
+        stale = client.post(
+            f"{path}/authorize",
+            auth=_auth(),
+            headers={"X-AutoQuant-CSRF": match.group(1)},
+            json={
+                "retry_plan_hash": "d" * 64,
+                "confirm_full_plan_retry": True,
+            },
+        )
+        authorized = client.post(
+            f"{path}/authorize",
+            auth=_auth(),
+            headers={"X-AutoQuant-CSRF": match.group(1)},
+            json={
+                "retry_plan_hash": "b" * 64,
+                "confirm_full_plan_retry": True,
+            },
+        )
+
+    assert denied.status_code == 401
+    assert plan.status_code == 200
+    assert plan.json()["plan_hash"] == "b" * 64
+    assert plan.json()["vendor_request_started"] is False
+    assert plan.json()["collection_started"] is False
+    assert plan.json()["live_trading_locked"] is True
+    assert missing_confirmation.status_code == 422
+    assert missing_csrf.status_code == 403
+    assert stale.status_code == 409
+    assert authorized.status_code == 200
+    assert authorized.json()["requeued_item_count"] == 1
+    assert authorized.json()["vendor_request_started"] is False
+    assert authorized.json()["collection_started"] is False
+    assert authorized.json()["broker_mutation_allowed"] is False
+    assert authorized.json()["live_trading_locked"] is True
+    assert service.retry_plan_authorizations == [
+        (campaign_hash, "b" * 64, "operator")
+    ]
+    assert "research-data-retry-form" in page.text
 
 
 def test_trading_endpoint_is_explicitly_unavailable() -> None:

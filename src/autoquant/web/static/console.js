@@ -897,6 +897,88 @@ async function loadLowVolatilityValidations() {
   }
 }
 
+async function loadResearchDataRetryPlan(campaignHash) {
+  const host = document.getElementById("research-data-retry-plan");
+  try {
+    const plan = await requestJson(
+      `/api/v1/research-data-campaigns/${campaignHash}/retry-plan`,
+    );
+    host.hidden = !plan.retry_authorization_required;
+    if (host.hidden) return;
+    host.dataset.campaignHash = plan.campaign_hash;
+    host.dataset.planHash = plan.plan_hash;
+    setText("research-data-retry-campaign", plan.campaign_hash);
+    setText("research-data-retry-plan-hash", plan.plan_hash);
+    setText(
+      "research-data-retry-count",
+      `${plan.retryable_item_count}/${plan.failed_item_count}`,
+    );
+    const table = document.getElementById("research-data-retry-items");
+    table.replaceChildren();
+    plan.failed_items.forEach(item => {
+      const row = document.createElement("tr");
+      [
+        item.sequence,
+        item.instrument,
+        item.error_code,
+        item.attempts,
+        item.max_attempts,
+        item.next_max_attempts ?? "不可重试",
+        `${item.retry_item_hash.slice(0, 12)}…`,
+      ].forEach((value, index) => {
+        const cell = document.createElement("td");
+        cell.textContent = value;
+        if (index === 6) cell.title = item.retry_item_hash;
+        row.append(cell);
+      });
+      table.append(row);
+    });
+  } catch (error) {
+    host.hidden = true;
+    showToast(`重试计划读取失败：${error.message}`);
+  }
+}
+
+async function authorizeResearchDataRetryPlan(event) {
+  event.preventDefault();
+  const host = document.getElementById("research-data-retry-plan");
+  const suppliedHash = document.getElementById(
+    "research-data-retry-confirm-hash",
+  ).value.trim();
+  const confirmed = document.getElementById(
+    "research-data-retry-confirm",
+  ).checked;
+  if (!confirmed || suppliedHash !== host.dataset.planHash) {
+    showToast("必须手工粘贴当前完整计划哈希并勾选确认");
+    return;
+  }
+  if (!window.confirm("仅授权整份失败分片重新排队，不启动采集。继续？")) {
+    return;
+  }
+  try {
+    const result = await requestJson(
+      `/api/v1/research-data-campaigns/${host.dataset.campaignHash}/retry-plan/authorize`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-AutoQuant-CSRF": csrf,
+        },
+        body: JSON.stringify({
+          retry_plan_hash: suppliedHash,
+          confirm_full_plan_retry: true,
+        }),
+      },
+    );
+    document.getElementById("research-data-retry-confirm-hash").value = "";
+    document.getElementById("research-data-retry-confirm").checked = false;
+    showToast(`已重新排队 ${result.requeued_item_count} 个分片；采集尚未启动`);
+    await loadLowVolatilityForwardProgress();
+  } catch (error) {
+    showToast(`重试计划授权失败：${error.message}`);
+  }
+}
+
 async function loadLowVolatilityForwardProgress() {
   try {
     const progress = await requestJson(
@@ -980,6 +1062,15 @@ async function loadLowVolatilityForwardProgress() {
             } / 运行 ${progress.collection_running_items}`
           : "当前目标尚无采集队列",
     );
+    const retryHost = document.getElementById("research-data-retry-plan");
+    if (
+      progress.retry_authorization_required
+      && progress.collection_campaign_hash
+    ) {
+      await loadResearchDataRetryPlan(progress.collection_campaign_hash);
+    } else {
+      retryHost.hidden = true;
+    }
     const compatibilityLabels = {
       not_configured: "服务未配置",
       not_preregistered: "尚未预注册",
@@ -1310,6 +1401,10 @@ if (page === "/") {
   document.getElementById(
     "refresh-low-volatility-forward",
   ).addEventListener("click", loadLowVolatilityForwardProgress);
+  document.getElementById("research-data-retry-form").addEventListener(
+    "submit",
+    authorizeResearchDataRetryPlan,
+  );
   document.getElementById("refresh-validations").addEventListener(
     "click",
     () => Promise.all([loadValidations(), loadValidationCampaigns()]),

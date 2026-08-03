@@ -54,7 +54,7 @@ main { min-width: 0; }
 .summary-list { margin: 18px 0 0; }
 .summary-list div { padding: 13px 0; border-top: 1px solid var(--line); display: flex; justify-content: space-between; }
 .summary-list dt { color: var(--muted); }
-.summary-list dd { margin: 0; font-variant-numeric: tabular-nums; }
+.summary-list dd { margin: 0; max-width: 70%; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; text-align: right; }
 .pill { display: inline-flex; padding: 6px 10px; border-radius: 999px; font-size: 11px; font-weight: 750; }
 .pill.neutral { color: #b6c5c1; background: #1c2926; }
 .pill.ok { color: var(--green); background: rgba(81,230,168,.1); }
