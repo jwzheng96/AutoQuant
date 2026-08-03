@@ -7,12 +7,44 @@ from pydantic import ValidationError
 
 from autoquant.web.models import (
     DailyIngestionJobRequest,
+    LowVolatilityForwardProgressView,
     OperatorJob,
     OperatorJobState,
     PortfolioWalkForwardJobRequest,
 )
 
 MANIFEST_HASH = "a" * 64
+
+
+@pytest.mark.parametrize(
+    "campaign_status",
+    ("partially_completed", "awaiting_finalization"),
+)
+def test_forward_progress_accepts_nonterminal_campaign_states(
+    campaign_status: str,
+) -> None:
+    progress = LowVolatilityForwardProgressView(
+        spec_hash=MANIFEST_HASH,
+        forward_start_date=date(2026, 7, 23),
+        safe_cutoff_date=date(2026, 7, 24),
+        minimum_forward_sessions=126,
+        minimum_paper_sessions=60,
+        observed_open_sessions=2,
+        completed_sessions=0,
+        completed_required_sessions=0,
+        remaining_required_sessions=126,
+        missing_session_dates=(date(2026, 7, 23), date(2026, 7, 24)),
+        calendar_conflict_dates=(),
+        collection_campaign_hash="b" * 64,
+        collection_campaign_status=campaign_status,
+        collection_queued_items=275 if campaign_status == "partially_completed" else 0,
+        collection_completed_items=25 if campaign_status == "partially_completed" else 300,
+        status="backfill_required",
+        sessions=(),
+    )
+
+    assert progress.collection_campaign_status == campaign_status
+    assert progress.live_trading_locked is True
 
 
 def test_daily_ingestion_request_normalizes_and_limits_scope() -> None:

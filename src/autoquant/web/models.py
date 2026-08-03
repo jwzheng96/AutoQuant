@@ -721,7 +721,15 @@ class LowVolatilityForwardProgressView(BaseModel):
                 and not self.pending_availability_session_dates
             )
             or self.collection_campaign_status
-            not in {"not_created", "queued", "running", "completed", "failed"}
+            not in {
+                "not_created",
+                "queued",
+                "running",
+                "partially_completed",
+                "awaiting_finalization",
+                "completed",
+                "failed",
+            }
             or (
                 self.collection_campaign_hash is None
                 and self.collection_campaign_status != "not_created"

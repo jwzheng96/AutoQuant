@@ -1126,6 +1126,8 @@ async function loadLowVolatilityForwardProgress() {
       not_created: "尚未创建",
       queued: "排队中",
       running: "采集中",
+      partially_completed: "部分完成",
+      awaiting_finalization: "等待定稿",
       completed: "已完成",
       failed: "失败（需处理）",
     };
