@@ -34,6 +34,7 @@ from autoquant.execution.qmt_canary_contract import (
 )
 from autoquant.execution.qmt_canary_recovery import QmtCanaryRemarkRecovery
 from autoquant.execution.qmt_gateway import QmtCallbackKind
+from autoquant.execution.qmt_preflight import MAXIMUM_TRUSTED_CLOCK_ERROR
 from autoquant.execution.qmt_session_store import qmt_session_token_hash
 
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
@@ -159,7 +160,7 @@ class PostgresQmtCanaryOrderLedger:
                 assert lease_row is not None
                 candidate.require_current(now=lease_row["observed_at"])
                 if (
-                    proposed.staged_at > lease_row["observed_at"]
+                    proposed.staged_at > lease_row["observed_at"] + MAXIMUM_TRUSTED_CLOCK_ERROR
                     or lease_row["observed_at"] - proposed.staged_at
                     > _MAXIMUM_CANARY_PERSISTENCE_AGE
                 ):
@@ -236,9 +237,8 @@ class PostgresQmtCanaryOrderLedger:
                     .mappings()
                     .one()
                 )
-            if (
-                not _candidate_row_matches(stored_row, candidate)
-                or not _stage_row_matches(stored_row, proposed)
+            if not _candidate_row_matches(stored_row, candidate) or not _stage_row_matches(
+                stored_row, proposed
             ):
                 raise PersistenceUnavailableError(
                     "stored QMT canary candidate stage failed integrity verification"
@@ -254,9 +254,7 @@ class PostgresQmtCanaryOrderLedger:
         except PersistenceUnavailableError:
             raise
         except Exception:
-            raise PersistenceUnavailableError(
-                "QMT candidate stage persistence failed"
-            ) from None
+            raise PersistenceUnavailableError("QMT candidate stage persistence failed") from None
 
     async def reserve(
         self,
@@ -349,7 +347,7 @@ class PostgresQmtCanaryOrderLedger:
                     )
                 if (
                     proposed.reserved_at < staged.staged_at
-                    or proposed.reserved_at > lease_row["observed_at"]
+                    or proposed.reserved_at > lease_row["observed_at"] + MAXIMUM_TRUSTED_CLOCK_ERROR
                     or lease_row["observed_at"] - proposed.reserved_at
                     > _MAXIMUM_CANARY_PERSISTENCE_AGE
                 ):
@@ -437,9 +435,8 @@ class PostgresQmtCanaryOrderLedger:
                     .mappings()
                     .one()
                 )
-            if (
-                not _candidate_row_matches(stored_candidate, candidate)
-                or not _stage_row_matches(stored_candidate, staged)
+            if not _candidate_row_matches(stored_candidate, candidate) or not _stage_row_matches(
+                stored_candidate, staged
             ):
                 raise PersistenceUnavailableError(
                     "stored QMT canary candidate stage failed integrity verification"
@@ -480,9 +477,7 @@ class PostgresQmtCanaryOrderLedger:
     ) -> QmtOrderCorrelation:
         _require_nonblank(account_id, name="QMT canary account_id")
         if account_id != account_id.strip() or len(account_id) > 128:
-            raise ValueError(
-                "QMT canary account_id must be trimmed and at most 128 characters"
-            )
+            raise ValueError("QMT canary account_id must be trimmed and at most 128 characters")
         _require_nonblank(
             broker_order_remark,
             name="QMT broker_order_remark",
@@ -565,11 +560,7 @@ class PostgresQmtCanaryOrderLedger:
                                     FOR SHARE OF e, r
                                     """
                                 ),
-                                {
-                                    "callback_receipt_hash": (
-                                        callback_receipt_hash
-                                    )
-                                },
+                                {"callback_receipt_hash": (callback_receipt_hash)},
                             )
                         )
                         .mappings()
@@ -586,22 +577,16 @@ class PostgresQmtCanaryOrderLedger:
                     )
                     callback_payload = callback_event.callback.redacted_payload
                     if (
-                        callback_event.callback.kind
-                        is not QmtCallbackKind.ASYNC_ORDER_RESPONSE
+                        callback_event.callback.kind is not QmtCallbackKind.ASYNC_ORDER_RESPONSE
                         or callback_event.callback.account_id != account_id
-                        or callback_event.gateway_holder_id
-                        != gateway_holder_id
+                        or callback_event.gateway_holder_id != gateway_holder_id
                         or callback_event.qmt_session_id != qmt_session_id
-                        or callback_event.qmt_lease_generation
-                        != qmt_lease_generation
-                        or callback_event.callback.received_at
-                        < lease_row["acquired_at"]
+                        or callback_event.qmt_lease_generation != qmt_lease_generation
+                        or callback_event.callback.received_at < lease_row["acquired_at"]
                         or callback_event.callback.received_at != bound_at
                         or callback_payload.get("seq") != async_request_id
-                        or str(callback_payload.get("order_id"))
-                        != broker_order_id
-                        or callback_payload.get("order_remark")
-                        != broker_order_remark
+                        or str(callback_payload.get("order_id")) != broker_order_id
+                        or callback_payload.get("order_remark") != broker_order_remark
                     ):
                         raise BrokerStateUnknownError(
                             "QMT callback receipt conflicts with order identity"
@@ -657,7 +642,7 @@ class PostgresQmtCanaryOrderLedger:
                 )
                 if (
                     proposed.bound_at is None
-                    or proposed.bound_at > lease_row["observed_at"]
+                    or proposed.bound_at > lease_row["observed_at"] + MAXIMUM_TRUSTED_CLOCK_ERROR
                     or (
                         durable_receipt is None
                         and lease_row["observed_at"] - proposed.bound_at
@@ -964,9 +949,7 @@ class PostgresQmtCanaryOrderLedger:
         except PersistenceUnavailableError:
             raise
         except Exception:
-            raise PersistenceUnavailableError(
-                "QMT unresolved stage recovery failed"
-            ) from None
+            raise PersistenceUnavailableError("QMT unresolved stage recovery failed") from None
 
     async def bind_recovered_order(
         self,
@@ -1028,12 +1011,10 @@ class PostgresQmtCanaryOrderLedger:
                 assert lease_row is not None
                 observed_at = lease_row["observed_at"]
                 if (
-                    recovery.broker_session_date
-                    != observed_at.astimezone(SHANGHAI).date()
+                    recovery.broker_session_date != observed_at.astimezone(SHANGHAI).date()
                     or recovery.observed_at < lease_row["acquired_at"]
-                    or recovery.observed_at > observed_at
-                    or observed_at - recovery.observed_at
-                    > _MAXIMUM_CANARY_PERSISTENCE_AGE
+                    or recovery.observed_at > observed_at + MAXIMUM_TRUSTED_CLOCK_ERROR
+                    or observed_at - recovery.observed_at > _MAXIMUM_CANARY_PERSISTENCE_AGE
                 ):
                     raise BrokerStateUnknownError(
                         "QMT remark recovery requires a fresh same-lease baseline"
@@ -1108,9 +1089,7 @@ class PostgresQmtCanaryOrderLedger:
                     .all()
                 )
                 if any(_recovery_from_row(row) != recovery for row in recovery_rows):
-                    raise BrokerStateUnknownError(
-                        "QMT remark recovery identity conflicts"
-                    )
+                    raise BrokerStateUnknownError("QMT remark recovery identity conflicts")
                 await connection.execute(
                     text(
                         f"""
@@ -1162,8 +1141,7 @@ class PostgresQmtCanaryOrderLedger:
                 _recovery_from_row(stored_row) != recovery
                 or str(stored_row["recovery_holder_id"]) != gateway_holder_id
                 or int(stored_row["qmt_session_id"]) != qmt_session_id
-                or int(stored_row["recovery_lease_generation"])
-                != qmt_lease_generation
+                or int(stored_row["recovery_lease_generation"]) != qmt_lease_generation
             ):
                 raise PersistenceUnavailableError(
                     "stored QMT remark recovery failed integrity verification"
@@ -1179,9 +1157,7 @@ class PostgresQmtCanaryOrderLedger:
         except PersistenceUnavailableError:
             raise
         except Exception:
-            raise PersistenceUnavailableError(
-                "QMT remark recovery persistence failed"
-            ) from None
+            raise PersistenceUnavailableError("QMT remark recovery persistence failed") from None
 
     async def recovered_broker_mapping(
         self,
@@ -1233,10 +1209,7 @@ class PostgresQmtCanaryOrderLedger:
                         "QMT recovery mapping requires its matching active daily bearer lease"
                     )
                 assert lease_row is not None
-                if (
-                    broker_session_date
-                    != lease_row["observed_at"].astimezone(SHANGHAI).date()
-                ):
+                if broker_session_date != lease_row["observed_at"].astimezone(SHANGHAI).date():
                     raise BrokerStateUnknownError(
                         "QMT recovery mapping is available only for the current broker session"
                     )
@@ -1263,10 +1236,7 @@ class PostgresQmtCanaryOrderLedger:
                     .all()
                 )
             recoveries = tuple(_recovery_from_row(row) for row in rows)
-            return {
-                int(item.broker_order_id): item.client_order_id
-                for item in recoveries
-            }
+            return {int(item.broker_order_id): item.client_order_id for item in recoveries}
         except (
             TypeError,
             ValueError,
@@ -1277,9 +1247,7 @@ class PostgresQmtCanaryOrderLedger:
         except PersistenceUnavailableError:
             raise
         except Exception:
-            raise PersistenceUnavailableError(
-                "QMT recovery mapping read failed"
-            ) from None
+            raise PersistenceUnavailableError("QMT recovery mapping read failed") from None
 
 
 def _candidate_parameters(candidate: QmtCanaryOrderCandidate) -> dict[str, object]:
@@ -1377,9 +1345,7 @@ def _stage_from_row(row: RowMapping) -> QmtCanaryOrderStage:
         qmt_lease_generation=int(row["qmt_lease_generation"]),
         candidate_created_at=row["created_at"],
         candidate_valid_until=row["valid_until"],
-        broker_session_date=date.fromisoformat(
-            str(stage_payload["broker_session_date"])
-        ),
+        broker_session_date=date.fromisoformat(str(stage_payload["broker_session_date"])),
         instrument=str(stage_payload["instrument"]),
         side=OrderSide(str(stage_payload["side"])),
         quantity=int(stage_payload["quantity"]),
@@ -1388,10 +1354,7 @@ def _stage_from_row(row: RowMapping) -> QmtCanaryOrderStage:
         broker_order_remark=str(row["broker_order_remark"]),
         version=str(row["stage_version"]),
     )
-    if (
-        str(row["stage_hash"]) != stage.stage_hash
-        or stage_payload != stage.payload()
-    ):
+    if str(row["stage_hash"]) != stage.stage_hash or stage_payload != stage.payload():
         raise PersistenceUnavailableError(
             "restored QMT candidate stage failed integrity verification"
         )
@@ -1604,9 +1567,7 @@ def _recovery_from_row(row: RowMapping) -> QmtCanaryRemarkRecovery:
         or row["broker_mutation_allowed"] is not False
         or dict(row["payload"]) != recovery.payload()
     ):
-        raise PersistenceUnavailableError(
-            "QMT remark recovery row failed integrity verification"
-        )
+        raise PersistenceUnavailableError("QMT remark recovery row failed integrity verification")
     return recovery
 
 

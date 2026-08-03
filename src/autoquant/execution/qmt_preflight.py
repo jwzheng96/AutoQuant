@@ -15,7 +15,7 @@ from autoquant.config import AppSettings
 from autoquant.data.models import _canonical_hash, _datetime_text
 from autoquant.errors import BrokerStateUnknownError
 
-_MAX_CLOCK_ERROR = timedelta(seconds=2)
+MAXIMUM_TRUSTED_CLOCK_ERROR = timedelta(seconds=2)
 _MAX_CLOCK_ROUND_TRIP = timedelta(seconds=2)
 
 
@@ -104,35 +104,21 @@ class QmtClockAttestation:
     def trusted(self) -> bool:
         return (
             self.round_trip <= _MAX_CLOCK_ROUND_TRIP
-            and self.worst_case_error <= _MAX_CLOCK_ERROR
+            and self.worst_case_error <= MAXIMUM_TRUSTED_CLOCK_ERROR
         )
 
     def payload(self) -> dict[str, object]:
         return {
-            "database_observed_at": _datetime_text(
-                self.database_observed_at
-            ),
-            "estimated_offset_microseconds": _microseconds(
-                self.estimated_offset
-            ),
-            "max_clock_error_microseconds": _microseconds(
-                _MAX_CLOCK_ERROR
-            ),
-            "max_round_trip_microseconds": _microseconds(
-                _MAX_CLOCK_ROUND_TRIP
-            ),
-            "request_completed_at": _datetime_text(
-                self.request_completed_at
-            ),
-            "request_started_at": _datetime_text(
-                self.request_started_at
-            ),
+            "database_observed_at": _datetime_text(self.database_observed_at),
+            "estimated_offset_microseconds": _microseconds(self.estimated_offset),
+            "max_clock_error_microseconds": _microseconds(MAXIMUM_TRUSTED_CLOCK_ERROR),
+            "max_round_trip_microseconds": _microseconds(_MAX_CLOCK_ROUND_TRIP),
+            "request_completed_at": _datetime_text(self.request_completed_at),
+            "request_started_at": _datetime_text(self.request_started_at),
             "round_trip_microseconds": _microseconds(self.round_trip),
             "trusted": self.trusted,
             "version": "qmt-clock-attestation-v1",
-            "worst_case_error_microseconds": _microseconds(
-                self.worst_case_error
-            ),
+            "worst_case_error_microseconds": _microseconds(self.worst_case_error),
         }
 
     @classmethod
@@ -141,15 +127,9 @@ class QmtClockAttestation:
         payload: dict[str, object],
     ) -> QmtClockAttestation:
         value = cls(
-            request_started_at=datetime.fromisoformat(
-                str(payload["request_started_at"])
-            ),
-            database_observed_at=datetime.fromisoformat(
-                str(payload["database_observed_at"])
-            ),
-            request_completed_at=datetime.fromisoformat(
-                str(payload["request_completed_at"])
-            ),
+            request_started_at=datetime.fromisoformat(str(payload["request_started_at"])),
+            database_observed_at=datetime.fromisoformat(str(payload["database_observed_at"])),
+            request_completed_at=datetime.fromisoformat(str(payload["request_completed_at"])),
         )
         if payload != value.payload():
             raise ValueError("QMT clock attestation payload is invalid")
@@ -182,18 +162,12 @@ class QmtDatabaseClockVerifier:
             request_completed_at=completed_at,
         )
         if not attestation.trusted:
-            raise BrokerStateUnknownError(
-                "QMT host clock is outside the trusted PostgreSQL bound"
-            )
+            raise BrokerStateUnknownError("QMT host clock is outside the trusted PostgreSQL bound")
         return attestation
 
 
 def _microseconds(value: timedelta) -> int:
-    return (
-        value.days * 86_400_000_000
-        + value.seconds * 1_000_000
-        + value.microseconds
-    )
+    return value.days * 86_400_000_000 + value.seconds * 1_000_000 + value.microseconds
 
 
 @dataclass(frozen=True, slots=True)
@@ -260,10 +234,7 @@ def inspect_qmt_readiness(
         and active_session_ids is not None
         and session_id not in active_session_ids
     )
-    clock_trusted = (
-        clock_attestation is not None
-        and clock_attestation.trusted
-    )
+    clock_trusted = clock_attestation is not None and clock_attestation.trusted
 
     checks = (
         QmtReadinessCheck(
@@ -318,7 +289,7 @@ def inspect_qmt_readiness(
             session_unique,
             "QMT session identifier is not registered by another adapter"
             if session_unique
-                else "QMT session identifier is missing, unverified, or already active",
+            else "QMT session identifier is missing, unverified, or already active",
         ),
         QmtReadinessCheck(
             QmtReadinessCode.TRUSTED_CLOCK,

@@ -24,6 +24,7 @@ from autoquant.execution.qmt_callback_inbox import (
     replay_qmt_callback_inbox,
 )
 from autoquant.execution.qmt_gateway import QmtCallbackKind
+from autoquant.execution.qmt_preflight import MAXIMUM_TRUSTED_CLOCK_ERROR
 from autoquant.execution.qmt_session_store import qmt_session_token_hash
 
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
@@ -104,9 +105,7 @@ class PostgresQmtCallbackInbox:
             or not isinstance(version, int)
             or version < 41
         ):
-            raise PersistenceUnavailableError(
-                "QMT callback inbox schema v41 is unavailable"
-            )
+            raise PersistenceUnavailableError("QMT callback inbox schema v41 is unavailable")
 
     async def append(
         self,
@@ -226,9 +225,8 @@ class PostgresQmtCallbackInbox:
                     )
                     return existing
                 if (
-                    callback.received_at > observed_at
-                    or observed_at - callback.received_at
-                    > MAXIMUM_CALLBACK_PERSISTENCE_AGE
+                    callback.received_at > observed_at + MAXIMUM_TRUSTED_CLOCK_ERROR
+                    or observed_at - callback.received_at > MAXIMUM_CALLBACK_PERSISTENCE_AGE
                 ):
                     raise BrokerStateUnknownError(
                         "QMT callback inbox requires persistence within five seconds"
@@ -298,9 +296,7 @@ class PostgresQmtCallbackInbox:
                     ),
                     _event_parameters(event),
                 )
-                receipt_persisted_at = await connection.scalar(
-                    text("SELECT clock_timestamp()")
-                )
+                receipt_persisted_at = await connection.scalar(text("SELECT clock_timestamp()"))
                 receipt = QmtCallbackPersistenceReceipt(
                     event=event,
                     persisted_at=receipt_persisted_at,
@@ -396,9 +392,7 @@ class PostgresQmtCallbackInbox:
             qmt_lease_generation=event.qmt_lease_generation,
             lease_token=lease_token,
         )
-        matches = tuple(
-            item for item in durable_events if item.event_hash == event.event_hash
-        )
+        matches = tuple(item for item in durable_events if item.event_hash == event.event_hash)
         if len(matches) != 1 or matches[0] != event:
             raise BrokerStateUnknownError(
                 "QMT callback persistence receipt requires its exact durable event"
@@ -426,9 +420,7 @@ class PostgresQmtCallbackInbox:
                 "QMT callback persistence receipt read failed"
             ) from None
         if row is None:
-            raise PersistenceUnavailableError(
-                "QMT callback persistence receipt is missing"
-            )
+            raise PersistenceUnavailableError("QMT callback persistence receipt is missing")
         return qmt_callback_receipt_from_row(row, event=event)
 
     async def replay_current(

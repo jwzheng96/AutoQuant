@@ -78,6 +78,11 @@ see the full recovery debt without starting a collector.
 `research-data-campaign-retry-plan` additionally binds every failed sequence, instrument,
 failure code and attempt counter to an item hash. The explicit retry command requires that
 current hash and rejects stale authorization before changing queue state.
+For campaigns with many failed shards,
+`research-data-campaign-retry-plan-authorize` accepts the exact full-plan hash and a separate
+confirmation flag. It records one plan-level authorization and requeues the complete bound set
+in a single PostgreSQL transaction; a stale or non-retryable item rolls back the entire set.
+Authorization never calls the data vendor or starts a collector, and live trading stays locked.
 Each worker batch also holds a PostgreSQL session advisory lock keyed by campaign hash. A second
 host reports `collector_busy` without claiming a shard or calling the vendor; the lock is
 automatically released when its database connection closes, including process termination.
@@ -436,8 +441,11 @@ On an authorized Windows node, `autoquant qmt-readonly-accept` acquires a bounde
 session lease and persists only redacted schema v52 acceptance evidence after coherent
 asset, position, order, and trade queries. It does not persist the broker account identifier
 or expose any broker mutation method; live order submission and cancellation remain hard
-locked. The authenticated trading console displays only the latest evidence time and
-redacted record counts, current-host pass/blocked checks, and the remaining recovery gates.
+locked. Callback and canary persistence use the same two-second maximum trusted clock error
+as the PostgreSQL clock attestation, while retaining the independent five-second freshness
+limit; observations outside either bound fail closed. The authenticated trading console
+displays only the latest evidence time and redacted record counts, current-host pass/blocked
+checks, and the remaining recovery gates.
 Schema v18 adds bounded `qmt-drill-start` / `qmt-drill-complete` challenges for disconnect
 and MiniQMT-restart drills. Completion requires a post-start fail-closed control event and
 a distinct QMT acceptance captured after that failure; operator confirmation alone is not

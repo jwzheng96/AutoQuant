@@ -303,6 +303,7 @@ from autoquant.web.portfolio_validation_store import (
 )
 from autoquant.web.research_data_store import (
     PostgresResearchDataCampaignRepository,
+    ResearchDataCampaignRetryBinding,
     ResearchDataCampaignStatus,
 )
 from autoquant.web.strategy_promotion import (
@@ -815,9 +816,7 @@ async def inspect_research_data_campaign_retry_plan(
     """Compile a hash-bound, read-only plan for terminal shard recovery."""
 
     if settings.live_trading_enabled:
-        raise MissingCapabilityError(
-            "research data retry planning requires live trading locked"
-        )
+        raise MissingCapabilityError("research data retry planning requires live trading locked")
     repository = PostgresResearchDataCampaignRepository.connect(
         dsn=configured_dsn(
             settings.postgres_dsn,
@@ -1956,10 +1955,7 @@ async def run_low_volatility_forward_cycle(
             "minimum_forward_sessions": (forward.minimum_forward_sessions),
             "remaining_required_sessions": (forward.minimum_forward_sessions - completed_required),
             "safe_cutoff_date": safe_cutoff.isoformat(),
-            "pending_availability_session_dates": [
-                value.isoformat()
-                for value in pending_required
-            ],
+            "pending_availability_session_dates": [value.isoformat() for value in pending_required],
             "next_collection_eligible_at": (
                 None
                 if not pending_required or availability.next_eligible_at is None
@@ -2012,10 +2008,7 @@ async def run_low_volatility_forward_cycle(
         "status": "batch_progress",
     }
     batch_detail = batch.get("batch")
-    worker_busy = (
-        isinstance(batch_detail, dict)
-        and batch_detail.get("worker_busy") is True
-    )
+    worker_busy = isinstance(batch_detail, dict) and batch_detail.get("worker_busy") is True
     if worker_busy:
         payload["status"] = "collector_busy"
     elif batch["status"] == "completed" and isinstance(batch["manifest_hash"], str):
@@ -3083,23 +3076,15 @@ async def prepare_low_volatility_decision_time_signal(
         capability="PostgreSQL",
     )
     candidates = PostgresLowVolatilityPaperCandidateRepository.connect(dsn=dsn)
-    contracts = PostgresLowVolatilityPaperDeploymentContractRepository.connect(
-        dsn=dsn
-    )
-    compatibility_runs = (
-        PostgresLowVolatilityExecutionCompatibilityRunRepository.connect(
-            dsn=dsn
-        )
-    )
+    contracts = PostgresLowVolatilityPaperDeploymentContractRepository.connect(dsn=dsn)
+    compatibility_runs = PostgresLowVolatilityExecutionCompatibilityRunRepository.connect(dsn=dsn)
     observations = PostgresLowVolatilityPaperSignalRepository.connect(dsn=dsn)
     signals = PostgresLowVolatilityDecisionTimeSignalRepository.connect(dsn=dsn)
     executions = PostgresPaperExecutionRepository.connect(dsn=dsn)
     controls = PostgresExecutionControlRepository.connect(dsn=dsn)
     control = PostgresControlRepository.connect(dsn=dsn)
     try:
-        kill_switch = await controls.get(
-            account_id=settings.paper_account_id
-        )
+        kill_switch = await controls.get(account_id=settings.paper_account_id)
         if not kill_switch.active:
             raise MissingCapabilityError(
                 "decision-time signal requires the kill switch to remain active"
@@ -3120,29 +3105,19 @@ async def prepare_low_volatility_decision_time_signal(
                 existing,
                 status="stored",
             )
-        contract = await contracts.for_forward_spec(
-            candidate.forward_spec_hash
-        )
-        compatibility = await compatibility_runs.for_spec(
-            contract.compatibility_spec_hash
-        )
+        contract = await contracts.for_forward_spec(candidate.forward_spec_hash)
+        compatibility = await compatibility_runs.for_spec(contract.compatibility_spec_hash)
         observation = await observations.for_session(
             candidate_approval_hash=candidate.approval_hash,
             session_date=session_date,
         )
         if observation is None:
-            raise LookupError(
-                "low-volatility observation signal does not exist"
-            )
-        reconciliation = await executions.load_reconciliation_report(
-            reconciliation_report_hash
-        )
+            raise LookupError("low-volatility observation signal does not exist")
+        reconciliation = await executions.load_reconciliation_report(reconciliation_report_hash)
         internal_account = await executions.load_account_snapshot(
             reconciliation.internal_snapshot_hash
         )
-        broker_account = await executions.load_account_snapshot(
-            reconciliation.broker_snapshot_hash
-        )
+        broker_account = await executions.load_account_snapshot(reconciliation.broker_snapshot_hash)
         prepared_at = datetime.now(UTC)
         signal = LowVolatilityDecisionTimeSignalCompiler().compile(
             contract=contract,
@@ -3185,9 +3160,7 @@ def _low_volatility_decision_time_signal_payload(
     status: str,
 ) -> dict[str, object]:
     if not isinstance(signal, LowVolatilityDecisionTimePaperSignal):
-        raise TypeError(
-            "decision-time payload requires exact signal evidence"
-        )
+        raise TypeError("decision-time payload requires exact signal evidence")
     return {
         "account_evidence_at": signal.account_evidence_at.isoformat(),
         "account_id": signal.account_id,
@@ -3199,9 +3172,7 @@ def _low_volatility_decision_time_signal_payload(
         "live_trading_locked": True,
         "observation_signal_hash": signal.observation_signal_hash,
         "paper_activation_authority_granted": False,
-        "reconciliation_report_hash": (
-            signal.reconciliation_report_hash
-        ),
+        "reconciliation_report_hash": (signal.reconciliation_report_hash),
         "runtime_activation_allowed": False,
         "session_date": signal.session_date.isoformat(),
         "signal_hash": signal.signal_hash,
@@ -4252,8 +4223,7 @@ async def retry_research_data_campaign_item(
             (
                 value
                 for value in failed_items
-                if isinstance(value, dict)
-                and value.get("sequence") == sequence
+                if isinstance(value, dict) and value.get("sequence") == sequence
             ),
             None,
         )
@@ -4262,9 +4232,7 @@ async def retry_research_data_campaign_item(
             or selected.get("retry_item_hash") != retry_item_hash
             or selected.get("retryable") is not True
         ):
-            raise ValueError(
-                "research data retry item hash is stale or item is not retryable"
-            )
+            raise ValueError("research data retry item hash is stale or item is not retryable")
         await control.append_audit_event(
             "research.data.campaign.item.retry_authorized",
             datetime.now(UTC),
@@ -4290,6 +4258,80 @@ async def retry_research_data_campaign_item(
         )
         status = await repository.status(campaign_hash=campaign_hash)
         return _research_data_campaign_payload(status)
+    finally:
+        await control.close()
+        await repository.close()
+
+
+async def authorize_research_data_campaign_retry_plan(
+    settings: AppSettings,
+    *,
+    campaign_hash: str,
+    retry_plan_hash: str,
+    authorized_by: str,
+) -> dict[str, object]:
+    """Audit and atomically requeue every item in one exact retry plan."""
+
+    if settings.live_trading_enabled:
+        raise MissingCapabilityError(
+            "research data retry-plan authorization requires live trading locked"
+        )
+    _require_lowercase_sha256(retry_plan_hash, name="research data retry plan hash")
+    if (
+        not authorized_by.strip()
+        or authorized_by != authorized_by.strip()
+        or len(authorized_by) > 128
+    ):
+        raise ValueError("authorized_by must contain 1-128 trimmed characters")
+    dsn = configured_dsn(settings.postgres_dsn, capability="PostgreSQL")
+    repository = PostgresResearchDataCampaignRepository.connect(dsn=dsn)
+    control = PostgresControlRepository.connect(dsn=dsn)
+    try:
+        status_before = await repository.status(campaign_hash=campaign_hash)
+        plan = _research_data_campaign_retry_plan_payload(status_before)
+        if plan.get("plan_hash") != retry_plan_hash:
+            raise ValueError("research data retry plan hash is stale")
+        failed_items = plan.get("failed_items")
+        if not isinstance(failed_items, list) or not failed_items:
+            raise ValueError("research data retry plan contains no failed items")
+        if plan.get("blocked_item_count") != 0:
+            raise ValueError("research data retry plan contains non-retryable items")
+        bindings: list[ResearchDataCampaignRetryBinding] = []
+        item_hashes: list[str] = []
+        for value in failed_items:
+            if not isinstance(value, dict) or value.get("retryable") is not True:
+                raise ValueError("research data retry plan is invalid")
+            bindings.append(
+                ResearchDataCampaignRetryBinding(
+                    sequence=int(str(value["sequence"])),
+                    instrument=str(value["instrument"]),
+                    attempts=int(str(value["attempts"])),
+                    max_attempts=int(str(value["max_attempts"])),
+                    error_code=str(value["error_code"]),
+                )
+            )
+            item_hashes.append(str(value["retry_item_hash"]))
+        await control.append_audit_event(
+            "research.data.campaign.retry_plan.authorized",
+            datetime.now(UTC),
+            {
+                "additional_attempts": 3,
+                "authorized_by": authorized_by,
+                "campaign_hash": campaign_hash,
+                "item_count": len(bindings),
+                "retry_item_hashes": item_hashes,
+                "retry_plan_hash": retry_plan_hash,
+            },
+        )
+        requeued = await repository.retry_failed_items(
+            campaign_hash=campaign_hash,
+            expected_items=tuple(bindings),
+        )
+        status = await repository.status(campaign_hash=campaign_hash)
+        payload = _research_data_campaign_payload(status)
+        payload["authorized_plan_hash"] = retry_plan_hash
+        payload["requeued_item_count"] = len(requeued)
+        return payload
     finally:
         await control.close()
         await repository.close()
@@ -4340,8 +4382,7 @@ def _research_data_campaign_payload(
     }
     terminal_error_counts = {
         error_code: sum(
-            value.state == "failed" and value.error_code == error_code
-            for value in status.items
+            value.state == "failed" and value.error_code == error_code for value in status.items
         )
         for error_code in sorted(
             {
@@ -4398,9 +4439,7 @@ def _research_data_campaign_retry_plan_payload(
                 "instrument": item.instrument,
                 "max_attempts": item.max_attempts,
                 "next_max_attempts": (
-                    item.max_attempts + additional_attempts
-                    if retryable
-                    else None
+                    item.max_attempts + additional_attempts if retryable else None
                 ),
                 "retry_item_hash": _canonical_hash(binding),
                 "retryable": retryable,
@@ -4411,14 +4450,10 @@ def _research_data_campaign_retry_plan_payload(
         raise ValueError("failed research data items must be sequence-sorted")
     plan_binding = {
         "campaign_hash": status.spec.campaign_hash,
-        "failed_item_hashes": [
-            value["retry_item_hash"] for value in failed_items
-        ],
+        "failed_item_hashes": [value["retry_item_hash"] for value in failed_items],
         "version": "research-data-retry-plan-v1",
     }
-    retryable_item_count = sum(
-        value["retryable"] is True for value in failed_items
-    )
+    retryable_item_count = sum(value["retryable"] is True for value in failed_items)
     return {
         "blocked_item_count": len(failed_items) - retryable_item_count,
         "campaign_hash": status.spec.campaign_hash,
@@ -4429,11 +4464,7 @@ def _research_data_campaign_retry_plan_payload(
         "plan_hash": _canonical_hash(plan_binding),
         "retry_authorization_required": bool(failed_items),
         "retryable_item_count": retryable_item_count,
-        "status": (
-            "retry_authorization_required"
-            if failed_items
-            else "no_failed_items"
-        ),
+        "status": ("retry_authorization_required" if failed_items else "no_failed_items"),
         "version": "research-data-retry-plan-v1",
     }
 
@@ -5076,11 +5107,7 @@ async def enforce_paper_runtime_health(
             "live_trading_locked": True,
             "runtime_healthy": health.healthy,
             "runtime_state": health.state.value,
-            "status": (
-                "healthy"
-                if health.healthy
-                else "fail_closed"
-            ),
+            "status": ("healthy" if health.healthy else "fail_closed"),
             "trip_applied": trip_applied,
         }
     finally:

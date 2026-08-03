@@ -39,6 +39,7 @@ from autoquant.operations import (
     approve_low_volatility_paper_candidate,
     approve_paper_sma_portfolio_strategy,
     approve_paper_sma_strategy,
+    authorize_research_data_campaign_retry_plan,
     backfill_research_universe_snapshots,
     compile_dynamic_market_panel,
     compile_fundamental_research_panel,
@@ -349,9 +350,7 @@ async def _qmt_preflight_db_state(
         clock_started_at = datetime.now(UTC)
         database_observed_at = await sessions.database_time()
         clock_completed_at = datetime.now(UTC)
-        active_session_ids = await sessions.active_session_ids(
-            now=clock_completed_at
-        )
+        active_session_ids = await sessions.active_session_ids(now=clock_completed_at)
         return (
             control.active,
             active_session_ids,
@@ -1821,9 +1820,7 @@ def low_volatility_decision_time_signal_prepare(
                     session_date,
                     name="session-date",
                 ),
-                reconciliation_report_hash=(
-                    reconciliation_report_hash
-                ),
+                reconciliation_report_hash=(reconciliation_report_hash),
                 prepared_by=prepared_by,
             )
         )
@@ -2039,6 +2036,34 @@ def research_data_campaign_retry(
         )
     except (AutoQuantError, LookupError, ValueError):
         _fail("research data campaign retry failed")
+    _emit(payload)
+
+
+@app.command("research-data-campaign-retry-plan-authorize")
+def research_data_campaign_retry_plan_authorize(
+    campaign_hash: Annotated[str, typer.Option("--campaign-hash")],
+    retry_plan_hash: Annotated[str, typer.Option("--retry-plan-hash")],
+    authorized_by: Annotated[str, typer.Option("--authorized-by")],
+    confirm_full_plan_retry: Annotated[
+        bool,
+        typer.Option("--confirm-full-plan-retry"),
+    ] = False,
+) -> None:
+    """Audit and requeue one exact full retry plan without running collection."""
+
+    if not confirm_full_plan_retry:
+        _fail("full research data retry-plan confirmation is required")
+    try:
+        payload = asyncio.run(
+            authorize_research_data_campaign_retry_plan(
+                _settings(),
+                campaign_hash=campaign_hash,
+                retry_plan_hash=retry_plan_hash,
+                authorized_by=authorized_by,
+            )
+        )
+    except (AutoQuantError, LookupError, ValueError):
+        _fail("research data campaign retry-plan authorization failed")
     _emit(payload)
 
 

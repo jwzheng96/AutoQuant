@@ -45,6 +45,7 @@ from autoquant.web.fundamental_research_store import (
 )
 from autoquant.web.research_data_store import (
     PostgresResearchDataCampaignRepository,
+    ResearchDataCampaignRetryBinding,
 )
 
 POSTGRES_DSN = os.environ.get("AQ_POSTGRES_DSN", "").strip()
@@ -86,11 +87,9 @@ async def repositories() -> AsyncIterator[
         dsn=POSTGRES_DSN,
         schema=schema,
     )
-    fundamental_specs = (
-        PostgresFundamentalResearchSpecRepository.connect(
-            dsn=POSTGRES_DSN,
-            schema=schema,
-        )
+    fundamental_specs = PostgresFundamentalResearchSpecRepository.connect(
+        dsn=POSTGRES_DSN,
+        schema=schema,
     )
     fundamental_data = PostgresFundamentalDatasetRepository.connect(
         dsn=POSTGRES_DSN,
@@ -206,15 +205,8 @@ async def test_campaign_recovers_retries_and_finalizes_verified_shards(
 
     created = await campaigns.create(spec, created_at=NOW)
     repeated = await campaigns.create(spec, created_at=NOW)
-    assert await campaigns.status_for_key(
-        campaign_key=spec.campaign_key
-    ) == created
-    assert (
-        await campaigns.status_for_key(
-            campaign_key="integration-missing-campaign-v1"
-        )
-        is None
-    )
+    assert await campaigns.status_for_key(campaign_key=spec.campaign_key) == created
+    assert await campaigns.status_for_key(campaign_key="integration-missing-campaign-v1") is None
     contender = PostgresResearchDataCampaignRepository.connect(
         dsn=POSTGRES_DSN,
         schema=schema,
@@ -226,9 +218,7 @@ async def test_campaign_recovers_retries_and_finalizes_verified_shards(
         assert await contender.try_acquire_worker_lock(campaign_hash=spec.campaign_hash)
     finally:
         await contender.close()
-    assert await campaigns.try_acquire_worker_lock(
-        campaign_hash=spec.campaign_hash
-    )
+    assert await campaigns.try_acquire_worker_lock(campaign_hash=spec.campaign_hash)
     await campaigns.release_worker_lock()
     first = await campaigns.claim_next(campaign_hash=spec.campaign_hash, now=NOW)
     assert first is not None
@@ -411,21 +401,14 @@ async def test_campaign_recovers_retries_and_finalizes_verified_shards(
     )
 
     assert repeated_validation == validation_record
-    assert (
-        await validations.read(validation_result.result_hash)
-        == validation_record
-    )
+    assert await validations.read(validation_result.result_hash) == validation_record
     regime_spec = DynamicPortfolioResearchSpec(
         dataset_manifest_hash=frozen.dataset_manifest_hash,
         plan_hash=frozen.plan_hash,
         policy_hash=frozen.policy_hash,
         start_date=frozen.start_date,
         end_date=frozen.end_date,
-        regime_filter=DynamicRegimeFilter(
-            predecessor_result_hash=(
-                validation_result.result_hash
-            )
-        ),
+        regime_filter=DynamicRegimeFilter(predecessor_result_hash=(validation_result.result_hash)),
         strategy_id=DYNAMIC_REGIME_PORTFOLIO_STRATEGY_ID,
         version=DYNAMIC_REGIME_PORTFOLIO_SPEC_VERSION,
     )
@@ -450,10 +433,7 @@ async def test_campaign_recovers_retries_and_finalizes_verified_shards(
         created_at=NOW,
     )
 
-    assert (
-        await fundamental_specs.read(fundamental_spec.spec_hash)
-        == fundamental_record
-    )
+    assert await fundamental_specs.read(fundamental_spec.spec_hash) == fundamental_record
     first_fundamental = await save_shard_manifest(
         control,
         instrument="000001.XSHE",
@@ -477,19 +457,12 @@ async def test_campaign_recovers_retries_and_finalizes_verified_shards(
         created_at=NOW,
     )
 
-    assert tuple(
-        value.manifest_hash for value in completed_fundamental
-    ) == (
+    assert tuple(value.manifest_hash for value in completed_fundamental) == (
         first_fundamental.manifest_hash,
         second_fundamental.manifest_hash,
     )
     assert aggregate_fundamental is not None
-    assert (
-        await fundamental_data.read_for_spec(
-            fundamental_spec.spec_hash
-        )
-        == aggregate_fundamental
-    )
+    assert await fundamental_data.read_for_spec(fundamental_spec.spec_hash) == aggregate_fundamental
     with pytest.raises(ValueError, match="already frozen"):
         await specs.freeze(
             DynamicPortfolioResearchSpec(
@@ -503,6 +476,79 @@ async def test_campaign_recovers_retries_and_finalizes_verified_shards(
             requested_by="test",
             created_at=NOW,
         )
+
+
+@pytest.mark.asyncio
+async def test_campaign_retry_plan_is_atomic_on_stale_item(
+    repositories: tuple[
+        PostgresControlRepository,
+        PostgresResearchDataCampaignRepository,
+        PostgresDynamicResearchSpecRepository,
+        PostgresDynamicValidationRepository,
+        PostgresFundamentalResearchSpecRepository,
+        PostgresFundamentalDatasetRepository,
+        str,
+    ],
+) -> None:
+    campaigns = repositories[1]
+    spec = ResearchDataCampaignSpec(
+        campaign_key="integration-atomic-retry-plan-v1",
+        policy_hash="1" * 64,
+        snapshot_hashes=("2" * 64,),
+        instruments=("000001.XSHE", "600000.XSHG"),
+        start_date=date(2026, 7, 24),
+        end_date=date(2026, 7, 24),
+        requested_by="test",
+    )
+    await campaigns.create(spec, created_at=NOW)
+    failed = []
+    for _ in spec.instruments:
+        claimed = await campaigns.claim_next(
+            campaign_hash=spec.campaign_hash,
+            now=NOW,
+        )
+        assert claimed is not None
+        failed.append(
+            await campaigns.fail_item(
+                campaign_hash=spec.campaign_hash,
+                sequence=claimed.sequence,
+                error_code="daily_quality_rejected",
+                retryable=False,
+                now=NOW,
+            )
+        )
+    bindings = tuple(
+        ResearchDataCampaignRetryBinding(
+            sequence=value.sequence,
+            instrument=value.instrument,
+            attempts=value.attempts,
+            max_attempts=value.max_attempts,
+            error_code=value.error_code or "",
+        )
+        for value in failed
+    )
+    stale_second = ResearchDataCampaignRetryBinding(
+        sequence=bindings[1].sequence,
+        instrument=bindings[1].instrument,
+        attempts=bindings[1].attempts,
+        max_attempts=bindings[1].max_attempts,
+        error_code="stale_error_code",
+    )
+
+    with pytest.raises(ValueError, match="state changed"):
+        await campaigns.retry_failed_items(
+            campaign_hash=spec.campaign_hash,
+            expected_items=(bindings[0], stale_second),
+        )
+    unchanged = await campaigns.status(campaign_hash=spec.campaign_hash)
+    assert tuple(value.state for value in unchanged.items) == ("failed", "failed")
+
+    authorized = await campaigns.retry_failed_items(
+        campaign_hash=spec.campaign_hash,
+        expected_items=bindings,
+    )
+    assert tuple(value.state for value in authorized) == ("queued", "queued")
+    assert tuple(value.max_attempts for value in authorized) == (6, 6)
 
 
 def _empty_backtest(

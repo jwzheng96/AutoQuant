@@ -25,6 +25,7 @@ from autoquant.operations import (
     _research_data_campaign_retry_plan_payload,
     _validate_campaign_dataset,
     approve_paper_sma_strategy,
+    authorize_research_data_campaign_retry_plan,
     create_compliance_approval,
     enforce_paper_runtime_health,
     inspect_paper_runtime_health,
@@ -35,6 +36,7 @@ from autoquant.operations import (
 )
 from autoquant.web.research_data_store import (
     ResearchDataCampaignItem,
+    ResearchDataCampaignRetryBinding,
     ResearchDataCampaignStatus,
 )
 
@@ -207,9 +209,7 @@ def _research_campaign_status(
 
 
 def test_research_campaign_retry_plan_binds_exact_terminal_state() -> None:
-    plan = _research_data_campaign_retry_plan_payload(
-        _research_campaign_status()
-    )
+    plan = _research_data_campaign_retry_plan_payload(_research_campaign_status())
 
     assert plan["status"] == "retry_authorization_required"
     assert plan["failed_item_count"] == 1
@@ -237,10 +237,7 @@ def test_research_campaign_retry_plan_binds_exact_terminal_state() -> None:
     )
     changed_items = cast(list[dict[str, object]], changed["failed_items"])
     assert changed["plan_hash"] != plan["plan_hash"]
-    assert (
-        changed_items[0]["retry_item_hash"]
-        != failed_items[0]["retry_item_hash"]
-    )
+    assert changed_items[0]["retry_item_hash"] != failed_items[0]["retry_item_hash"]
 
 
 @pytest.mark.asyncio
@@ -375,6 +372,102 @@ async def test_research_campaign_retry_audits_exact_bound_failure() -> None:
     audit_payload = control.append_audit_event.await_args.args[2]
     assert audit_payload["prior_error_code"] == "daily_quality_rejected"
     assert audit_payload["retry_item_hash"] == retry_item_hash
+
+
+@pytest.mark.asyncio
+async def test_research_campaign_retry_plan_rejects_stale_hash_before_write() -> None:
+    repository = MagicMock()
+    repository.status = AsyncMock(return_value=_research_campaign_status())
+    repository.retry_failed_items = AsyncMock()
+    repository.close = AsyncMock()
+    control = MagicMock()
+    control.append_audit_event = AsyncMock()
+    control.close = AsyncMock()
+    with (
+        patch(
+            "autoquant.operations.PostgresResearchDataCampaignRepository.connect",
+            return_value=repository,
+        ),
+        patch(
+            "autoquant.operations.PostgresControlRepository.connect",
+            return_value=control,
+        ),
+    ):
+        with pytest.raises(ValueError, match="stale"):
+            await authorize_research_data_campaign_retry_plan(
+                _settings(),
+                campaign_hash=_research_campaign_status().spec.campaign_hash,
+                retry_plan_hash="f" * 64,
+                authorized_by="risk-operator",
+            )
+
+    repository.retry_failed_items.assert_not_awaited()
+    control.append_audit_event.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_research_campaign_retry_plan_audits_then_requeues_exact_plan() -> None:
+    before = _research_campaign_status()
+    plan = _research_data_campaign_retry_plan_payload(before)
+    after = ResearchDataCampaignStatus(
+        spec=before.spec,
+        created_at=before.created_at,
+        status="queued",
+        items=(
+            replace(
+                before.items[0],
+                state="queued",
+                max_attempts=6,
+                started_at=None,
+                completed_at=None,
+                error_code="operator_retry_authorized",
+            ),
+            before.items[1],
+        ),
+        manifest=None,
+    )
+    repository = MagicMock()
+    repository.status = AsyncMock(side_effect=(before, after))
+    repository.retry_failed_items = AsyncMock(return_value=(after.items[0],))
+    repository.close = AsyncMock()
+    control = MagicMock()
+    control.append_audit_event = AsyncMock()
+    control.close = AsyncMock()
+    with (
+        patch(
+            "autoquant.operations.PostgresResearchDataCampaignRepository.connect",
+            return_value=repository,
+        ),
+        patch(
+            "autoquant.operations.PostgresControlRepository.connect",
+            return_value=control,
+        ),
+    ):
+        result = await authorize_research_data_campaign_retry_plan(
+            _settings(),
+            campaign_hash=before.spec.campaign_hash,
+            retry_plan_hash=str(plan["plan_hash"]),
+            authorized_by="risk-operator",
+        )
+
+    assert result["status"] == "queued"
+    assert result["authorized_plan_hash"] == plan["plan_hash"]
+    assert result["requeued_item_count"] == 1
+    repository.retry_failed_items.assert_awaited_once_with(
+        campaign_hash=before.spec.campaign_hash,
+        expected_items=(
+            ResearchDataCampaignRetryBinding(
+                sequence=1,
+                instrument="000001.XSHE",
+                attempts=1,
+                max_attempts=3,
+                error_code="daily_quality_rejected",
+            ),
+        ),
+    )
+    audit_payload = control.append_audit_event.await_args.args[2]
+    assert audit_payload["retry_plan_hash"] == plan["plan_hash"]
+    assert audit_payload["item_count"] == 1
 
 
 def test_universe_backfill_months_are_bounded_and_exact() -> None:

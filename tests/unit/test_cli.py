@@ -1623,6 +1623,63 @@ def test_low_volatility_candidate_approval_is_locked_and_redacted() -> None:
     approval.assert_awaited_once()
 
 
+def test_research_data_retry_plan_authorization_requires_confirmation() -> None:
+    authorization = AsyncMock()
+    with patch(
+        "autoquant.cli.authorize_research_data_campaign_retry_plan",
+        new=authorization,
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "research-data-campaign-retry-plan-authorize",
+                "--campaign-hash",
+                "a" * 64,
+                "--retry-plan-hash",
+                "b" * 64,
+                "--authorized-by",
+                "risk-operator",
+            ],
+        )
+
+    assert result.exit_code == 2
+    authorization.assert_not_awaited()
+
+
+def test_research_data_retry_plan_authorization_is_redacted() -> None:
+    payload = {
+        "authorized_plan_hash": "b" * 64,
+        "campaign_hash": "a" * 64,
+        "live_trading_locked": True,
+        "requeued_item_count": 25,
+        "status": "queued",
+    }
+    authorization = AsyncMock(return_value=payload)
+    with patch(
+        "autoquant.cli.authorize_research_data_campaign_retry_plan",
+        new=authorization,
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "research-data-campaign-retry-plan-authorize",
+                "--campaign-hash",
+                "a" * 64,
+                "--retry-plan-hash",
+                "b" * 64,
+                "--authorized-by",
+                "risk-operator",
+                "--confirm-full-plan-retry",
+            ],
+            env={"AQ_POSTGRES_DSN": "postgresql+asyncpg://sensitive"},
+        )
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == payload
+    assert "sensitive" not in result.stdout
+    authorization.assert_awaited_once()
+
+
 def test_low_volatility_candidate_revocation_requires_confirmation() -> None:
     revocation = AsyncMock()
     with patch(
@@ -1882,9 +1939,7 @@ def test_decision_time_signal_prepare_never_grants_authority() -> None:
             ],
             env={
                 "AQ_ENVIRONMENT": "paper",
-                "AQ_POSTGRES_DSN": (
-                    "postgresql+asyncpg://sensitive"
-                ),
+                "AQ_POSTGRES_DSN": ("postgresql+asyncpg://sensitive"),
             },
         )
 

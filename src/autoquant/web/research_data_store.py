@@ -46,6 +46,15 @@ class ResearchDataCampaignStatus:
     manifest: ResearchDatasetManifest | None
 
 
+@dataclass(frozen=True, slots=True)
+class ResearchDataCampaignRetryBinding:
+    sequence: int
+    instrument: str
+    attempts: int
+    max_attempts: int
+    error_code: str
+
+
 class PostgresResearchDataCampaignRepository:
     """Persistent, restart-safe queue for survivorship-free daily data shards."""
 
@@ -69,9 +78,7 @@ class PostgresResearchDataCampaignRepository:
         try:
             engine = create_async_engine(dsn, pool_pre_ping=True)
         except Exception:
-            raise PersistenceUnavailableError(
-                "research data campaign connection failed"
-            ) from None
+            raise PersistenceUnavailableError("research data campaign connection failed") from None
         return cls(engine=engine, schema=schema)
 
     async def close(self) -> None:
@@ -192,12 +199,8 @@ class PostgresResearchDataCampaignRepository:
                     )
                 )
             if row is None:
-                raise LookupError(
-                    "research dataset manifest does not exist"
-                )
-            manifest = ResearchDatasetManifest.from_payload(
-                _object(row["payload"])
-            )
+                raise LookupError("research dataset manifest does not exist")
+            manifest = ResearchDatasetManifest.from_payload(_object(row["payload"]))
             stored_shards = tuple(
                 ResearchDatasetShard(
                     sequence=int(value["sequence"]),
@@ -218,9 +221,7 @@ class PostgresResearchDataCampaignRepository:
         except (LookupError, PersistenceUnavailableError):
             raise
         except Exception:
-            raise PersistenceUnavailableError(
-                "research dataset manifest lookup failed"
-            ) from None
+            raise PersistenceUnavailableError("research dataset manifest lookup failed") from None
 
     async def status_for_key(
         self,
@@ -242,9 +243,7 @@ class PostgresResearchDataCampaignRepository:
                     {"campaign_key": campaign_key},
                 )
         except Exception:
-            raise PersistenceUnavailableError(
-                "research data campaign key lookup failed"
-            ) from None
+            raise PersistenceUnavailableError("research data campaign key lookup failed") from None
         if campaign_hash is None:
             return None
         return await self.status(campaign_hash=str(campaign_hash))
@@ -287,9 +286,7 @@ class PostgresResearchDataCampaignRepository:
         except (ValueError, PersistenceUnavailableError):
             raise
         except Exception:
-            raise PersistenceUnavailableError(
-                "research data campaign creation failed"
-            ) from None
+            raise PersistenceUnavailableError("research data campaign creation failed") from None
 
     async def status(
         self,
@@ -350,12 +347,9 @@ class PostgresResearchDataCampaignRepository:
                     .mappings()
                     .one_or_none()
                 )
-            spec = ResearchDataCampaignSpec.from_payload(
-                _object(parent["specification_payload"])
-            )
+            spec = ResearchDataCampaignSpec.from_payload(_object(parent["specification_payload"]))
             items = tuple(
-                _item(row, expected_sequence=index)
-                for index, row in enumerate(rows, start=1)
+                _item(row, expected_sequence=index) for index, row in enumerate(rows, start=1)
             )
             if (
                 spec.campaign_hash != str(parent["campaign_hash"])
@@ -371,9 +365,7 @@ class PostgresResearchDataCampaignRepository:
                 )
             manifest = None
             if manifest_row is not None:
-                manifest = ResearchDatasetManifest.from_payload(
-                    _object(manifest_row["payload"])
-                )
+                manifest = ResearchDatasetManifest.from_payload(_object(manifest_row["payload"]))
                 if (
                     manifest.manifest_hash != str(manifest_row["manifest_hash"])
                     or manifest.campaign_hash != spec.campaign_hash
@@ -392,9 +384,7 @@ class PostgresResearchDataCampaignRepository:
         except (LookupError, PersistenceUnavailableError):
             raise
         except Exception:
-            raise PersistenceUnavailableError(
-                "research data campaign read failed"
-            ) from None
+            raise PersistenceUnavailableError("research data campaign read failed") from None
 
     async def claim_next(
         self,
@@ -442,9 +432,7 @@ class PostgresResearchDataCampaignRepository:
                     .one_or_none()
                 )
         except Exception:
-            raise PersistenceUnavailableError(
-                "research data campaign claim failed"
-            ) from None
+            raise PersistenceUnavailableError("research data campaign claim failed") from None
         return None if row is None else _item(row)
 
     async def complete_item(
@@ -520,9 +508,7 @@ class PostgresResearchDataCampaignRepository:
                 )
             return int(result.rowcount or 0)
         except Exception:
-            raise PersistenceUnavailableError(
-                "research data campaign recovery failed"
-            ) from None
+            raise PersistenceUnavailableError("research data campaign recovery failed") from None
 
     async def retry_failed_item(
         self,
@@ -595,6 +581,86 @@ class PostgresResearchDataCampaignRepository:
                 "attempt ceiling would be exceeded"
             )
         return _item(row)
+
+    async def retry_failed_items(
+        self,
+        *,
+        campaign_hash: str,
+        expected_items: Sequence[ResearchDataCampaignRetryBinding],
+        additional_attempts: int = 3,
+    ) -> tuple[ResearchDataCampaignItem, ...]:
+        """Atomically requeue an exact, nonempty set of failed campaign items."""
+
+        _require_lowercase_sha256(campaign_hash, name="research data campaign hash")
+        if not expected_items:
+            raise ValueError("expected_items cannot be empty")
+        if additional_attempts < 1 or additional_attempts > 3:
+            raise ValueError("additional_attempts must be between 1 and 3")
+        sequences = tuple(value.sequence for value in expected_items)
+        if sequences != tuple(sorted(sequences)) or len(set(sequences)) != len(sequences):
+            raise ValueError("expected retry items must be unique and sequence-sorted")
+        for value in expected_items:
+            if (
+                value.sequence < 1
+                or not value.instrument
+                or value.attempts < 0
+                or value.max_attempts < 1
+                or not value.error_code
+            ):
+                raise ValueError("expected failed item state is invalid")
+        rows: list[RowMapping] = []
+        try:
+            async with self._engine.begin() as connection:
+                for value in expected_items:
+                    row = (
+                        (
+                            await connection.execute(
+                                text(
+                                    f"""
+                                    UPDATE {self._schema}.research_data_campaign_items
+                                    SET state = 'queued',
+                                        max_attempts = max_attempts + :additional_attempts,
+                                        started_at = NULL,
+                                        completed_at = NULL,
+                                        error_code = 'operator_retry_authorized'
+                                    WHERE campaign_hash = :campaign_hash
+                                      AND sequence = :sequence
+                                      AND state = 'failed'
+                                      AND instrument = :expected_instrument
+                                      AND attempts = :expected_attempts
+                                      AND max_attempts = :expected_max_attempts
+                                      AND error_code = :expected_error_code
+                                      AND max_attempts + :additional_attempts <= 10
+                                    RETURNING *
+                                    """
+                                ),
+                                {
+                                    "additional_attempts": additional_attempts,
+                                    "campaign_hash": campaign_hash,
+                                    "expected_attempts": value.attempts,
+                                    "expected_error_code": value.error_code,
+                                    "expected_instrument": value.instrument,
+                                    "expected_max_attempts": value.max_attempts,
+                                    "sequence": value.sequence,
+                                },
+                            )
+                        )
+                        .mappings()
+                        .one_or_none()
+                    )
+                    if row is None:
+                        raise ValueError(
+                            "research data item state changed, is not retryable, or "
+                            "attempt ceiling would be exceeded"
+                        )
+                    rows.append(row)
+        except ValueError:
+            raise
+        except Exception:
+            raise PersistenceUnavailableError(
+                "research data campaign retry-plan authorization failed"
+            ) from None
+        return tuple(_item(row) for row in rows)
 
     async def finalize(
         self,
@@ -686,9 +752,7 @@ class PostgresResearchDataCampaignRepository:
                     {"campaign_hash": campaign_hash},
                 )
                 if str(stored_hash) != manifest.manifest_hash:
-                    raise ValueError(
-                        "research campaign already has another dataset manifest"
-                    )
+                    raise ValueError("research campaign already has another dataset manifest")
                 for shard in manifest.shards:
                     await connection.execute(
                         text(
@@ -711,16 +775,12 @@ class PostgresResearchDataCampaignRepository:
                     )
             verified = await self.status(campaign_hash=campaign_hash)
             if verified.manifest is None:
-                raise PersistenceUnavailableError(
-                    "research dataset manifest was not persisted"
-                )
+                raise PersistenceUnavailableError("research dataset manifest was not persisted")
             return verified.manifest
         except (ValueError, PersistenceUnavailableError):
             raise
         except Exception:
-            raise PersistenceUnavailableError(
-                "research dataset finalization failed"
-            ) from None
+            raise PersistenceUnavailableError("research dataset finalization failed") from None
 
     async def _insert_campaign(
         self,
@@ -847,9 +907,7 @@ class PostgresResearchDataCampaignRepository:
                 "research data campaign item completion failed"
             ) from None
         if row is None:
-            raise PersistenceUnavailableError(
-                "research data campaign item is not running"
-            )
+            raise PersistenceUnavailableError("research data campaign item is not running")
         return _item(row)
 
     @staticmethod
@@ -908,23 +966,13 @@ def _item(
             state=state,
             attempts=int(row["attempts"]),
             max_attempts=int(row["max_attempts"]),
-            manifest_hash=(
-                None if row["manifest_hash"] is None else str(row["manifest_hash"])
-            ),
-            started_at=(
-                None if row["started_at"] is None else to_utc(row["started_at"])
-            ),
-            completed_at=(
-                None if row["completed_at"] is None else to_utc(row["completed_at"])
-            ),
-            error_code=(
-                None if row["error_code"] is None else str(row["error_code"])
-            ),
+            manifest_hash=(None if row["manifest_hash"] is None else str(row["manifest_hash"])),
+            started_at=(None if row["started_at"] is None else to_utc(row["started_at"])),
+            completed_at=(None if row["completed_at"] is None else to_utc(row["completed_at"])),
+            error_code=(None if row["error_code"] is None else str(row["error_code"])),
         )
     except (KeyError, TypeError, ValueError):
-        raise PersistenceUnavailableError(
-            "stored research data item is malformed"
-        ) from None
+        raise PersistenceUnavailableError("stored research data item is malformed") from None
 
 
 def _campaign_status(
