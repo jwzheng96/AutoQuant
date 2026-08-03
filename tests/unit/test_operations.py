@@ -21,6 +21,7 @@ from autoquant.errors import (
 from autoquant.operations import (
     _month_intervals,
     _next_low_volatility_forward_session,
+    _ReadOnlyExecutionControlView,
     _RecyclingDailyDatasetReader,
     _research_data_campaign_retry_plan_payload,
     _validate_campaign_dataset,
@@ -28,6 +29,7 @@ from autoquant.operations import (
     authorize_research_data_campaign_retry_plan,
     create_compliance_approval,
     enforce_paper_runtime_health,
+    inspect_operations_readiness,
     inspect_paper_runtime_health,
     retry_research_data_campaign_item,
     revoke_paper_strategy,
@@ -41,6 +43,116 @@ from autoquant.web.research_data_store import (
 )
 
 NOW = datetime(2026, 7, 23, 8, tzinfo=UTC)
+
+
+@pytest.mark.asyncio
+async def test_read_only_control_view_never_rearms_kill_switch() -> None:
+    control = MagicMock(active=True)
+    repository = MagicMock()
+    repository.replay = AsyncMock(return_value=control)
+    view = _ReadOnlyExecutionControlView(repository)
+
+    observed = await view.ensure_fail_closed(account_id="paper-main", now=NOW)
+
+    assert observed is control
+    repository.replay.assert_awaited_once_with(account_id="paper-main")
+    with pytest.raises(MissingCapabilityError, match="active kill switch"):
+        await view.activate(
+            account_id="paper-main",
+            command_id="must-not-write",
+            reason=MagicMock(),
+            actor="readiness",
+            now=NOW,
+        )
+    assert not hasattr(repository, "activate") or repository.activate.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_operations_readiness_composes_redacted_blockers_without_mutation() -> None:
+    qmt = {
+        "checks": {"trusted_clock": "pass", "windows_runtime": "blocked"},
+        "status": "blocked",
+    }
+    runtime = {"status": "ready_for_quote_connection"}
+    watchdog = {"status": "ok"}
+    promotion = {"blockers": ["paper_session_count"], "status": "blocked"}
+    retry_plan = {
+        "failed_item_count": 25,
+        "plan_hash": "a" * 64,
+        "status": "retry_authorization_required",
+    }
+    with (
+        patch("autoquant.operations.inspect_qmt_preflight", new=AsyncMock(return_value=qmt)),
+        patch(
+            "autoquant.operations.inspect_paper_runtime_readiness",
+            new=AsyncMock(return_value=runtime),
+        ),
+        patch(
+            "autoquant.operations.inspect_paper_runtime_health",
+            new=AsyncMock(return_value=watchdog),
+        ),
+        patch(
+            "autoquant.operations.inspect_paper_promotion",
+            new=AsyncMock(return_value=promotion),
+        ),
+        patch(
+            "autoquant.operations.inspect_research_data_campaign_retry_plan",
+            new=AsyncMock(return_value=retry_plan),
+        ),
+    ):
+        payload = await inspect_operations_readiness(
+            _settings(),
+            campaign_hash="b" * 64,
+        )
+
+    assert payload["status"] == "blocked"
+    assert payload["blockers"] == [
+        "promotion.paper_session_count",
+        "qmt.windows_runtime",
+        "research_data.retry_authorization_required",
+    ]
+    assert payload["broker_mutation_allowed"] is False
+    assert payload["collection_started"] is False
+    assert payload["storage_mutation_allowed"] is False
+    assert payload["vendor_request_started"] is False
+    assert len(str(payload["report_hash"])) == 64
+
+
+@pytest.mark.asyncio
+async def test_operations_readiness_redacts_independent_section_failures() -> None:
+    failure = PersistenceUnavailableError("secret-database-host")
+    with (
+        patch("autoquant.operations.inspect_qmt_preflight", new=AsyncMock(side_effect=failure)),
+        patch(
+            "autoquant.operations.inspect_paper_runtime_readiness",
+            new=AsyncMock(side_effect=failure),
+        ),
+        patch(
+            "autoquant.operations.inspect_paper_runtime_health",
+            new=AsyncMock(side_effect=failure),
+        ),
+        patch(
+            "autoquant.operations.inspect_paper_promotion",
+            new=AsyncMock(side_effect=failure),
+        ),
+        patch(
+            "autoquant.operations.inspect_research_data_campaign_retry_plan",
+            new=AsyncMock(side_effect=failure),
+        ),
+    ):
+        payload = await inspect_operations_readiness(
+            _settings(),
+            campaign_hash="b" * 64,
+        )
+
+    assert payload["blockers"] == [
+        "paper_runtime.unavailable",
+        "paper_watchdog.unavailable",
+        "promotion.unavailable",
+        "qmt.unavailable",
+        "research_data.unavailable",
+    ]
+    assert "secret-database-host" not in str(payload)
 
 
 @pytest.mark.asyncio

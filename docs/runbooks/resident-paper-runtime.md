@@ -43,9 +43,13 @@ AQ_PAPER_SCHEDULER_RENEWAL_SECONDS=10
 
 ```powershell
 uv run autoquant db-check
+uv run autoquant operations-readiness-report --campaign-hash <可选的数据活动哈希>
 uv run autoquant qmt-check
 uv run autoquant paper-runtime-check
 ```
+
+统一报告的字段、退出码和归档要求见
+[运维就绪证据报告](operations-readiness-report.md)。报告返回 2 时不得继续启动。
 
 `qmt-check` 还必须显示 `trusted_clock=pass`。它以 PostgreSQL 时钟约束 Windows 主机时间；
 时钟未知、最坏偏差超过 2 秒或测量往返超过 2 秒时，不得打开 XtTrader。

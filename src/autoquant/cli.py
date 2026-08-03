@@ -64,6 +64,7 @@ from autoquant.operations import (
     freeze_low_volatility_research_spec,
     inspect_fundamental_data_backfill,
     inspect_low_volatility_paper_deployment,
+    inspect_operations_readiness,
     inspect_paper_pre_open,
     inspect_paper_promotion,
     inspect_paper_runtime_health,
@@ -581,6 +582,31 @@ def promotion_check() -> None:
         _fail("paper promotion audit failed closed")
     _emit(payload)
     if payload["status"] != "ok":
+        raise typer.Exit(code=2)
+
+
+@app.command("operations-readiness-report")
+def operations_readiness_report(
+    campaign_hash: Annotated[
+        str | None,
+        typer.Option("--campaign-hash"),
+    ] = None,
+) -> None:
+    """Compose read-only QMT, paper, promotion, and optional data evidence."""
+
+    try:
+        payload = asyncio.run(
+            inspect_operations_readiness(
+                _settings(),
+                campaign_hash=campaign_hash,
+            )
+        )
+    except MissingCapabilityError as error:
+        _fail(str(error))
+    except (AutoQuantError, LookupError, ValueError):
+        _fail("operations readiness report failed closed")
+    _emit(payload)
+    if payload["status"] != "ready":
         raise typer.Exit(code=2)
 
 

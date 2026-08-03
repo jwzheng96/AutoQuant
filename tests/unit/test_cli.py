@@ -251,6 +251,40 @@ def test_promotion_check_emits_redacted_blockers_and_exits_nonzero() -> None:
     assert "token" not in result.stdout.lower()
 
 
+def test_operations_readiness_report_emits_one_redacted_blocked_snapshot() -> None:
+    payload = {
+        "blockers": ["qmt.windows_runtime", "promotion.paper_session_count"],
+        "broker_mutation_allowed": False,
+        "collection_started": False,
+        "generated_at": "2026-08-03T08:00:00+00:00",
+        "live_trading_locked": True,
+        "report_hash": "a" * 64,
+        "sections": {
+            "qmt": {"status": "blocked"},
+            "promotion": {"status": "blocked"},
+        },
+        "status": "blocked",
+        "storage_mutation_allowed": False,
+        "vendor_request_started": False,
+        "version": "operations-readiness-report-v1",
+    }
+    inspect = AsyncMock(return_value=payload)
+    with patch(
+        "autoquant.cli.inspect_operations_readiness",
+        new=inspect,
+    ):
+        result = runner.invoke(
+            app,
+            ["operations-readiness-report", "--campaign-hash", "b" * 64],
+            env={"AQ_ENVIRONMENT": "paper"},
+        )
+
+    assert result.exit_code == 2
+    assert json.loads(result.stdout) == payload
+    assert inspect.await_args.kwargs["campaign_hash"] == "b" * 64
+    assert "token" not in result.stdout.lower()
+
+
 def test_compliance_approval_requires_confirmation_and_is_redacted() -> None:
     command = [
         "compliance-approve",

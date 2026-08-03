@@ -127,7 +127,7 @@ from autoquant.execution.compliance_approval import (
     ComplianceRevocationReason,
     PostgresComplianceApprovalRepository,
 )
-from autoquant.execution.control import KillSwitchReason
+from autoquant.execution.control import KillSwitchControl, KillSwitchReason
 from autoquant.execution.control_store import PostgresExecutionControlRepository
 from autoquant.execution.low_volatility_decision_signal import (
     LowVolatilityDecisionTimePaperSignal,
@@ -336,6 +336,37 @@ def tushare_source(settings: AppSettings) -> TushareDailySource:
         ),
         now=lambda: datetime.now(UTC),
     )
+
+
+class _ReadOnlyExecutionControlView:
+    """Expose replay as the runtime gate's fail-closed read without mutations."""
+
+    def __init__(self, repository: PostgresExecutionControlRepository) -> None:
+        self._repository = repository
+
+    async def ensure_fail_closed(
+        self,
+        *,
+        account_id: str,
+        now: datetime,
+    ) -> KillSwitchControl:
+        del now
+        return await self._repository.replay(account_id=account_id)
+
+    async def activate(
+        self,
+        *,
+        account_id: str,
+        command_id: str,
+        reason: KillSwitchReason,
+        actor: str,
+        now: datetime,
+        evidence_hash: str | None = None,
+    ) -> KillSwitchControl:
+        del account_id, command_id, reason, actor, now, evidence_hash
+        raise MissingCapabilityError(
+            "paper runtime readiness requires an active kill switch"
+        )
 
 
 class _RecyclingDailyDatasetReader:
@@ -4847,6 +4878,170 @@ async def inspect_paper_pre_open(
             await clickhouse.client.close()
 
 
+async def inspect_qmt_preflight(
+    settings: AppSettings,
+) -> dict[str, object]:
+    """Inspect QMT host and durable control evidence without loading XtQuant."""
+
+    kill_switch_active: bool | None = None
+    active_session_ids: tuple[int, ...] | None = None
+    clock_attestation: QmtClockAttestation | None = None
+    controls: PostgresExecutionControlRepository | None = None
+    sessions: PostgresQmtSessionLeaseRepository | None = None
+    try:
+        dsn = configured_dsn(settings.postgres_dsn, capability="PostgreSQL")
+        controls = PostgresExecutionControlRepository.connect(dsn=dsn)
+        sessions = PostgresQmtSessionLeaseRepository.connect(dsn=dsn)
+        control = await controls.replay(account_id=settings.paper_account_id)
+        clock_started_at = datetime.now(UTC)
+        database_observed_at = await sessions.database_time()
+        clock_completed_at = datetime.now(UTC)
+        kill_switch_active = control.active
+        active_session_ids = await sessions.active_session_ids(now=clock_completed_at)
+        clock_attestation = QmtClockAttestation(
+            request_started_at=clock_started_at,
+            database_observed_at=database_observed_at,
+            request_completed_at=clock_completed_at,
+        )
+    except (AutoQuantError, LookupError, ValueError):
+        pass
+    finally:
+        if controls is not None:
+            await controls.close()
+        if sessions is not None:
+            await sessions.close()
+    report = inspect_qmt_readiness(
+        settings,
+        kill_switch_active=kill_switch_active,
+        active_session_ids=active_session_ids,
+        clock_attestation=clock_attestation,
+    )
+    return {
+        "checks": {
+            check.code.value: "pass" if check.passed else "blocked"
+            for check in report.checks
+        },
+        "live_trading_ready": report.live_trading_ready,
+        "order_drill_ready": report.order_drill_ready,
+        "read_only_ready": report.read_only_ready,
+        "status": "ok" if report.order_drill_ready else "blocked",
+    }
+
+
+def _unavailable_readiness_section(blocker: str) -> dict[str, object]:
+    return {
+        "blockers": [blocker],
+        "status": "unavailable",
+    }
+
+
+def _first_readiness_blocker(section: dict[str, object], default: str) -> str:
+    blockers = section.get("blockers")
+    if isinstance(blockers, list) and blockers:
+        return str(blockers[0])
+    return default
+
+
+async def inspect_operations_readiness(
+    settings: AppSettings,
+    *,
+    campaign_hash: str | None = None,
+) -> dict[str, object]:
+    """Compose a redacted, non-mutating deployment evidence snapshot."""
+
+    if settings.live_trading_enabled:
+        raise MissingCapabilityError("operations readiness requires live trading locked")
+    if settings.environment is not RuntimeEnvironment.PAPER:
+        raise MissingCapabilityError("operations readiness requires the paper environment")
+
+    try:
+        qmt = await inspect_qmt_preflight(settings)
+    except (AutoQuantError, LookupError, ValueError):
+        qmt = _unavailable_readiness_section("qmt.unavailable")
+    try:
+        paper_runtime = await inspect_paper_runtime_readiness(settings)
+    except (AutoQuantError, LookupError, ValueError):
+        paper_runtime = _unavailable_readiness_section("paper_runtime.unavailable")
+    try:
+        paper_watchdog = await inspect_paper_runtime_health(settings)
+    except (AutoQuantError, LookupError, ValueError):
+        paper_watchdog = _unavailable_readiness_section("paper_watchdog.unavailable")
+    try:
+        promotion = await inspect_paper_promotion(settings)
+    except (AutoQuantError, LookupError, ValueError):
+        promotion = _unavailable_readiness_section("promotion.unavailable")
+
+    retry_plan: dict[str, object] | None = None
+    if campaign_hash is not None:
+        try:
+            retry_plan = await inspect_research_data_campaign_retry_plan(
+                settings,
+                campaign_hash=campaign_hash,
+            )
+        except (AutoQuantError, LookupError, ValueError):
+            retry_plan = _unavailable_readiness_section("research_data.unavailable")
+
+    sections: dict[str, object] = {
+        "paper_runtime": paper_runtime,
+        "paper_watchdog": paper_watchdog,
+        "promotion": promotion,
+        "qmt": qmt,
+    }
+    if retry_plan is not None:
+        sections["research_data_retry_plan"] = retry_plan
+
+    blockers: set[str] = set()
+    qmt_checks = qmt.get("checks")
+    if isinstance(qmt_checks, dict):
+        blockers.update(
+            f"qmt.{code}" for code, state in qmt_checks.items() if state != "pass"
+        )
+    elif qmt.get("status") != "ok":
+        blockers.add("qmt.unavailable")
+    if paper_runtime.get("status") != "ready_for_quote_connection":
+        blockers.add(_first_readiness_blocker(paper_runtime, "paper_runtime.not_ready"))
+    if paper_watchdog.get("status") != "ok":
+        blockers.add(_first_readiness_blocker(paper_watchdog, "paper_watchdog.not_healthy"))
+    if promotion.get("status") != "ok":
+        promotion_blockers = promotion.get("blockers")
+        if isinstance(promotion_blockers, list) and promotion_blockers:
+            blockers.update(
+                str(value)
+                if str(value).startswith("promotion.")
+                else f"promotion.{value}"
+                for value in promotion_blockers
+            )
+        else:
+            blockers.add("promotion.not_ready")
+    if retry_plan is not None and retry_plan.get("status") != "no_failed_items":
+        retry_blockers = retry_plan.get("blockers")
+        if isinstance(retry_blockers, list) and retry_blockers:
+            blockers.update(str(value) for value in retry_blockers)
+        else:
+            blockers.add("research_data.retry_authorization_required")
+
+    version = "operations-readiness-report-v1"
+    report_hash = _canonical_hash(
+        {
+            "sections": sections,
+            "version": version,
+        }
+    )
+    return {
+        "blockers": sorted(blockers),
+        "broker_mutation_allowed": False,
+        "collection_started": False,
+        "generated_at": datetime.now(UTC).isoformat(),
+        "live_trading_locked": True,
+        "report_hash": report_hash,
+        "sections": sections,
+        "status": "ready" if not blockers else "blocked",
+        "storage_mutation_allowed": False,
+        "vendor_request_started": False,
+        "version": version,
+    }
+
+
 async def inspect_paper_runtime_readiness(
     settings: AppSettings,
 ) -> dict[str, object]:
@@ -4903,21 +5098,6 @@ async def inspect_paper_runtime_readiness(
         low_volatility_signals = PostgresLowVolatilityDecisionTimeSignalRepository.connect(
             dsn=postgres_dsn
         )
-        cold_start_control = await controls.ensure_fail_closed(
-            account_id=settings.paper_account_id,
-            now=datetime.now(UTC),
-        )
-        if not cold_start_control.active:
-            await controls.activate(
-                account_id=settings.paper_account_id,
-                command_id=f"paper-runtime-cold-start-{uuid4()}",
-                reason=KillSwitchReason.DEPENDENCY_UNAVAILABLE,
-                actor="paper-runtime-readiness",
-                now=max(datetime.now(UTC), cold_start_control.changed_at),
-            )
-            raise MissingCapabilityError(
-                "paper runtime cold start re-armed the inactive kill switch"
-            )
         low_volatility_readiness = await LowVolatilityPaperDeploymentGate(
             account_id=settings.paper_account_id,
             strategy_id=settings.paper_strategy_id,
@@ -4939,7 +5119,7 @@ async def inspect_paper_runtime_readiness(
         report = await PaperRuntimeReadinessGate(
             account_id=settings.paper_account_id,
             strategy_id=settings.paper_strategy_id,
-            controls=controls,
+            controls=_ReadOnlyExecutionControlView(controls),
             strategies=registry,
             executions=executions,
             broker=broker,
