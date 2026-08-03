@@ -24,7 +24,7 @@ function setText(id, value) {
 
 function statusPill(element, value) {
   element.textContent = value;
-  const style = value === "ok" || value === "completed" || value === "pass"
+  const style = value === "ok" || value === "completed" || value === "pass" || value === "ready" || value === "ready_for_quote_connection"
     ? "ok"
     : value === "degraded" || value === "running" || value === "queued"
       ? "warning"
@@ -195,6 +195,94 @@ async function createJob(event) {
     showToast("采集任务已创建并写入审计链");
     await loadJobs();
   } catch (error) { showToast(`任务创建失败：${error.message}`); }
+}
+
+function operationsSectionSummary(name, section) {
+  if (name === "qmt") {
+    const blocked = Object.entries(section.checks ?? {})
+      .filter(([, state]) => state !== "pass")
+      .map(([code]) => code);
+    return blocked.length ? blocked.join(", ") : "主机预检全部通过";
+  }
+  if (name === "promotion") {
+    return section.blockers?.join(", ") || "晋级证据门禁全部通过";
+  }
+  if (name === "research_data_retry_plan") {
+    const count = section.failed_item_count ?? 0;
+    const hash = section.plan_hash ? `${section.plan_hash.slice(0, 16)}…` : "—";
+    return `${count} 个失败分片 · ${hash}`;
+  }
+  if (section.blockers?.length) return section.blockers.join(", ");
+  if (name === "paper_watchdog") {
+    return `${section.runtime_state ?? "unknown"} · lease ${section.lease_active ? "active" : "inactive"}`;
+  }
+  if (name === "paper_runtime") {
+    return section.registration_hash
+      ? `${section.instruments?.join(", ") || "—"} · ${section.registration_hash.slice(0, 16)}…`
+      : "行情连接前证据检查";
+  }
+  return "只读证据";
+}
+
+async function loadOperationsReadiness(event) {
+  if (event) event.preventDefault();
+  const campaignHash = document.getElementById("operations-readiness-campaign").value.trim();
+  const params = new URLSearchParams();
+  if (campaignHash) params.set("campaign_hash", campaignHash);
+  const suffix = params.size ? `?${params}` : "";
+  try {
+    const data = await requestJson(`/api/v1/operations/readiness${suffix}`);
+    statusPill(document.getElementById("operations-readiness-status"), data.status);
+    setText("operations-readiness-hash", data.report_hash ?? "—");
+    setText("operations-readiness-count", `${data.blockers?.length ?? 0} 项`);
+    const safetyLocked = data.live_trading_locked === true
+      && data.storage_mutation_allowed === false
+      && data.broker_mutation_allowed === false
+      && data.vendor_request_started === false
+      && data.collection_started === false;
+    setText(
+      "operations-readiness-safety",
+      safetyLocked
+        ? "实盘锁定 · 存储只读 · 券商禁用 · 数据请求未启动"
+        : "安全字段不完整，停止后续操作",
+    );
+
+    const sectionsTable = document.getElementById("operations-readiness-sections");
+    sectionsTable.replaceChildren();
+    Object.entries(data.sections ?? {})
+      .sort(([left], [right]) => left.localeCompare(right))
+      .forEach(([name, section]) => {
+        const row = document.createElement("tr");
+        const nameCell = document.createElement("td");
+        nameCell.textContent = name;
+        row.append(nameCell);
+        const stateCell = document.createElement("td");
+        const badge = document.createElement("span");
+        statusPill(badge, section.status ?? "unavailable");
+        stateCell.append(badge);
+        row.append(stateCell);
+        const summaryCell = document.createElement("td");
+        summaryCell.textContent = operationsSectionSummary(name, section);
+        row.append(summaryCell);
+        sectionsTable.append(row);
+      });
+
+    const blockersTable = document.getElementById("operations-readiness-blockers");
+    blockersTable.replaceChildren();
+    (data.blockers ?? []).forEach((blocker, index) => {
+      const row = document.createElement("tr");
+      [index + 1, blocker].forEach(value => {
+        const cell = document.createElement("td");
+        cell.textContent = value;
+        row.append(cell);
+      });
+      blockersTable.append(row);
+    });
+  } catch (error) {
+    statusPill(document.getElementById("operations-readiness-status"), "unavailable");
+    setText("operations-readiness-safety", "报告不可用，保持全部操作锁定");
+    showToast(`运维证据读取失败：${error.message}`);
+  }
 }
 
 async function loadTrading() {
@@ -1424,5 +1512,9 @@ if (page === "/") {
   statusPill(document.getElementById("global-status"), "研究模式");
   document.getElementById("page-title").textContent = "交易中心";
   document.getElementById("activate-kill-switch").addEventListener("click", activateKillSwitch);
-  loadTrading();
+  document.getElementById("operations-readiness-form").addEventListener(
+    "submit",
+    loadOperationsReadiness,
+  );
+  Promise.all([loadTrading(), loadOperationsReadiness()]);
 }

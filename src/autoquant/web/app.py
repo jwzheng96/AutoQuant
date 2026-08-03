@@ -57,7 +57,7 @@ from autoquant.execution.qmt_session_store import (
 )
 from autoquant.execution.simulated_broker import PersistentSimulatedBroker
 from autoquant.execution.store import PostgresPaperExecutionRepository
-from autoquant.operations import configured_dsn
+from autoquant.operations import configured_dsn, inspect_operations_readiness
 from autoquant.web.backtest_store import PostgresBacktestRepository
 from autoquant.web.fundamental_validation_store import (
     PostgresFundamentalValidationRepository,
@@ -529,6 +529,19 @@ def create_app(
                 detail="portfolio validation experiment not found",
             ) from None
         return detail.model_dump(mode="json")
+
+    @app.get("/api/v1/operations/readiness")
+    async def operations_readiness(
+        campaign_hash: Annotated[
+            str | None,
+            Query(pattern=r"^[0-9a-f]{64}$"),
+        ] = None,
+        _: str = Depends(authenticated_user),
+    ) -> dict[str, object]:
+        return await inspect_operations_readiness(
+            settings,
+            campaign_hash=campaign_hash,
+        )
 
     @app.get("/api/v1/trading")
     async def trading(

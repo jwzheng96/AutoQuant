@@ -18,6 +18,16 @@ uv run autoquant operations-readiness-report `
 都通过时返回 0；`status=blocked` 或任一依赖不可用时返回 2。退出码 2 是安全阻断结果，
 不能用 shell 选项忽略后继续启动服务。
 
+同一份只读快照也可在经过 HTTP Basic 认证的操作台“交易中心”生成，或通过 API 获取：
+
+```text
+GET /api/v1/operations/readiness
+GET /api/v1/operations/readiness?campaign_hash=<64位小写SHA-256>
+```
+
+这是只读 GET 接口，没有补偿授权、采集或交易操作。操作台服务必须使用
+`AQ_ENVIRONMENT=paper` 启动；环境不符时接口返回依赖不可用并保持锁定。
+
 ## 输出判读
 
 - `report_hash` 绑定本次所有 `sections` 和报告版本，可随验收记录归档；

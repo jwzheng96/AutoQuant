@@ -320,6 +320,24 @@
               <div><span>03</span><strong>模拟执行</strong><small id="execution-store-state">读取状态中…</small></div>
               <div><span>04</span><strong>模拟盘放行</strong><small>统计证据和故障演练</small></div>
             </div>
+            <div class="readiness-console">
+              <div class="panel-title">
+                <div><p class="eyebrow">OPERATIONS EVIDENCE SNAPSHOT</p><h3>运维就绪证据</h3></div>
+                <span id="operations-readiness-status" class="pill neutral">待读取</span>
+              </div>
+              <p class="form-help">统一检查 QMT 主机、模拟盘冷启动、独立看门狗、晋级审计和可选的数据补偿计划。只读查询不会授权补偿、请求数据或触发券商操作。</p>
+              <form id="operations-readiness-form" class="readiness-form">
+                <label>可选的数据活动哈希<input id="operations-readiness-campaign" type="text" minlength="64" maxlength="64" pattern="[0-9a-f]{64}" autocomplete="off" placeholder="留空仅检查交易链；填写后绑定补偿计划"></label>
+                <button class="secondary-button" type="submit">生成只读快照</button>
+              </form>
+              <dl class="summary-list">
+                <div><dt>报告哈希</dt><dd id="operations-readiness-hash">—</dd></div>
+                <div><dt>阻断项</dt><dd id="operations-readiness-count">—</dd></div>
+                <div><dt>安全边界</dt><dd id="operations-readiness-safety">正在验证…</dd></div>
+              </dl>
+              <div class="table-wrap"><table><thead><tr><th>证据分区</th><th>状态</th><th>摘要</th></tr></thead><tbody id="operations-readiness-sections"></tbody></table></div>
+              <div class="table-wrap"><table><thead><tr><th>#</th><th>当前阻断代码</th></tr></thead><tbody id="operations-readiness-blockers"></tbody></table></div>
+            </div>
             <p class="eyebrow">RISK AUDIT</p>
             <p><strong id="risk-decision-count">—</strong> 条不可变盘前风控决策；待通过门禁：<span id="risk-remaining-gates">—</span></p>
             <p class="eyebrow">EXECUTION RECOVERY</p>

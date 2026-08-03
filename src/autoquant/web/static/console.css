@@ -99,6 +99,10 @@ td { font-variant-numeric: tabular-nums; }
 .gate-grid span { color: var(--green); font-size: 10px; font-weight: 800; }
 .gate-grid strong { margin: 24px 0 7px; }
 .gate-grid small { color: var(--muted); line-height: 1.5; }
+.readiness-console { margin: 34px 0; padding: 24px; border: 1px solid var(--line); border-radius: 14px; background: #0d1614; text-align: left; }
+.readiness-console .form-help { line-height: 1.7; }
+.readiness-form { display: grid; grid-template-columns: minmax(280px, 1fr) auto; gap: 14px; align-items: end; margin-top: 18px; }
+.readiness-form label { display: grid; gap: 8px; color: var(--muted); font-size: 11px; font-weight: 700; }
 .toast { position: fixed; right: 26px; bottom: 26px; max-width: 360px; padding: 13px 16px; background: #21312d; border: 1px solid var(--line); border-radius: 12px; opacity: 0; transform: translateY(12px); pointer-events: none; transition: .2s ease; }
 .toast.visible { opacity: 1; transform: translateY(0); }
 
@@ -117,5 +121,5 @@ td { font-variant-numeric: tabular-nums; }
   .safety-note { display: none; }
   .topbar { height: 82px; padding: 18px; }
   .page { padding: 26px 18px 60px; }
-  .metric-grid, .two-column, .gate-grid, .query-form, .research-form { grid-template-columns: 1fr; }
+  .metric-grid, .two-column, .gate-grid, .query-form, .research-form, .readiness-form { grid-template-columns: 1fr; }
 }

@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 from starlette.testclient import TestClient
@@ -848,6 +849,64 @@ def test_promotion_endpoint_is_authenticated_and_never_unlocks_live() -> None:
     assert accepted.status_code == 200
     assert accepted.json()["live_trading_ready"] is False
     assert accepted.json()["report_hash"] == "c" * 64
+
+
+def test_operations_readiness_endpoint_is_authenticated_validated_and_read_only() -> None:
+    campaign_hash = "d" * 64
+    payload = {
+        "blockers": [
+            "promotion.paper_session_count",
+            "qmt.windows_runtime",
+            "research_data.retry_authorization_required",
+        ],
+        "broker_mutation_allowed": False,
+        "collection_started": False,
+        "generated_at": "2026-08-03T08:00:00+00:00",
+        "live_trading_locked": True,
+        "report_hash": "e" * 64,
+        "sections": {
+            "promotion": {"status": "blocked"},
+            "qmt": {"status": "blocked"},
+            "research_data_retry_plan": {
+                "failed_item_count": 25,
+                "plan_hash": "f" * 64,
+                "status": "retry_authorization_required",
+            },
+        },
+        "status": "blocked",
+        "storage_mutation_allowed": False,
+        "vendor_request_started": False,
+        "version": "operations-readiness-report-v1",
+    }
+    inspect = AsyncMock(return_value=payload)
+    app = create_app(_settings(), service=FakeConsoleService())
+
+    with patch("autoquant.web.app.inspect_operations_readiness", new=inspect):
+        with TestClient(app) as client:
+            denied = client.get("/api/v1/operations/readiness")
+            invalid = client.get(
+                "/api/v1/operations/readiness?campaign_hash=invalid",
+                auth=_auth(),
+            )
+            accepted = client.get(
+                f"/api/v1/operations/readiness?campaign_hash={campaign_hash}",
+                auth=_auth(),
+            )
+            page = client.get("/trading", auth=_auth())
+
+    assert denied.status_code == 401
+    assert invalid.status_code == 422
+    assert accepted.status_code == 200
+    assert accepted.json() == payload
+    assert inspect.await_count == 1
+    assert inspect.await_args.kwargs["campaign_hash"] == campaign_hash
+    assert "operations-readiness-form" in page.text
+    assert "operations-readiness-blockers" in page.text
+    readiness_markup = page.text.split("OPERATIONS EVIDENCE SNAPSHOT", maxsplit=1)[1].split(
+        "RISK AUDIT", maxsplit=1
+    )[0]
+    assert 'type="checkbox"' not in readiness_markup
+    assert "生成只读快照" in readiness_markup
 
 
 def test_risk_endpoint_is_authenticated_and_read_only() -> None:
