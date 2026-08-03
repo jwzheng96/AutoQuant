@@ -1,0 +1,28 @@
+name: Windows PowerShell safety
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-powershell-safety-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  readiness-whatif:
+    name: Parse and run readiness WhatIf
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out pinned source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Parse scripts and prove no-op readiness export
+        shell: pwsh
+        run: .\scripts\windows\test-readiness-evidence.ps1

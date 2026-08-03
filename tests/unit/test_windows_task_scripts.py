@@ -7,6 +7,8 @@ SCRIPTS = Path("scripts/windows")
 RUNTIME = SCRIPTS / "install-paper-runtime-task.ps1"
 WATCHDOG = SCRIPTS / "install-paper-watchdog-task.ps1"
 READINESS_EXPORT = SCRIPTS / "export-readiness-evidence.ps1"
+READINESS_ACCEPTANCE = SCRIPTS / "test-readiness-evidence.ps1"
+WINDOWS_WORKFLOW = Path(".github/workflows/windows-powershell-safety.yml")
 
 
 def _text(path: Path) -> str:
@@ -95,3 +97,39 @@ def test_windows_readiness_export_is_frozen_redacted_and_fails_closed() -> None:
     assert re.findall(r"\bAQ_[A-Z0-9_]+\s*=", content) == [
         "AQ_ENVIRONMENT="
     ]
+
+
+def test_windows_readiness_acceptance_uses_only_ast_parse_and_whatif() -> None:
+    content = _text(READINESS_ACCEPTANCE)
+    lowered = content.casefold()
+
+    assert "Language.Parser]::ParseFile" in content
+    assert "export-readiness-evidence.ps1" in content
+    assert "-WhatIf" in content
+    assert "must-not-execute" in content
+    assert "$summary.what_if -ne $true" in content
+    assert "$summary.artifact_written -ne $false" in content
+    assert "$summary.signature_written -ne $false" in content
+    assert "artifact_created = $false" in content
+    assert "signature_created = $false" in content
+    assert "uv_executed = $false" in content
+    assert "operations-readiness-export" not in lowered
+    assert "order_stock" not in lowered
+
+
+def test_windows_safety_workflow_is_read_only_pinned_and_secret_free() -> None:
+    content = _text(WINDOWS_WORKFLOW)
+    lowered = content.casefold()
+
+    assert "runs-on: windows-latest" in content
+    assert "timeout-minutes: 10" in content
+    assert "permissions:\n  contents: read" in content
+    assert (
+        "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd"
+        in content
+    )
+    assert "persist-credentials: false" in content
+    assert r".\scripts\windows\test-readiness-evidence.ps1" in content
+    assert "secrets." not in lowered
+    assert "uv sync" not in lowered
+    assert "pip install" not in lowered
